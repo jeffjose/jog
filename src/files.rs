@@ -1,6 +1,8 @@
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
+use crate::rng::Rng;
+
 const RASTER_EXTS: &[&str] = &[
     "jpg", "jpeg", "jpe", "jfif", "png", "webp", "gif", "bmp", "tif", "tiff",
 ];
@@ -24,6 +26,31 @@ fn is_supported(path: &Path) -> bool {
     has_ext(path, RASTER_EXTS) || is_raw(path)
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Sort {
+    /// Natural order of the whole path.
+    Name,
+    /// Natural order of the file name, ignoring directories.
+    Filename,
+    /// Grouped by directory, then by file name.
+    Dirname,
+    /// Most recently modified first.
+    Mtime,
+    /// Smallest first.
+    Size,
+}
+
+/// How the command line asked for the playlist to be built.
+#[derive(Default)]
+pub struct Listing {
+    pub recursive: bool,
+    pub sort: Option<Sort>,
+    pub reverse: bool,
+    pub randomize: bool,
+    pub start_at: Option<PathBuf>,
+    pub filelist: Option<PathBuf>,
+}
+
 pub struct Playlist {
     pub files: Vec<PathBuf>,
     pub start: usize,
@@ -33,58 +60,102 @@ pub struct Playlist {
 ///
 /// A single file opens its whole directory, starting at that file. Otherwise
 /// directories expand to the images inside them and files are taken as given.
-pub fn collect(args: &[PathBuf]) -> Playlist {
-    if let [only] = args {
-        if only.is_file() {
-            return siblings(only);
-        }
-    }
-
+pub fn collect(args: &[PathBuf], listing: &Listing) -> Playlist {
     let mut files = Vec::new();
-    if args.is_empty() {
-        files = list_dir(Path::new("."));
-    }
-    for arg in args {
-        if arg.is_dir() {
-            files.extend(list_dir(arg));
-        } else {
-            files.push(arg.clone());
+    let mut start_at = listing.start_at.clone();
+
+    if let Some(list) = &listing.filelist {
+        match std::fs::read_to_string(list) {
+            Ok(text) => files.extend(text.lines().filter(|l| !l.is_empty()).map(PathBuf::from)),
+            Err(error) => eprintln!("jog: cannot read file list {}: {error}", list.display()),
         }
     }
-    Playlist { files, start: 0 }
-}
 
-fn siblings(file: &Path) -> Playlist {
-    let dir = match file.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    let mut files = list_dir(dir);
-    let position = files.iter().position(|f| f.file_name() == file.file_name());
-    let start = position.unwrap_or_else(|| {
-        // Explicitly named, so show it even though the extension is unknown.
-        files.insert(0, file.to_path_buf());
-        0
-    });
+    match args {
+        [only] if only.is_file() && listing.filelist.is_none() => {
+            let dir = match only.parent() {
+                Some(p) if !p.as_os_str().is_empty() => p,
+                _ => Path::new("."),
+            };
+            list_dir(dir, listing.recursive, &mut files);
+            if !files.iter().any(|f| f.file_name() == only.file_name()) {
+                // Explicitly named, so show it even though the extension is unknown.
+                files.insert(0, only.clone());
+            }
+            start_at.get_or_insert_with(|| only.clone());
+        }
+        [] if listing.filelist.is_none() => list_dir(Path::new("."), listing.recursive, &mut files),
+        _ => {
+            for arg in args {
+                if arg.is_dir() {
+                    list_dir(arg, listing.recursive, &mut files);
+                } else {
+                    files.push(arg.clone());
+                }
+            }
+        }
+    }
+
+    if let Some(sort) = listing.sort {
+        sort_files(&mut files, sort);
+    }
+    if listing.randomize {
+        Rng::from_clock().shuffle(&mut files);
+    }
+    if listing.reverse {
+        files.reverse();
+    }
+
+    let start = start_at
+        .and_then(|wanted| {
+            let by_path = files.iter().position(|f| *f == wanted);
+            by_path.or_else(|| files.iter().position(|f| f.file_name() == wanted.file_name()))
+        })
+        .unwrap_or(0);
     Playlist { files, start }
 }
 
-fn list_dir(dir: &Path) -> Vec<PathBuf> {
+/// Appends the images in `dir` in natural order, subdirectories last.
+fn list_dir(dir: &Path, recursive: bool, files: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         eprintln!("jog: cannot read directory {}", dir.display());
-        return Vec::new();
+        return;
     };
-    let mut named: Vec<(String, PathBuf)> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| is_supported(p))
-        .map(|p| {
-            let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            (name, p)
-        })
-        .collect();
-    named.sort_by(|a, b| natural_cmp(&a.0, &b.0));
-    named.into_iter().map(|(_, p)| p).collect()
+    let mut images = Vec::new();
+    let mut subdirs = Vec::new();
+    for path in entries.flatten().map(|e| e.path()) {
+        if recursive && path.is_dir() {
+            subdirs.push(path);
+        } else if is_supported(&path) {
+            images.push(path);
+        }
+    }
+    images.sort_by(|a, b| natural_cmp(&name_of(a), &name_of(b)));
+    subdirs.sort_by(|a, b| natural_cmp(&name_of(a), &name_of(b)));
+    files.extend(images);
+    for subdir in subdirs {
+        list_dir(&subdir, recursive, files);
+    }
+}
+
+fn name_of(path: &Path) -> String {
+    path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+}
+
+fn sort_files(files: &mut [PathBuf], sort: Sort) {
+    let by_filename = |a: &PathBuf, b: &PathBuf| natural_cmp(&name_of(a), &name_of(b));
+    match sort {
+        Sort::Name => files.sort_by(|a, b| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy())),
+        Sort::Filename => files.sort_by(by_filename),
+        Sort::Dirname => files.sort_by(|a, b| {
+            let dirs = (a.parent().unwrap_or(a), b.parent().unwrap_or(b));
+            natural_cmp(&dirs.0.to_string_lossy(), &dirs.1.to_string_lossy()).then_with(|| by_filename(a, b))
+        }),
+        Sort::Mtime => files.sort_by_cached_key(|f| {
+            std::cmp::Reverse(std::fs::metadata(f).and_then(|m| m.modified()).ok())
+        }),
+        Sort::Size => files.sort_by_cached_key(|f| std::fs::metadata(f).map_or(0, |m| m.len())),
+    }
 }
 
 /// Case-insensitive ordering that compares digit runs numerically, so

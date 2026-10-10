@@ -1,0 +1,1514 @@
+use std::collections::HashMap;
+use std::num::NonZeroU32;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use softbuffer::{Context, Surface};
+use winit::application::ApplicationHandler;
+use winit::dpi::PhysicalSize;
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
+use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
+use winit::window::{Fullscreen, Window, WindowId};
+
+use crate::commands::{self, Command, MenuItem};
+use crate::frame::{fit_size, Frame, Transform};
+use crate::loader::{Job, Loader, Request};
+use crate::meta::{self, Meta};
+use crate::options::{LastSlide, Options};
+use crate::render;
+use crate::rng::Rng;
+use crate::ui::{Canvas, Text};
+use crate::view::{Layout, View, Zoom};
+
+const ZOOM_STEP: f64 = 1.25;
+/// Thumbnails kept ready on each side of the current image.
+const THUMB_RADIUS: i64 = 24;
+/// How long after the last zoom or pan step the image is redrawn smoothly.
+const SETTLE: Duration = Duration::from_millis(150);
+/// Sources up to this many pixels are cheap enough to always scale smoothly.
+const SMOOTH_ALWAYS: usize = 12_000_000;
+/// Magnification of the source frame from which scaling stops being smoothed.
+const SHOW_PIXELS_AT: u32 = 4;
+const TOAST: Duration = Duration::from_millis(1500);
+const DEFAULT_SLIDE_DELAY: f64 = 3.0;
+
+const TEXT_COLOR: u32 = 0xEEEEEE;
+const DIM_TEXT_COLOR: u32 = 0x9A9A9A;
+const MENU_COLOR: u32 = 0x1E1E1E;
+const MENU_EDGE_COLOR: u32 = 0x555555;
+const HIGHLIGHT_COLOR: u32 = 0x2D5B9A;
+const PLACEHOLDER_COLOR: u32 = 0x2A2A2A;
+const GRID_COLOR: u32 = 0x101010;
+
+pub struct App {
+    options: Options,
+    files: Arc<[PathBuf]>,
+    /// File ids in viewing order. Removing an image drops it from here.
+    list: Vec<usize>,
+    pos: usize,
+    forward: bool,
+    loader: Loader,
+    transforms: HashMap<usize, Transform>,
+    /// Size images are fitted to. Using the monitor rather than the window
+    /// means resizing or leaving fullscreen never needs a fresh decode.
+    monitor: (u32, u32),
+    /// What is on screen and the file it came from. Kept while the next
+    /// image decodes, so navigation never flashes to black.
+    shown: Option<(usize, Arc<Frame>)>,
+    error: Option<String>,
+
+    view: View,
+    keep_view: bool,
+    antialias: bool,
+    settle_at: Option<Instant>,
+    /// The image layer as last rendered, reused when only overlays change.
+    scene: Vec<u32>,
+    scene_key: Option<SceneKey>,
+
+    show_filename: bool,
+    show_info: bool,
+    show_exif: bool,
+    show_actions: bool,
+    pointer_visible: bool,
+    strip_pinned: bool,
+    strip_hover: bool,
+    /// Thumbnails are only decoded once the filmstrip has been opened.
+    strip_used: bool,
+    menu: Option<Menu>,
+    grid: Option<Grid>,
+    help: bool,
+    snapshot: Option<Snapshot>,
+    toast: Option<(String, Instant)>,
+    meta: Option<(usize, Meta)>,
+    text: Option<Text>,
+
+    modifiers: ModifiersState,
+    mouse: (f64, f64),
+    drag: Option<Drag>,
+    slide_delay: Duration,
+    slide_at: Option<Instant>,
+    rng: Rng,
+
+    window: Option<Arc<Window>>,
+    surface: Option<Surface<Arc<Window>, Arc<Window>>>,
+}
+
+struct SceneKey {
+    frame: Arc<Frame>,
+    layout: Layout,
+    smooth: bool,
+    window: (u32, u32),
+}
+
+impl SceneKey {
+    fn matches(&self, other: &SceneKey) -> bool {
+        Arc::ptr_eq(&self.frame, &other.frame)
+            && (self.layout, self.smooth, self.window) == (other.layout, other.smooth, other.window)
+    }
+}
+
+enum Drag {
+    Pan,
+    Zoom { start_x: f64, start_scale: f64, anchor: (f64, f64), moved: bool },
+}
+
+struct Menu {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    px: u32,
+    rows: Vec<MenuRow>,
+    selected: Option<usize>,
+}
+
+struct MenuRow {
+    top: i32,
+    height: i32,
+    item: Option<&'static MenuItem>,
+}
+
+impl Menu {
+    fn row_at(&self, x: f64, y: f64) -> Option<usize> {
+        let (x, y) = (x as i32 - self.x, y as i32 - self.y);
+        if x < 0 || x >= self.width {
+            return None;
+        }
+        self.rows.iter().position(|row| row.item.is_some() && y >= row.top && y < row.top + row.height)
+    }
+}
+
+/// Filmstrip placement: a band along the bottom with fixed-size cells.
+#[derive(Clone, Copy)]
+struct Strip {
+    top: i32,
+    height: i32,
+    pad: i32,
+    cell_w: i32,
+    cell_h: i32,
+}
+
+impl Strip {
+    fn for_height(window_height: u32) -> Strip {
+        let height = (window_height as i32 / 12).clamp(64, 220).min(window_height as i32);
+        let pad = height / 10;
+        let cell_h = height - 2 * pad;
+        Strip { top: window_height as i32 - height, height, pad, cell_w: cell_h * 3 / 2, cell_h }
+    }
+
+    fn pitch(&self) -> i32 {
+        self.cell_w + self.pad
+    }
+}
+
+/// A scripted run for testing without a visible window: press some keys,
+/// wait for decodes, write the rendered frame to a file and quit. Driven by
+/// the `JOG_SNAPSHOT` (output `.ppm` path), `JOG_SNAPSHOT_KEYS`,
+/// `JOG_SNAPSHOT_POINTER` (`X,Y`) and `JOG_SNAPSHOT_WAIT` (ms) variables.
+struct Snapshot {
+    path: PathBuf,
+    keys: String,
+    pointer: (f64, f64),
+    wait: Duration,
+    at: Option<Instant>,
+}
+
+impl Snapshot {
+    fn from_env() -> Option<Snapshot> {
+        let var = |name: &str| std::env::var(name).ok();
+        let pointer = var("JOG_SNAPSHOT_POINTER").and_then(|text| {
+            let (x, y) = text.split_once(',')?;
+            Some((x.parse().ok()?, y.parse().ok()?))
+        });
+        let wait = var("JOG_SNAPSHOT_WAIT").and_then(|ms| ms.parse().ok()).unwrap_or(1500);
+        Some(Snapshot {
+            path: std::env::var_os("JOG_SNAPSHOT")?.into(),
+            keys: var("JOG_SNAPSHOT_KEYS").unwrap_or_default(),
+            pointer: pointer.unwrap_or((0.0, 0.0)),
+            wait: Duration::from_millis(wait),
+            at: None,
+        })
+    }
+}
+
+/// The grid view. The cursor is a list position, moved by the arrow keys or
+/// the pointer; the page on show is whichever one holds it.
+struct Grid {
+    cursor: usize,
+}
+
+/// Grid placement: equal cells filling the window above a footer line.
+#[derive(Clone, Copy)]
+struct GridLayout {
+    columns: i32,
+    rows: i32,
+    cell_w: i32,
+    cell_h: i32,
+    pad: i32,
+    left: i32,
+    top: i32,
+}
+
+impl GridLayout {
+    fn for_window(window: (u32, u32)) -> GridLayout {
+        let (width, height) = (window.0 as i32, window.1 as i32);
+        let usable = (height - Self::footer_height(window.1)).max(1);
+        let columns = (width / 240).clamp(2, 6);
+        let cell_w = (width / columns).max(1);
+        let cell_h = (cell_w * 3 / 4).min(usable);
+        let rows = (usable / cell_h).max(1);
+        GridLayout {
+            columns,
+            rows,
+            cell_w,
+            cell_h,
+            pad: (cell_w / 24).max(2),
+            left: (width - columns * cell_w) / 2,
+            top: (usable - rows * cell_h) / 2,
+        }
+    }
+
+    fn footer_height(window_height: u32) -> i32 {
+        Text::line_height(ui_px(window_height)) * 2
+    }
+
+    fn per_page(&self) -> usize {
+        (self.columns * self.rows) as usize
+    }
+
+    fn pages(&self, images: usize) -> usize {
+        images.div_ceil(self.per_page()).max(1)
+    }
+
+    fn thumb_size(&self) -> (u32, u32) {
+        ((self.cell_w - 2 * self.pad).max(1) as u32, (self.cell_h - 2 * self.pad).max(1) as u32)
+    }
+
+    /// Index within the page of the cell at a window position.
+    fn cell_at(&self, x: f64, y: f64) -> Option<usize> {
+        let column = ((x - f64::from(self.left)) / f64::from(self.cell_w)).floor() as i32;
+        let row = ((y - f64::from(self.top)) / f64::from(self.cell_h)).floor() as i32;
+        let inside = (0..self.columns).contains(&column) && (0..self.rows).contains(&row);
+        inside.then(|| (row * self.columns + column) as usize)
+    }
+}
+
+fn ui_px(window_height: u32) -> u32 {
+    (window_height / 90).clamp(13, 30)
+}
+
+impl App {
+    pub fn new(options: Options, files: Arc<[PathBuf]>, start: usize, loader: Loader) -> Self {
+        let slide_delay = Duration::from_secs_f64(options.slideshow_delay.unwrap_or(DEFAULT_SLIDE_DELAY));
+        App {
+            list: (0..files.len()).collect(),
+            pos: start,
+            forward: true,
+            loader,
+            transforms: HashMap::new(),
+            monitor: (0, 0),
+            shown: None,
+            error: None,
+            view: View { zoom: options.zoom, center: None, enlarge: options.auto_zoom },
+            keep_view: options.keep_view,
+            antialias: options.antialias,
+            settle_at: None,
+            scene: Vec::new(),
+            scene_key: None,
+            show_filename: options.draw_filename,
+            show_info: options.draw_info,
+            show_exif: options.draw_exif,
+            show_actions: options.draw_actions,
+            pointer_visible: !options.hide_pointer,
+            strip_pinned: options.filmstrip,
+            strip_hover: false,
+            strip_used: options.filmstrip,
+            menu: None,
+            grid: None,
+            help: false,
+            snapshot: Snapshot::from_env(),
+            toast: None,
+            meta: None,
+            text: None,
+            modifiers: ModifiersState::empty(),
+            mouse: (0.0, 0.0),
+            drag: None,
+            slide_delay,
+            slide_at: options.slideshow_delay.map(|_| Instant::now() + slide_delay),
+            rng: Rng::from_clock(),
+            window: None,
+            surface: None,
+            options,
+            files,
+        }
+    }
+
+    fn id(&self) -> usize {
+        self.list[self.pos]
+    }
+
+    fn path(&self) -> &Path {
+        &self.files[self.id()]
+    }
+
+    fn name(&self) -> String {
+        let path = self.path();
+        path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned()
+    }
+
+    fn window_size(&self) -> (u32, u32) {
+        self.window.as_ref().map_or((0, 0), |w| w.inner_size().into())
+    }
+
+    fn redraw(&self) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn toast(&mut self, message: impl Into<String>) {
+        self.toast = Some((message.into(), Instant::now() + TOAST));
+        self.redraw();
+    }
+
+    fn strip_visible(&self) -> bool {
+        self.strip_pinned || self.strip_hover
+    }
+
+    // ---- Loading -------------------------------------------------------
+
+    /// Tells the loader what is needed around the current position.
+    fn request(&self) {
+        if self.monitor.0 == 0 || self.monitor.1 == 0 {
+            return;
+        }
+        let len = self.list.len() as i64;
+        let pos = self.pos as i64;
+        let dir = if self.forward { 1 } else { -1 };
+
+        let mut wanted = Vec::new();
+        // The current image, then neighbours, favouring the way we are going.
+        for offset in [0, 1, -1, 2, -2, 3] {
+            let id = self.list[(pos + offset * dir).rem_euclid(len) as usize];
+            if !wanted.contains(&id) {
+                wanted.push(id);
+            }
+        }
+        // Thumbnails are sized for the monitor, like frames, so they survive
+        // window resizes.
+        let mut thumbs = Vec::new();
+        let thumb_size;
+        if let Some(grid) = &self.grid {
+            // The page on show, then the pages either side of it.
+            let per_page = GridLayout::for_window(self.window_size()).per_page() as i64;
+            let page = grid.cursor as i64 / per_page;
+            for page in [page, page + 1, page - 1] {
+                let positions = (page * per_page).max(0)..((page + 1) * per_page).min(len);
+                thumbs.extend(positions.map(|at| self.list[at as usize]));
+            }
+            thumb_size = GridLayout::for_window(self.monitor).thumb_size();
+        } else {
+            if self.strip_used {
+                for distance in 0..=THUMB_RADIUS {
+                    for at in [pos + distance, pos - distance] {
+                        if (0..len).contains(&at) && !thumbs.contains(&self.list[at as usize]) {
+                            thumbs.push(self.list[at as usize]);
+                        }
+                    }
+                }
+            }
+            let strip = Strip::for_height(self.monitor.1);
+            thumb_size = (strip.cell_w as u32, strip.cell_h as u32);
+        }
+        self.loader.request(Request {
+            wanted,
+            target: self.monitor,
+            full: self.needs_full().then(|| self.id()),
+            thumbs,
+            thumb_size,
+        });
+    }
+
+    /// Whether the view shows more detail than the fitted frame holds.
+    fn needs_full(&self) -> bool {
+        let Some((id, frame)) = &self.shown else { return false };
+        let window = self.window_size();
+        if *id != self.id() || frame.is_native() || window.0 == 0 || window.1 == 0 {
+            return false;
+        }
+        self.view.layout(frame.native, window).width > frame.width
+    }
+
+    /// Syncs the title and displayed frame with the current image.
+    fn refresh(&mut self) {
+        let id = self.id();
+        match self.loader.fitted(id) {
+            Some(Ok(frame)) => {
+                self.shown = Some((id, frame));
+                self.error = None;
+            }
+            Some(Err(reason)) => {
+                self.shown = None;
+                self.error = Some(reason);
+            }
+            None => {}
+        }
+        // The frame that just arrived may call for a full-resolution decode.
+        self.request();
+        if let Some(window) = &self.window {
+            window.set_title(&format!("{} [{}/{}] - jog", self.name(), self.pos + 1, self.list.len()));
+        }
+        self.redraw();
+    }
+
+    fn update_monitor(&mut self) {
+        let Some(size) = self.window.as_ref().and_then(|w| w.current_monitor()).map(|m| m.size()) else {
+            return;
+        };
+        if size.width > 0 && size.height > 0 && self.monitor != (size.width, size.height) {
+            self.monitor = (size.width, size.height);
+            self.request();
+        }
+    }
+
+    // ---- Navigation ----------------------------------------------------
+
+    fn go_to(&mut self, pos: usize, forward: bool) {
+        if pos == self.pos {
+            return;
+        }
+        self.pos = pos;
+        self.forward = forward;
+        self.error = None;
+        self.reset_view();
+        if self.slide_at.is_some() {
+            self.slide_at = Some(Instant::now() + self.slide_delay);
+        }
+        self.request();
+        self.refresh();
+    }
+
+    fn reset_view(&mut self) {
+        if !self.keep_view {
+            self.view = View { zoom: self.options.zoom, center: None, enlarge: self.view.enlarge };
+        }
+    }
+
+    fn step(&mut self, forward: bool) {
+        let len = self.list.len();
+        let pos = if forward { (self.pos + 1) % len } else { (self.pos + len - 1) % len };
+        self.go_to(pos, forward);
+    }
+
+    /// Moves about 5% of the way through the list.
+    fn jump(&mut self, forward: bool) {
+        let len = self.list.len() as i64;
+        let distance = (len / 20).max(1) * if forward { 1 } else { -1 };
+        self.go_to((self.pos as i64 + distance).rem_euclid(len) as usize, forward);
+    }
+
+    /// Position of the first image of the next or previous directory.
+    fn other_dir(&self, forward: bool) -> Option<usize> {
+        let len = self.list.len();
+        let dir = |pos: usize| self.files[self.list[pos]].parent();
+        let step = |pos: usize| if forward { (pos + 1) % len } else { (pos + len - 1) % len };
+
+        let here = dir(self.pos);
+        let mut pos = step(self.pos);
+        while pos != self.pos && dir(pos) == here {
+            pos = step(pos);
+        }
+        if pos == self.pos {
+            return None;
+        }
+        if !forward {
+            let there = dir(pos);
+            while pos > 0 && dir(pos - 1) == there {
+                pos -= 1;
+            }
+        }
+        Some(pos)
+    }
+
+    fn remove_current(&mut self, event_loop: &ActiveEventLoop) {
+        let id = self.list.remove(self.pos);
+        self.transforms.remove(&id);
+        if self.list.is_empty() {
+            event_loop.exit();
+            return;
+        }
+        if self.pos >= self.list.len() {
+            self.pos = 0;
+        }
+        self.error = None;
+        self.reset_view();
+        self.request();
+        self.refresh();
+    }
+
+    fn advance_slideshow(&mut self, event_loop: &ActiveEventLoop) {
+        self.slide_at = Some(Instant::now() + self.slide_delay);
+        if self.pos + 1 == self.list.len() {
+            match self.options.on_last_slide {
+                LastSlide::Resume => {}
+                LastSlide::Hold => {
+                    self.slide_at = None;
+                    return;
+                }
+                LastSlide::Quit => {
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
+        self.step(true);
+    }
+
+    // ---- View ----------------------------------------------------------
+
+    fn native(&self) -> Option<(u32, u32)> {
+        self.shown.as_ref().map(|(_, frame)| frame.native)
+    }
+
+    /// Call after any zoom or pan change.
+    fn view_changed(&mut self) {
+        self.settle_at = Some(Instant::now() + SETTLE);
+        self.request();
+        self.redraw();
+    }
+
+    fn set_zoom(&mut self, zoom: Zoom) {
+        self.view.zoom = zoom;
+        self.view.center = None;
+        self.view_changed();
+    }
+
+    /// Zooms around `anchor`, a window position, or the middle of the window.
+    fn zoom_by(&mut self, factor: f64, anchor: Option<(f64, f64)>) {
+        let Some(native) = self.native() else { return };
+        let window = self.window_size();
+        let anchor = anchor.unwrap_or((f64::from(window.0) / 2.0, f64::from(window.1) / 2.0));
+        let scale = self.view.scale(native, window) * factor;
+        self.view.zoom_to(scale, anchor, native, window);
+        self.view_changed();
+    }
+
+    fn pan(&mut self, dx: f64, dy: f64) {
+        let Some(native) = self.native() else { return };
+        self.view.pan(dx, dy, native, self.window_size());
+        self.view_changed();
+    }
+
+    fn transform(&mut self, step: Transform) {
+        let id = self.id();
+        let total = self.transforms.entry(id).or_default();
+        *total = total.then(step);
+        self.loader.set_transform(id, *total);
+        // Turn what is on screen right away; the loader follows with a
+        // properly fitted frame.
+        if let Some((shown_id, frame)) = &self.shown {
+            if *shown_id == id {
+                self.shown = Some((id, Arc::new(frame.transformed(step))));
+            }
+        }
+        self.view.center = None;
+        self.view_changed();
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        let Some(window) = &self.window else { return };
+        let fullscreen = window.fullscreen().is_none().then_some(Fullscreen::Borderless(None));
+        window.set_fullscreen(fullscreen);
+    }
+
+    fn size_window_to_image(&mut self) {
+        let (Some(window), Some(native)) = (&self.window, self.native()) else { return };
+        if window.fullscreen().is_some() {
+            return;
+        }
+        let scale = match self.view.zoom {
+            Zoom::Scale(scale) => scale,
+            _ => 1.0,
+        };
+        let scaled = |v: u32| ((f64::from(v) * scale).round() as u32).max(1);
+        let (width, height) = fit_size((scaled(native.0), scaled(native.1)), self.monitor, false);
+        let _ = window.request_inner_size(PhysicalSize::new(width, height));
+    }
+
+    // ---- Commands ------------------------------------------------------
+
+    fn execute(&mut self, command: Command, event_loop: &ActiveEventLoop) {
+        use Command::*;
+        match command {
+            Next => self.step(true),
+            Previous => self.step(false),
+            First => self.go_to(0, true),
+            Last => self.go_to(self.list.len() - 1, false),
+            JumpForward => self.jump(true),
+            JumpBack => self.jump(false),
+            Random => {
+                let len = self.list.len();
+                if len > 1 {
+                    let pick = self.rng.below(len - 1);
+                    self.go_to(if pick >= self.pos { pick + 1 } else { pick }, true);
+                }
+            }
+            NextDir | PreviousDir => {
+                let forward = command == NextDir;
+                if let Some(pos) = self.other_dir(forward) {
+                    self.go_to(pos, forward);
+                }
+            }
+            ZoomIn => self.zoom_by(ZOOM_STEP, None),
+            ZoomOut => self.zoom_by(1.0 / ZOOM_STEP, None),
+            ZoomActual => self.set_zoom(Zoom::Scale(1.0)),
+            ZoomFit => self.set_zoom(Zoom::Fit),
+            ZoomFill => self.set_zoom(Zoom::Fill),
+            ToggleEnlarge => {
+                self.view.enlarge = !self.view.enlarge;
+                self.toast(if self.view.enlarge { "Enlarging small images" } else { "Small images at actual size" });
+                self.view_changed();
+            }
+            ToggleKeepView => {
+                self.keep_view = !self.keep_view;
+                self.toast(if self.keep_view { "Keeping zoom between images" } else { "Zoom resets between images" });
+            }
+            Scroll(dx, dy, page) => {
+                let window = self.window_size();
+                let amount = |size: u32, dir: i8| f64::from(size) * f64::from(dir) / if page { 1.0 } else { 10.0 };
+                // Scrolling right moves the image left.
+                self.pan(-amount(window.0, dx), -amount(window.1, dy));
+            }
+            RotateRight => self.transform(Transform::CW),
+            RotateLeft => self.transform(Transform::CCW),
+            Flip => self.transform(Transform::FLIP),
+            Mirror => self.transform(Transform::MIRROR),
+            ToggleAntialias => {
+                self.antialias = !self.antialias;
+                self.toast(if self.antialias { "Smooth scaling on" } else { "Smooth scaling off" });
+            }
+            Render => {
+                self.settle_at = None;
+                self.redraw();
+            }
+            ToggleFullscreen => self.toggle_fullscreen(),
+            ToggleFilmstrip => {
+                self.strip_pinned = !self.strip_pinned;
+                self.strip_used = true;
+                self.request();
+                self.redraw();
+            }
+            ToggleFilename => self.show_filename = !self.show_filename,
+            ToggleInfo => self.show_info = !self.show_info,
+            ToggleExif => self.show_exif = !self.show_exif,
+            ToggleActions => self.show_actions = !self.show_actions,
+            TogglePointer => {
+                self.pointer_visible = !self.pointer_visible;
+                if let Some(window) = &self.window {
+                    window.set_cursor_visible(self.pointer_visible);
+                }
+            }
+            ToggleMenu => match self.menu.take() {
+                Some(_) => {}
+                None => self.open_menu(),
+            },
+            ToggleGrid => self.toggle_grid(),
+            ToggleHelp => self.help = !self.help,
+            ToggleSlideshow => {
+                if self.slide_at.take().is_some() {
+                    self.toast("Slideshow paused");
+                } else {
+                    self.slide_at = Some(Instant::now() + self.slide_delay);
+                    self.toast(format!("Slideshow, {}s per image", self.slide_delay.as_secs_f64()));
+                }
+            }
+            SizeToImage => self.size_window_to_image(),
+            Reload => {
+                self.loader.invalidate(self.id());
+                self.meta = None;
+                self.request();
+            }
+            Remove => self.remove_current(event_loop),
+            Trash => self.trash_current(event_loop),
+            Save => {
+                let copy = format!("jog_{}_{}", std::process::id(), self.name());
+                match std::fs::copy(self.path(), &copy) {
+                    Ok(_) => self.toast(format!("Saved {copy}")),
+                    Err(error) => self.toast(format!("Could not save {copy}: {error}")),
+                }
+            }
+            SaveFilelist => {
+                let name = format!("jog_{}_filelist", std::process::id());
+                let lines: String =
+                    self.list.iter().map(|&id| format!("{}\n", self.files[id].display())).collect();
+                match std::fs::write(&name, lines) {
+                    Ok(()) => self.toast(format!("Saved {name}")),
+                    Err(error) => self.toast(format!("Could not save {name}: {error}")),
+                }
+            }
+            Action(slot) => self.run_action(slot),
+            Quit => event_loop.exit(),
+        }
+        self.redraw();
+    }
+
+    fn trash_current(&mut self, event_loop: &ActiveEventLoop) {
+        let name = self.name();
+        let status = std::process::Command::new("gio").arg("trash").arg("--").arg(self.path()).status();
+        if status.is_ok_and(|s| s.success()) {
+            self.toast(format!("Moved to trash: {name}"));
+            self.remove_current(event_loop);
+        } else {
+            self.toast(format!("Could not move {name} to trash"));
+        }
+    }
+
+    fn run_action(&mut self, slot: usize) {
+        let Some(template) = &self.options.actions[slot] else {
+            self.toast(format!("No action {slot} defined"));
+            return;
+        };
+        let command = expand_action(template, self.path());
+        match std::process::Command::new("sh").arg("-c").arg(&command).spawn() {
+            Ok(mut child) => {
+                // Reap the child without holding up the viewer.
+                std::thread::spawn(move || child.wait());
+                self.toast(format!("Action {slot}: {command}"));
+            }
+            Err(error) => self.toast(format!("Action {slot} failed: {error}")),
+        }
+    }
+
+    fn is_checked(&self, command: Command) -> bool {
+        use Command::*;
+        match command {
+            ToggleEnlarge => self.view.enlarge,
+            ToggleFullscreen => self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
+            ToggleFilmstrip => self.strip_pinned,
+            ToggleFilename => self.show_filename,
+            ToggleInfo => self.show_info,
+            ToggleExif => self.show_exif,
+            ToggleSlideshow => self.slide_at.is_some(),
+            _ => false,
+        }
+    }
+
+    // ---- Menu ----------------------------------------------------------
+
+    fn open_menu(&mut self) {
+        let (width, height) = self.window_size();
+        let px = ui_px(height);
+        let text = self.text.get_or_insert_with(Text::load);
+        let (row_height, separator_height, pad) = (px as i32 * 9 / 5, px as i32 * 3 / 5, px as i32 / 2);
+
+        let items = commands::MENU.iter().flatten();
+        let label_width = items.clone().map(|i| text.width(i.label, px)).max().unwrap_or(0);
+        let keys_width = items.map(|i| text.width(i.keys, px)).max().unwrap_or(0);
+        // Padding, a gutter for check marks, the label, a gap and the keys.
+        let menu_width = pad + px as i32 + label_width + px as i32 * 2 + keys_width + pad;
+
+        let mut top = pad;
+        let mut rows = Vec::new();
+        for entry in commands::MENU {
+            let row_height = if entry.is_some() { row_height } else { separator_height };
+            rows.push(MenuRow { top, height: row_height, item: entry.as_ref() });
+            top += row_height;
+        }
+        let menu_height = top + pad;
+
+        self.menu = Some(Menu {
+            x: (self.mouse.0 as i32).clamp(0, (width as i32 - menu_width).max(0)),
+            y: (self.mouse.1 as i32).clamp(0, (height as i32 - menu_height).max(0)),
+            width: menu_width,
+            height: menu_height,
+            px,
+            rows,
+            selected: None,
+        });
+    }
+
+    fn menu_key(&mut self, key: Key<&str>, event_loop: &ActiveEventLoop) {
+        let Some(menu) = &mut self.menu else { return };
+        let step = |menu: &mut Menu, forward: bool| {
+            let len = menu.rows.len();
+            let mut at = menu.selected.unwrap_or(if forward { len - 1 } else { 0 });
+            loop {
+                at = if forward { (at + 1) % len } else { (at + len - 1) % len };
+                if menu.rows[at].item.is_some() {
+                    break menu.selected = Some(at);
+                }
+            }
+        };
+        match key {
+            Key::Named(NamedKey::ArrowDown) => step(menu, true),
+            Key::Named(NamedKey::ArrowUp) => step(menu, false),
+            Key::Named(NamedKey::Enter) => self.activate_menu(event_loop),
+            Key::Named(NamedKey::Escape) | Key::Character("m") => self.menu = None,
+            _ => {}
+        }
+        self.redraw();
+    }
+
+    /// Closes the menu, running the selected item if there is one.
+    fn activate_menu(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(menu) = self.menu.take() else { return };
+        if let Some(item) = menu.selected.and_then(|row| menu.rows[row].item) {
+            self.execute(item.command, event_loop);
+        }
+        self.redraw();
+    }
+
+    // ---- Grid ----------------------------------------------------------
+
+    fn toggle_grid(&mut self) {
+        self.grid = match self.grid {
+            Some(_) => None,
+            None => Some(Grid { cursor: self.pos }),
+        };
+        self.menu = None;
+        self.drag = None;
+        self.request();
+        self.redraw();
+    }
+
+    /// Moves the grid cursor by a number of images, stopping at either end
+    /// of the list. The page on show follows the cursor.
+    fn move_cursor(&mut self, by: i64) {
+        let last = self.list.len() as i64 - 1;
+        let Some(grid) = &mut self.grid else { return };
+        grid.cursor = (grid.cursor as i64).saturating_add(by).clamp(0, last) as usize;
+        self.request();
+        self.redraw();
+    }
+
+    /// Puts the grid cursor on the thumbnail under the pointer, if any.
+    fn point_cursor(&mut self) -> bool {
+        let layout = GridLayout::for_window(self.window_size());
+        let (len, (x, y)) = (self.list.len(), self.mouse);
+        let Some(grid) = &mut self.grid else { return false };
+        let first = grid.cursor / layout.per_page() * layout.per_page();
+        let Some(pos) = layout.cell_at(x, y).map(|cell| first + cell).filter(|pos| *pos < len) else {
+            return false;
+        };
+        if pos != grid.cursor {
+            grid.cursor = pos;
+            self.redraw();
+        }
+        true
+    }
+
+    /// Leaves the grid to view the image under the cursor.
+    fn open_from_grid(&mut self) {
+        let Some(grid) = self.grid.take() else { return };
+        self.go_to(grid.cursor, grid.cursor >= self.pos);
+        self.request();
+        self.redraw();
+    }
+
+    /// Moves the grid cursor one cell. Stepping off the left or right edge
+    /// lands on the same row of the neighbouring page; the top and bottom
+    /// edges stop it.
+    fn step_cursor(&mut self, dx: i64, dy: i64) {
+        let layout = GridLayout::for_window(self.window_size());
+        let Some(grid) = &self.grid else { return };
+        let (columns, rows) = (i64::from(layout.columns), i64::from(layout.rows));
+        let (per_page, len) = (layout.per_page() as i64, self.list.len() as i64);
+        let cursor = grid.cursor as i64;
+        let (column, row) = (cursor % per_page % columns, cursor % per_page / columns);
+
+        let (to_column, to_row) = (column + dx, row + dy);
+        let mut target = cursor + dx + dy * columns;
+        if to_column >= columns {
+            target = cursor + per_page - (columns - 1);
+            // A short last page may not reach this row; take its last image.
+            let next_page = (cursor / per_page + 1) * per_page;
+            if next_page >= len {
+                return;
+            }
+            target = target.min(len - 1);
+        } else if to_column < 0 {
+            target = cursor - per_page + (columns - 1);
+        }
+        if !(0..rows).contains(&to_row) || !(0..len).contains(&target) {
+            return;
+        }
+        self.move_cursor(target - cursor);
+    }
+
+    /// Shuffles the viewing order. The image being viewed stays current.
+    fn shuffle(&mut self) {
+        let id = self.id();
+        self.rng.shuffle(&mut self.list);
+        self.pos = self.list.iter().position(|&other| other == id).unwrap_or(0);
+        self.request();
+        self.refresh();
+    }
+
+    fn grid_key(&mut self, key: Key<&str>, event_loop: &ActiveEventLoop) {
+        let layout = GridLayout::for_window(self.window_size());
+        match key {
+            Key::Named(NamedKey::Escape) => return self.toggle_grid(),
+            Key::Named(NamedKey::ArrowUp) => return self.step_cursor(0, -1),
+            Key::Named(NamedKey::ArrowDown) => return self.step_cursor(0, 1),
+            _ => {}
+        }
+        match commands::for_key(key, ModifiersState::empty(), false) {
+            Some(Command::Next) => self.step_cursor(1, 0),
+            Some(Command::Previous) => self.step_cursor(-1, 0),
+            Some(Command::Random) => self.shuffle(),
+            Some(Command::JumpForward) => self.move_cursor(layout.per_page() as i64),
+            Some(Command::JumpBack) => self.move_cursor(-(layout.per_page() as i64)),
+            Some(Command::First) => self.move_cursor(i64::MIN),
+            Some(Command::Last) => self.move_cursor(i64::MAX),
+            Some(Command::Action(0)) => self.open_from_grid(),
+            Some(command @ (Command::ToggleGrid | Command::ToggleHelp | Command::ToggleFullscreen | Command::Quit)) => {
+                self.execute(command, event_loop)
+            }
+            _ => {}
+        }
+    }
+
+    // ---- Input ---------------------------------------------------------
+
+    fn key_pressed(&mut self, key: Key<&str>, repeat: bool, numpad: bool, event_loop: &ActiveEventLoop) {
+        if self.help {
+            // Any key dismisses the list of shortcuts.
+            self.help = false;
+            return self.redraw();
+        }
+        if self.menu.is_some() {
+            return self.menu_key(key, event_loop);
+        }
+        if self.grid.is_some() {
+            return self.grid_key(key, event_loop);
+        }
+        if let Some(command) = commands::for_key(key, self.modifiers, numpad) {
+            if !repeat || command.repeats() {
+                self.execute(command, event_loop);
+            }
+        }
+    }
+
+    fn mouse_moved(&mut self, x: f64, y: f64) {
+        let (dx, dy) = (x - self.mouse.0, y - self.mouse.1);
+        self.mouse = (x, y);
+
+        if let Some(menu) = &mut self.menu {
+            let hovered = menu.row_at(x, y);
+            if hovered != menu.selected {
+                menu.selected = hovered;
+                self.redraw();
+            }
+            return;
+        }
+        if self.grid.is_some() {
+            self.point_cursor();
+            return;
+        }
+        match &mut self.drag {
+            Some(Drag::Pan) => self.pan(dx, dy),
+            Some(Drag::Zoom { start_x, start_scale, anchor, moved }) => {
+                *moved = true;
+                let (scale, anchor) = (*start_scale * ((x - *start_x) / 300.0).exp(), *anchor);
+                if let Some(native) = self.native() {
+                    self.view.zoom_to(scale, anchor, native, self.window_size());
+                    self.view_changed();
+                }
+            }
+            None => {
+                let height = self.window_size().1;
+                // A thin strip at the bottom edge opens the filmstrip; once
+                // open, it stays while the pointer is anywhere over it.
+                let zone = if self.strip_visible() { Strip::for_height(height).height } else { (height as i32 / 50).max(6) };
+                self.set_strip_hover(y >= f64::from(height as i32 - zone));
+            }
+        }
+    }
+
+    fn set_strip_hover(&mut self, hover: bool) {
+        if hover == self.strip_hover {
+            return;
+        }
+        self.strip_hover = hover;
+        if hover && !self.strip_used {
+            self.strip_used = true;
+            self.request();
+        }
+        self.redraw();
+    }
+
+    fn mouse_button(&mut self, button: MouseButton, pressed: bool, event_loop: &ActiveEventLoop) {
+        let (x, y) = self.mouse;
+        if self.help {
+            self.help = !pressed;
+            return self.redraw();
+        }
+        if self.grid.is_some() {
+            if button == MouseButton::Left && pressed && self.point_cursor() {
+                self.open_from_grid();
+            }
+            return;
+        }
+        match (button, pressed) {
+            (MouseButton::Left, true) if self.menu.is_some() => {
+                if let Some(menu) = &mut self.menu {
+                    menu.selected = menu.row_at(x, y);
+                }
+                self.activate_menu(event_loop);
+            }
+            (MouseButton::Left, true) => {
+                let (width, height) = self.window_size();
+                let strip = Strip::for_height(height);
+                if self.strip_visible() && y >= f64::from(strip.top) {
+                    let first_cell = f64::from(width as i32 / 2 - strip.cell_w / 2 - strip.pad / 2);
+                    let offset = ((x - first_cell) / f64::from(strip.pitch())).floor() as i64;
+                    let pos = self.pos as i64 + offset;
+                    if (0..self.list.len() as i64).contains(&pos) {
+                        self.go_to(pos as usize, offset > 0);
+                    }
+                } else {
+                    self.drag = Some(Drag::Pan);
+                }
+            }
+            (MouseButton::Middle, true) => {
+                if let Some(native) = self.native() {
+                    let start_scale = self.view.scale(native, self.window_size());
+                    self.drag = Some(Drag::Zoom { start_x: x, start_scale, anchor: (x, y), moved: false });
+                }
+            }
+            (MouseButton::Left | MouseButton::Middle, false) => {
+                if let Some(Drag::Zoom { moved: false, .. }) = self.drag.take() {
+                    self.execute(Command::ZoomActual, event_loop);
+                }
+            }
+            (MouseButton::Right, true) => self.execute(Command::ToggleMenu, event_loop),
+            _ => {}
+        }
+    }
+
+    fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+            MouseScrollDelta::PixelDelta(position) => position.y / 50.0,
+        };
+        if lines == 0.0 || self.menu.is_some() {
+            return;
+        }
+        if self.grid.is_some() {
+            let per_page = GridLayout::for_window(self.window_size()).per_page() as i64;
+            self.move_cursor(if lines < 0.0 { per_page } else { -per_page });
+        } else if self.modifiers.control_key() {
+            self.zoom_by(ZOOM_STEP.powf(lines), Some(self.mouse));
+        } else {
+            self.step(lines < 0.0);
+        }
+    }
+
+    // ---- Snapshots -----------------------------------------------------
+
+    /// Once the first image is up, presses the scripted keys and schedules
+    /// the snapshot. Does nothing in a normal run.
+    fn start_snapshot(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(snapshot) = &mut self.snapshot else { return };
+        if snapshot.at.is_some() {
+            return;
+        }
+        snapshot.at = Some(Instant::now() + snapshot.wait);
+        self.mouse = snapshot.pointer;
+        for key in snapshot.keys.clone().chars() {
+            self.key_pressed(Key::Character(&key.to_string()), false, false, event_loop);
+        }
+        self.mouse_moved(self.mouse.0, self.mouse.1);
+    }
+
+    /// Writes what would be on screen to the snapshot file and quits.
+    fn finish_snapshot(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(snapshot) = self.snapshot.take() else { return };
+        let window = self.window_size();
+        let mut pixels = vec![0u32; window.0 as usize * window.1 as usize];
+        self.settle_at = None;
+        self.paint(&mut pixels, window);
+
+        let mut ppm = format!("P6 {} {} 255\n", window.0, window.1).into_bytes();
+        ppm.extend(pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
+        if let Err(error) = std::fs::write(&snapshot.path, ppm) {
+            eprintln!("jog: cannot write {}: {error}", snapshot.path.display());
+        }
+        event_loop.exit();
+    }
+
+    // ---- Drawing -------------------------------------------------------
+
+    fn draw(&mut self) {
+        let (Some(window), Some(mut surface)) = (self.window.clone(), self.surface.take()) else { return };
+        let size = window.inner_size();
+        if let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
+            if surface.resize(width, height).is_ok() {
+                if let Ok(mut buffer) = surface.buffer_mut() {
+                    self.paint(&mut buffer, (size.width, size.height));
+                    window.pre_present_notify();
+                    let _ = buffer.present();
+                }
+            }
+        }
+        self.surface = Some(surface);
+    }
+
+    /// The frame to draw from: the full-resolution one when it is loaded.
+    fn source(&self) -> Option<Arc<Frame>> {
+        let (id, frame) = self.shown.as_ref()?;
+        let full = if *id == self.id() { self.loader.full(*id) } else { None };
+        Some(full.unwrap_or_else(|| frame.clone()))
+    }
+
+    fn paint(&mut self, pixels: &mut [u32], window: (u32, u32)) {
+        let source = if self.grid.is_some() { None } else { self.source() };
+        match source {
+            None if self.grid.is_some() => {
+                pixels.fill(GRID_COLOR);
+                self.draw_grid(&mut Canvas::new(pixels, window.0, window.1));
+            }
+            Some(frame) => {
+                let layout = self.view.layout(frame.native, window);
+                // Big sources are scaled crudely while zooming or panning,
+                // then smoothly once the view has settled.
+                let settled = self.settle_at.is_none() || frame.pixels.len() <= SMOOTH_ALWAYS;
+                // Past a few times magnification, show the actual pixels.
+                let magnified = layout.width >= frame.width * SHOW_PIXELS_AT;
+                let smooth = self.antialias && settled && !magnified;
+                let key = SceneKey { frame, layout, smooth, window };
+                if !self.scene_key.as_ref().is_some_and(|current| current.matches(&key)) {
+                    self.scene.resize(pixels.len(), 0);
+                    let background = self.options.background;
+                    render::draw_image(&mut self.scene, window, &key.frame, layout, smooth, background);
+                    self.scene_key = Some(key);
+                }
+                pixels.copy_from_slice(&self.scene);
+            }
+            None => pixels.fill(self.options.background),
+        }
+        self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
+    }
+
+    fn draw_overlays(&mut self, canvas: &mut Canvas) {
+        let (width, height) = (canvas.width, canvas.height);
+        let px = ui_px(height as u32);
+        let margin = px as i32;
+        // The grid replaces the image and everything describing it.
+        let viewing = self.grid.is_none();
+        let strip = (viewing && self.strip_visible()).then(|| Strip::for_height(height as u32));
+        if let Some(strip) = strip {
+            self.draw_strip(canvas, strip);
+        }
+        let bottom = strip.map_or(height, |s| s.top) - margin;
+
+        let mut top_left = Vec::new();
+        if viewing && self.show_filename {
+            top_left.push(format!("{}   [{}/{}]", self.name(), self.pos + 1, self.list.len()));
+        }
+        if viewing && self.show_info {
+            top_left.push(self.info_line());
+        }
+        let exif = if viewing && self.show_exif { self.current_meta().exif.clone() } else { Vec::new() };
+        let footer: Vec<String> = self.grid_footer().into_iter().collect();
+        let mut actions = Vec::new();
+        if viewing && self.show_actions {
+            let defined = self.options.actions.iter().enumerate();
+            actions.extend(defined.filter_map(|(slot, a)| Some(format!("{slot}: {}", a.as_ref()?))));
+            if actions.is_empty() {
+                actions.push("No actions defined (see --action)".to_string());
+            }
+        }
+        let toast: Vec<String> = self.toast.iter().map(|(message, _)| message.clone()).collect();
+        let error: Vec<String> = match (&self.error, &self.shown) {
+            (Some(reason), None) if viewing => vec![format!("Cannot show {}", self.name()), reason.clone()],
+            _ => Vec::new(),
+        };
+
+        let blocks = [&top_left, &exif, &actions, &toast, &error, &footer];
+        let nothing_to_write = blocks.iter().all(|lines| lines.is_empty());
+        if nothing_to_write && self.menu.is_none() && !self.help {
+            return;
+        }
+        let mut text = self.text.take().unwrap_or_else(Text::load);
+        text_block(canvas, &mut text, &footer, px, |w, h| ((width - w) / 2, height - h));
+        text_block(canvas, &mut text, &top_left, px, |_, _| (margin, margin));
+        text_block(canvas, &mut text, &exif, px, |_, h| (margin, bottom - h));
+        text_block(canvas, &mut text, &actions, px, |w, h| (width - margin - w, bottom - h));
+        text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w, margin));
+        text_block(canvas, &mut text, &error, px, |w, h| ((width - w) / 2, (height - h) / 2));
+        if let Some(menu) = &self.menu {
+            self.draw_menu(canvas, &mut text, menu);
+        }
+        if self.help {
+            draw_help(canvas, &mut text, px);
+        }
+        self.text = Some(text);
+    }
+
+    fn draw_grid(&self, canvas: &mut Canvas) {
+        let Some(grid) = &self.grid else { return };
+        let layout = GridLayout::for_window((canvas.width as u32, canvas.height as u32));
+        let first = grid.cursor / layout.per_page() * layout.per_page();
+        let edge = (layout.pad / 3).max(2);
+
+        for (cell, pos) in (first..self.list.len()).take(layout.per_page()).enumerate() {
+            let (column, row) = (cell as i32 % layout.columns, cell as i32 / layout.columns);
+            let left = layout.left + column * layout.cell_w + layout.pad;
+            let top = layout.top + row * layout.cell_h + layout.pad;
+            let (cell_w, cell_h) = (layout.cell_w - 2 * layout.pad, layout.cell_h - 2 * layout.pad);
+            match self.loader.thumb(self.list[pos]) {
+                Some(thumb) => {
+                    let (w, h) = fit_size((thumb.width, thumb.height), (cell_w as u32, cell_h as u32), false);
+                    let (w, h) = (w as i32, h as i32);
+                    canvas.image(&thumb, left + (cell_w - w) / 2, top + (cell_h - h) / 2, w, h);
+                }
+                None => canvas.fill(left, top, cell_w, cell_h, PLACEHOLDER_COLOR),
+            }
+            // The cursor is boxed brightly, the image being viewed quietly.
+            if pos == grid.cursor || pos == self.pos {
+                let color = if pos == grid.cursor { TEXT_COLOR } else { HIGHLIGHT_COLOR };
+                canvas.outline(left - edge, top - edge, cell_w + 2 * edge, cell_h + 2 * edge, edge, color);
+            }
+        }
+    }
+
+    /// The line under the grid: the image under the cursor and the page.
+    fn grid_footer(&self) -> Option<String> {
+        let grid = self.grid.as_ref()?;
+        let layout = GridLayout::for_window(self.window_size());
+        let pages = layout.pages(self.list.len());
+        let path = &self.files[self.list[grid.cursor]];
+        let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+        let mut footer = format!("{name}   [{}/{}]", grid.cursor + 1, self.list.len());
+        if pages > 1 {
+            footer.push_str(&format!("      Page {} of {pages}", grid.cursor / layout.per_page() + 1));
+        }
+        Some(footer)
+    }
+
+    fn info_line(&mut self) -> String {
+        let window = self.window_size();
+        let size = self.current_meta().size.map(meta::human_size);
+        let Some(native) = self.native() else { return size.unwrap_or_default() };
+        let percent = self.view.scale(native, window) * 100.0;
+        let mut line = format!("{} x {}   {percent:.0}%", native.0, native.1);
+        if let Some(size) = size {
+            line.push_str(&format!("   {size}"));
+        }
+        line
+    }
+
+    fn current_meta(&mut self) -> &Meta {
+        let id = self.id();
+        if self.meta.as_ref().is_none_or(|(meta_id, _)| *meta_id != id) {
+            self.meta = Some((id, meta::read(&self.files[id])));
+        }
+        &self.meta.as_ref().expect("just set").1
+    }
+
+    fn draw_strip(&self, canvas: &mut Canvas, strip: Strip) {
+        canvas.shade(0, strip.top, canvas.width, strip.height, 64);
+        let middle = canvas.width / 2 - strip.cell_w / 2;
+        let reach = i64::from(canvas.width / 2 / strip.pitch() + 1);
+        let top = strip.top + strip.pad;
+
+        for offset in -reach..=reach {
+            let pos = self.pos as i64 + offset;
+            if !(0..self.list.len() as i64).contains(&pos) {
+                continue;
+            }
+            let left = middle + offset as i32 * strip.pitch();
+            match self.loader.thumb(self.list[pos as usize]) {
+                Some(thumb) => {
+                    let bounds = (strip.cell_w as u32, strip.cell_h as u32);
+                    let (w, h) = fit_size((thumb.width, thumb.height), bounds, false);
+                    let (w, h) = (w as i32, h as i32);
+                    canvas.image(&thumb, left + (strip.cell_w - w) / 2, top + (strip.cell_h - h) / 2, w, h);
+                }
+                None => canvas.fill(left, top, strip.cell_w, strip.cell_h, PLACEHOLDER_COLOR),
+            }
+            if offset == 0 {
+                let edge = (strip.pad / 3).max(2);
+                canvas.outline(left - edge, top - edge, strip.cell_w + 2 * edge, strip.cell_h + 2 * edge, edge, TEXT_COLOR);
+            }
+        }
+    }
+
+    fn draw_menu(&self, canvas: &mut Canvas, text: &mut Text, menu: &Menu) {
+        let px = menu.px;
+        let pad = px as i32 / 2;
+        canvas.fill(menu.x, menu.y, menu.width, menu.height, MENU_COLOR);
+        canvas.outline(menu.x, menu.y, menu.width, menu.height, 1, MENU_EDGE_COLOR);
+
+        for (index, row) in menu.rows.iter().enumerate() {
+            let top = menu.y + row.top;
+            let Some(item) = row.item else {
+                canvas.fill(menu.x + pad, top + row.height / 2, menu.width - 2 * pad, 1, MENU_EDGE_COLOR);
+                continue;
+            };
+            if menu.selected == Some(index) {
+                canvas.fill(menu.x + 1, top, menu.width - 2, row.height, HIGHLIGHT_COLOR);
+            }
+            if self.is_checked(item.command) {
+                let mark = px as i32 / 2;
+                canvas.fill(menu.x + pad + mark / 4, top + (row.height - mark) / 2, mark, mark, TEXT_COLOR);
+            }
+            let line = top + (row.height - Text::line_height(px)) / 2;
+            text.draw(canvas, menu.x + pad + px as i32, line, px, TEXT_COLOR, item.label);
+            let keys_left = menu.x + menu.width - pad - text.width(item.keys, px);
+            text.draw(canvas, keys_left, line, px, DIM_TEXT_COLOR, item.keys);
+        }
+    }
+}
+
+/// Draws lines of text on a darkened panel. `place` is given the panel size
+/// and returns its top-left corner.
+fn text_block(canvas: &mut Canvas, text: &mut Text, lines: &[String], px: u32, place: impl Fn(i32, i32) -> (i32, i32)) {
+    if lines.is_empty() {
+        return;
+    }
+    let pad = px as i32 / 2;
+    let line_height = Text::line_height(px);
+    let width = lines.iter().map(|line| text.width(line, px)).max().unwrap_or(0) + 2 * pad;
+    let height = line_height * lines.len() as i32 + 2 * pad;
+    let (x, y) = place(width, height);
+    canvas.shade(x, y, width, height, 80);
+    for (index, line) in lines.iter().enumerate() {
+        text.draw(canvas, x + pad, y + pad + index as i32 * line_height, px, TEXT_COLOR, line);
+    }
+}
+
+/// Draws the list of shortcuts as a panel in the middle of the window.
+fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32) {
+    let line_height = Text::line_height(px);
+    let (pad, gap) = (px as i32, px as i32 * 2);
+    // Each column is as wide as its widest keys plus its widest description.
+    let columns: Vec<(i32, i32, i32)> = commands::HELP
+        .iter()
+        .map(|sections| {
+            let entries = sections.iter().flat_map(|(_, entries)| entries.iter());
+            let keys = entries.clone().map(|(keys, _)| text.width(keys, px)).max().unwrap_or(0);
+            let labels = entries.map(|(_, label)| text.width(label, px)).max().unwrap_or(0);
+            let lines: usize = sections.iter().map(|(_, entries)| entries.len() + 2).sum();
+            (keys, labels, lines as i32 - 1)
+        })
+        .collect();
+    let width = columns.iter().map(|(keys, labels, _)| keys + gap + labels).sum::<i32>()
+        + gap * (columns.len() as i32 - 1)
+        + 2 * pad;
+    let height = columns.iter().map(|c| c.2).max().unwrap_or(0) * line_height + 2 * pad;
+    let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
+    canvas.fill(left, top, width, height, MENU_COLOR);
+    canvas.outline(left, top, width, height, 1, MENU_EDGE_COLOR);
+
+    let mut x = left + pad;
+    for (sections, (keys_width, labels_width, _)) in commands::HELP.iter().zip(columns) {
+        let mut y = top + pad;
+        for (title, entries) in sections.iter() {
+            text.draw(canvas, x, y, px, DIM_TEXT_COLOR, title);
+            y += line_height;
+            for (keys, label) in entries.iter() {
+                text.draw(canvas, x, y, px, TEXT_COLOR, keys);
+                text.draw(canvas, x + keys_width + gap, y, px, TEXT_COLOR, label);
+                y += line_height;
+            }
+            y += line_height;
+        }
+        x += keys_width + gap + labels_width + gap;
+    }
+}
+
+/// Fills in an action template: `%f` is the path and `%n` the file name,
+/// both quoted for the shell, and `%%` a literal percent sign.
+fn expand_action(template: &str, path: &Path) -> String {
+    let quote = |text: &str| format!("'{}'", text.replace('\'', r"'\''"));
+    let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+    let mut command = String::new();
+    let mut chars = template.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            command.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('f') => command.push_str(&quote(&path.to_string_lossy())),
+            Some('n') => command.push_str(&quote(&name)),
+            Some('%') => command.push('%'),
+            Some(other) => command.extend(['%', other]),
+            None => command.push('%'),
+        }
+    }
+    command
+}
+
+impl ApplicationHandler<Job> for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        // Start decoding before the window exists, so the first image is
+        // ready by the time the window is mapped.
+        let monitor = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next());
+        if let Some(size) = monitor.map(|m| m.size()) {
+            self.monitor = (size.width, size.height);
+            self.request();
+        }
+
+        let mut attributes = Window::default_attributes()
+            .with_title("jog")
+            .with_decorations(!self.options.borderless);
+        if self.snapshot.is_some() {
+            // Never shown, so it takes the size a fullscreen window would get.
+            let size = self.options.geometry.unwrap_or(self.monitor);
+            attributes = attributes.with_visible(false).with_inner_size(PhysicalSize::new(size.0, size.1));
+        } else if self.options.fullscreen {
+            attributes = attributes.with_fullscreen(Some(Fullscreen::Borderless(None)));
+        } else {
+            let fallback = (self.monitor.0 * 3 / 5, self.monitor.1 * 3 / 5);
+            let (width, height) = self.options.geometry.unwrap_or(fallback);
+            attributes = attributes.with_inner_size(PhysicalSize::new(width.max(1), height.max(1)));
+        }
+        let window = Arc::new(event_loop.create_window(attributes).expect("failed to create window"));
+        window.set_cursor_visible(self.pointer_visible);
+        let context = Context::new(window.clone()).expect("failed to connect to display");
+        self.surface = Some(Surface::new(&context, window.clone()).expect("failed to create surface"));
+        self.window = Some(window);
+        self.update_monitor();
+        self.refresh();
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, job: Job) {
+        match job {
+            Job::Fitted(id) if id == self.id() => {
+                self.refresh();
+                self.start_snapshot(event_loop);
+            }
+            Job::Full(id) if id == self.id() => self.redraw(),
+            Job::Thumb(_) if self.strip_visible() || self.grid.is_some() => self.redraw(),
+            _ => {}
+        }
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::RedrawRequested => self.draw(),
+            WindowEvent::Resized(_) => {
+                self.update_monitor();
+                self.menu = None;
+                self.request();
+                self.redraw();
+            }
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                let numpad = event.location == KeyLocation::Numpad;
+                self.key_pressed(event.logical_key.as_ref(), event.repeat, numpad, event_loop);
+            }
+            WindowEvent::CursorMoved { position, .. } => self.mouse_moved(position.x, position.y),
+            WindowEvent::CursorLeft { .. } => self.set_strip_hover(false),
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.mouse_button(button, state == ElementState::Pressed, event_loop)
+            }
+            WindowEvent::MouseWheel { delta, .. } => self.mouse_wheel(delta),
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if self.settle_at.is_some_and(|at| at <= now) {
+            self.settle_at = None;
+            self.redraw();
+        }
+        if self.toast.as_ref().is_some_and(|(_, until)| *until <= now) {
+            self.toast = None;
+            self.redraw();
+        }
+        if self.slide_at.is_some_and(|at| at <= now) {
+            self.advance_slideshow(event_loop);
+        }
+        let snapshot_at = self.snapshot.as_ref().and_then(|snapshot| snapshot.at);
+        if snapshot_at.is_some_and(|at| at <= now) {
+            return self.finish_snapshot(event_loop);
+        }
+
+        let toast_until = self.toast.as_ref().map(|(_, until)| *until);
+        let next = [self.settle_at, toast_until, self.slide_at, snapshot_at].into_iter().flatten().min();
+        event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actions_quote_paths_for_the_shell() {
+        let path = Path::new("/pics/it's here.jpg");
+        assert_eq!(expand_action("cp %f /tmp/%n", path), r"cp '/pics/it'\''s here.jpg' /tmp/'it'\''s here.jpg'");
+        assert_eq!(expand_action("echo 100%% %x %", path), "echo 100% %x %");
+    }
+}
