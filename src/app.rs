@@ -201,6 +201,9 @@ pub struct App {
     keep_view: bool,
     antialias: bool,
     settle_at: Option<Instant>,
+    /// Which picture of an animated image is up, and when the next is due.
+    picture: usize,
+    picture_due: Option<Instant>,
     /// The image layer as last rendered, reused when only overlays change.
     scene: Vec<u32>,
     scene_key: Option<SceneKey>,
@@ -264,6 +267,7 @@ pub struct App {
 
 struct SceneKey {
     frame: Arc<Frame>,
+    picture: usize,
     layout: Layout,
     smooth: bool,
     window: (u32, u32),
@@ -272,7 +276,8 @@ struct SceneKey {
 impl SceneKey {
     fn matches(&self, other: &SceneKey) -> bool {
         Arc::ptr_eq(&self.frame, &other.frame)
-            && (self.layout, self.smooth, self.window) == (other.layout, other.smooth, other.window)
+            && (self.picture, self.layout, self.smooth, self.window)
+                == (other.picture, other.layout, other.smooth, other.window)
     }
 }
 
@@ -452,6 +457,8 @@ impl App {
             keep_view: options.keep_view,
             antialias: options.antialias,
             settle_at: None,
+            picture: 0,
+            picture_due: None,
             scene: Vec::new(),
             scene_key: None,
             show_info: options.draw_info,
@@ -622,7 +629,8 @@ impl App {
             return false;
         }
         // A video's frame is only a still; the player draws the real thing.
-        if files::is_video(&self.files[*id]) {
+        // An animation at full resolution would mean every picture of it.
+        if files::is_video(&self.files[*id]) || frame.animation.is_some() {
             return false;
         }
         self.view.layout(frame.native, window).width > frame.width
@@ -633,6 +641,11 @@ impl App {
         let id = self.id();
         match self.loader.fitted(id) {
             Some(Ok(frame)) => {
+                // A different image, or a redone frame of this one, starts
+                // its animation from the first picture.
+                if !self.shown.as_ref().is_some_and(|(shown, old)| *shown == id && Arc::ptr_eq(old, &frame)) {
+                    self.picture_due = None;
+                }
                 self.shown = Some((id, frame));
                 self.error = None;
             }
@@ -763,7 +776,7 @@ impl App {
         let native = self.shown.as_ref().map_or((16, 9), |(_, frame)| frame.native);
         let unit = ui_px(self.window_size().1);
         let (width, height) = fit_size(native, (unit * 16, unit * 12), true);
-        let frame = self.preview_frame.get_or_insert_with(|| Frame { width, height, native, pixels: Vec::new() });
+        let frame = self.preview_frame.get_or_insert_with(|| Frame::still(width, height, native, Vec::new()));
         (frame.width, frame.height) = (width, height);
         frame.pixels.resize(width as usize * height as usize, 0);
         preview.render(&mut frame.pixels, width, height);
@@ -1043,6 +1056,22 @@ impl App {
 
     fn native(&self) -> Option<(u32, u32)> {
         self.shown.as_ref().map(|(_, frame)| frame.native)
+    }
+
+    /// Moves an animated image on to its next picture, round to the first
+    /// after the last. Pictures that fell due while something else held
+    /// the thread up are skipped, so the animation keeps time.
+    fn next_picture(&mut self, now: Instant) {
+        let Some((_, frame)) = &self.shown else { return self.picture_due = None };
+        let Some(animation) = &frame.animation else { return self.picture_due = None };
+        let count = animation.frames.len() + 1;
+        let mut due = self.picture_due.unwrap_or(now);
+        while due <= now {
+            self.picture = (self.picture + 1) % count;
+            due += picture_delay(frame, self.picture);
+        }
+        self.picture_due = Some(due);
+        self.redraw();
     }
 
     /// Call after any zoom or pan change.
@@ -2246,12 +2275,18 @@ impl App {
                 // Past a few times magnification, show the actual pixels.
                 let magnified = layout.width >= frame.width * SHOW_PIXELS_AT;
                 let smooth = self.antialias && settled && !magnified;
-                let key = SceneKey { frame, layout, smooth, window };
+                // An animation's clock starts when its first picture is drawn.
+                if frame.animation.is_some() && self.picture_due.is_none() {
+                    self.picture = 0;
+                    self.picture_due = Some(Instant::now() + picture_delay(&frame, 0));
+                }
+                let picture = if frame.animation.is_some() { self.picture } else { 0 };
+                let key = SceneKey { frame, picture, layout, smooth, window };
                 if !self.scene_key.as_ref().is_some_and(|current| current.matches(&key)) {
                     let started = Instant::now();
                     self.scene.resize(pixels.len(), 0);
                     let background = self.options.background;
-                    render::draw_image(&mut self.scene, window, &key.frame, layout, smooth, background);
+                    render::draw_image(&mut self.scene, window, &key.frame, picture, layout, smooth, background);
                     if self.options.debug {
                         let how = if smooth { "smooth" } else { "nearest" };
                         eprintln!("jog: {:>7.1?} draw  {how} {}x{} -> {}x{}", started.elapsed(), key.frame.width, key.frame.height, layout.width, layout.height);
@@ -2686,6 +2721,12 @@ fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32) {
     }
 }
 
+/// How long picture `index` of an animated frame stays up.
+fn picture_delay(frame: &Frame, index: usize) -> Duration {
+    let delays = frame.animation.as_ref().map(|animation| &animation.delays[..]).unwrap_or_default();
+    delays.get(index).or(delays.first()).copied().unwrap_or(Duration::from_millis(100))
+}
+
 /// A playback time as `m:ss`, or `h:mm:ss` from an hour up.
 fn clock(seconds: f64) -> String {
     let total = seconds.max(0.0) as u64;
@@ -2861,13 +2902,16 @@ impl ApplicationHandler<Event> for App {
             self.time_until = None;
             self.redraw();
         }
+        if self.picture_due.is_some_and(|due| due <= now) {
+            self.next_picture(now);
+        }
         let snapshot_at = self.snapshot.as_ref().and_then(|snapshot| snapshot.at);
         if snapshot_at.is_some_and(|at| at <= now) {
             return self.finish_snapshot(event_loop);
         }
 
         let toast_until = self.toast.as_ref().map(|(_, until)| *until);
-        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at];
+        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

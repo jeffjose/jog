@@ -2,14 +2,15 @@ use std::error::Error;
 use std::io::Cursor;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use fast_image_resize as fir;
 use image::metadata::Orientation;
-use image::{DynamicImage, ImageDecoder, ImageReader, RgbImage};
+use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageReader, RgbImage, RgbaImage};
 use memchr::memmem;
 
 use crate::files;
-use crate::frame::{fit_size, Frame, Transform};
+use crate::frame::{fit_size, Animation, Frame, Transform};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -33,6 +34,15 @@ pub struct Source {
     pub image: RgbImage,
     /// How the file says the pixels should be turned to be upright.
     pub orientation: Transform,
+    /// The rest of an animated image; `None` for a still one.
+    pub animation: Option<SourceAnimation>,
+}
+
+/// The pictures of an animation after the first, and how long every
+/// picture shows, the first included.
+pub struct SourceAnimation {
+    pub frames: Vec<RgbImage>,
+    pub delays: Vec<Duration>,
 }
 
 impl Source {
@@ -48,22 +58,48 @@ impl Source {
 /// Decodes a file. `spec` says what the result is for, which picks the
 /// still of a video and the preview of a RAW file.
 pub fn read(path: &Path, spec: Spec) -> Result<Source> {
-    let (image, orientation) = decode_file(path, spec.target, spec.thumbnail)?;
-    Ok(Source { image: flatten(image, spec.background), orientation: transform_for(orientation) })
+    let Decoded { image, orientation, frames, delays } = decode_file(path, spec.target, spec.thumbnail)?;
+    let animation = (!frames.is_empty()).then(|| SourceAnimation {
+        frames: frames.into_iter().map(|frame| flatten(DynamicImage::ImageRgba8(frame), spec.background)).collect(),
+        delays,
+    });
+    Ok(Source { image: flatten(image, spec.background), orientation: transform_for(orientation), animation })
 }
+
+/// A decoded file: its picture, or for an animation its first picture, the
+/// rest, and how long each shows (the first included).
+struct Decoded {
+    image: DynamicImage,
+    orientation: Orientation,
+    frames: Vec<RgbaImage>,
+    delays: Vec<Duration>,
+}
+
+impl Decoded {
+    fn still((image, orientation): (DynamicImage, Orientation)) -> Decoded {
+        Decoded { image, orientation, frames: Vec::new(), delays: Vec::new() }
+    }
+}
+
+/// Memory an animation may take at full resolution before the rest of its
+/// frames are left out; it then loops over the frames that fit.
+const ANIMATION_BUDGET: usize = 1 << 30;
+/// Frames that ask for less than this show for this long, as browsers do.
+const MIN_DELAY: Duration = Duration::from_millis(20);
+const DEFAULT_DELAY: Duration = Duration::from_millis(100);
 
 /// Decodes whatever kind of file `path` is. `target` picks the preview of
 /// a RAW file and `thumbnail` the still of a video.
-fn decode_file(path: &Path, target: Option<(u32, u32)>, thumbnail: bool) -> Result<(DynamicImage, Orientation)> {
+fn decode_file(path: &Path, target: Option<(u32, u32)>, thumbnail: bool) -> Result<Decoded> {
     if files::is_video(path) {
-        return decode(&video_still(path, thumbnail)?);
+        return decode(&video_still(path, thumbnail)?).map(Decoded::still);
     }
     if files::needs_ffmpeg(path) {
-        return decode(&ffmpeg_image(path)?);
+        return decode(&ffmpeg_image(path)?).map(Decoded::still);
     }
     let bytes = std::fs::read(path)?;
     if files::is_raw(path) {
-        return decode_raw_preview(&bytes, target);
+        return decode_raw_preview(&bytes, target).map(Decoded::still);
     }
     // TGA has no signature and ICO's is ambiguous, so the content is not
     // always enough to tell the format; the extension settles it.
@@ -71,9 +107,53 @@ fn decode_file(path: &Path, target: Option<(u32, u32)>, thumbnail: bool) -> Resu
     if reader.format().is_none() {
         reader.set_format(image::ImageFormat::from_path(path)?);
     }
+    use image::ImageFormat::{Gif, Png, WebP};
+    let frames: Option<image::Frames> = match reader.format() {
+        Some(Gif) => Some(image::codecs::gif::GifDecoder::new(Cursor::new(&bytes[..]))?.into_frames()),
+        Some(Png) => {
+            let decoder = image::codecs::png::PngDecoder::new(Cursor::new(&bytes[..]))?;
+            decoder.is_apng()?.then(|| decoder.apng()).transpose()?.map(AnimationDecoder::into_frames)
+        }
+        Some(WebP) => {
+            let decoder = image::codecs::webp::WebPDecoder::new(Cursor::new(&bytes[..]))?;
+            decoder.has_animation().then(|| decoder.into_frames())
+        }
+        _ => None,
+    };
+    if let Some(frames) = frames {
+        if let Some(decoded) = decode_animation(frames)? {
+            return Ok(decoded);
+        }
+    }
     let mut decoder = reader.into_decoder()?;
     let orientation = decoder.orientation()?;
-    Ok((DynamicImage::from_decoder(decoder)?, orientation))
+    Ok(Decoded::still((DynamicImage::from_decoder(decoder)?, orientation)))
+}
+
+/// Reads the frames of an animation, or `None` when there is only one, in
+/// which case the plain decoder does a better job of a still image.
+fn decode_animation(frames: image::Frames) -> Result<Option<Decoded>> {
+    let mut pictures = Vec::new();
+    let mut delays = Vec::new();
+    let mut bytes = 0;
+    for frame in frames {
+        let frame = frame?;
+        let (numerator, denominator) = frame.delay().numer_denom_ms();
+        let delay = Duration::from_millis(u64::from(numerator) / u64::from(denominator.max(1)));
+        delays.push(if delay < MIN_DELAY { DEFAULT_DELAY } else { delay });
+        let picture = frame.into_buffer();
+        bytes += picture.as_raw().len();
+        if bytes > ANIMATION_BUDGET && !pictures.is_empty() {
+            delays.pop();
+            break;
+        }
+        pictures.push(picture);
+    }
+    if pictures.len() < 2 {
+        return Ok(None);
+    }
+    let first = DynamicImage::ImageRgba8(pictures.remove(0));
+    Ok(Some(Decoded { image: first, orientation: Orientation::NoTransforms, frames: pictures, delays }))
 }
 
 /// The transform that turns pixels stored with an EXIF orientation upright.
@@ -142,7 +222,7 @@ fn ffmpeg_image(path: &Path) -> Result<Vec<u8>> {
 
 /// The image at full resolution, upright, with any transparency intact.
 pub fn open(path: &Path) -> Result<DynamicImage> {
-    let (mut image, orientation) = decode_file(path, None, false)?;
+    let Decoded { mut image, orientation, .. } = decode_file(path, None, false)?;
     image.apply_orientation(orientation);
     Ok(image)
 }
@@ -255,28 +335,33 @@ pub fn finish(source: &Source, spec: Spec) -> Result<Frame> {
         }
         None => (w, h),
     };
-    let resized;
-    let rgb = if size == (w, h) {
-        &source.image
-    } else {
-        resized = resize(&source.image, size)?;
-        &resized
+    let fit = |image: &RgbImage| -> Result<Vec<u32>> {
+        let resized;
+        let rgb = if size == (w, h) {
+            image
+        } else {
+            resized = resize(image, size)?;
+            &resized
+        };
+        Ok(rgb.as_raw().chunks_exact(3).map(|p| u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2])).collect())
     };
-    let pixels = rgb
-        .as_raw()
-        .chunks_exact(3)
-        .map(|p| u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2]))
-        .collect();
-    let frame = Frame { width: rgb.width(), height: rgb.height(), native: (w, h), pixels };
+    let animation = match &source.animation {
+        Some(animation) => Some(Animation {
+            frames: animation.frames.iter().map(|frame| fit(frame)).collect::<Result<_>>()?,
+            delays: animation.delays.clone(),
+        }),
+        None => None,
+    };
+    let frame = Frame { width: size.0, height: size.1, native: (w, h), pixels: fit(&source.image)?, animation };
     Ok(if transform.is_identity() { frame } else { frame.transformed(transform) })
 }
 
 /// A smaller copy of a frame fitting `bounds`, for a thumbnail made from a
-/// frame that is already decoded.
+/// frame that is already decoded. Only the first picture of an animation.
 pub fn shrink(frame: &Frame, bounds: (u32, u32)) -> Result<Frame> {
     let (width, height) = fit_size((frame.width, frame.height), bounds, false);
     if (width, height) == (frame.width, frame.height) {
-        return Ok(Frame { width, height, native: frame.native, pixels: frame.pixels.clone() });
+        return Ok(Frame::still(width, height, frame.native, frame.pixels.clone()));
     }
     let source =
         fir::images::ImageRef::new(frame.width, frame.height, bytemuck::cast_slice(&frame.pixels), fir::PixelType::U8x4)?;
@@ -288,7 +373,7 @@ pub fn shrink(frame: &Frame, bounds: (u32, u32)) -> Result<Frame> {
         // The fourth byte is padding, not alpha.
         .use_alpha(false);
     fir::Resizer::new().resize(&source, &mut target, &options)?;
-    Ok(Frame { width, height, native: frame.native, pixels })
+    Ok(Frame::still(width, height, frame.native, pixels))
 }
 
 /// One RGBA pixel composited over an opaque colour.
@@ -434,13 +519,13 @@ mod tests {
 
     #[test]
     fn shrinking_a_frame_keeps_its_native_size() {
-        let frame = Frame { width: 400, height: 200, native: (4000, 2000), pixels: vec![0x808080; 80_000] };
+        let frame = Frame::still(400, 200, (4000, 2000), vec![0x808080; 80_000]);
         let small = shrink(&frame, (100, 100)).unwrap();
         assert_eq!((small.width, small.height, small.native), (100, 50, (4000, 2000)));
         assert!(small.pixels.iter().all(|&p| p == 0x808080));
     }
 
     fn source(image: DynamicImage, orientation: Orientation, background: u32) -> Source {
-        Source { image: flatten(image, background), orientation: transform_for(orientation) }
+        Source { image: flatten(image, background), orientation: transform_for(orientation), animation: None }
     }
 }

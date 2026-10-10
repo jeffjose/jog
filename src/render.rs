@@ -8,8 +8,12 @@ use crate::view::Layout;
 /// Paints `frame` into a `window`-sized buffer at `layout`, clearing the
 /// rest. Scaling is nearest-neighbour unless `smooth` asks for filtering,
 /// which looks better but costs more.
-pub fn draw_image(dst: &mut [u32], window: (u32, u32), frame: &Frame, layout: Layout, smooth: bool, background: u32) {
+///
+/// `picture` picks the frame of an animation; 0 is the first or only one.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_image(dst: &mut [u32], window: (u32, u32), frame: &Frame, picture: usize, layout: Layout, smooth: bool, background: u32) {
     dst.fill(background);
+    let pixels = frame.picture(picture);
     let (win_w, win_h) = (window.0 as i32, window.1 as i32);
     let visible = Visible {
         x0: layout.x.max(0),
@@ -28,12 +32,12 @@ pub fn draw_image(dst: &mut [u32], window: (u32, u32), frame: &Frame, layout: La
     if (frame.width, frame.height) == (layout.width, layout.height) {
         let (left, top) = ((visible.x0 - layout.x) as usize, (visible.y0 - layout.y) as usize);
         for (y, row) in rows.enumerate() {
-            let source = &frame.pixels[(top + y) * fw + left..][..span.len()];
+            let source = &pixels[(top + y) * fw + left..][..span.len()];
             row[span.clone()].copy_from_slice(source);
         }
         return;
     }
-    if smooth && resample(dst, win_w as usize, frame, layout, &visible).is_ok() {
+    if smooth && resample(dst, win_w as usize, frame, pixels, layout, &visible).is_ok() {
         return;
     }
 
@@ -46,7 +50,7 @@ pub fn draw_image(dst: &mut [u32], window: (u32, u32), frame: &Frame, layout: La
     let rows = dst.chunks_exact_mut(win_w as usize).skip(visible.y0 as usize);
     for (y, row) in rows.take((visible.y1 - visible.y0) as usize).enumerate() {
         let from = nearest(visible.y0 - layout.y + y as i32, layout.height, fh) * fw;
-        let source = &frame.pixels[from..from + fw];
+        let source = &pixels[from..from + fw];
         for (pixel, &column) in row[span.clone()].iter_mut().zip(&columns) {
             *pixel = source[column];
         }
@@ -61,7 +65,7 @@ struct Visible {
     y1: i32,
 }
 
-fn resample(dst: &mut [u32], win_w: usize, frame: &Frame, layout: Layout, visible: &Visible) -> Result<(), Box<dyn Error>> {
+fn resample(dst: &mut [u32], win_w: usize, frame: &Frame, pixels: &[u32], layout: Layout, visible: &Visible) -> Result<(), Box<dyn Error>> {
     let (width, height) = ((visible.x1 - visible.x0) as u32, (visible.y1 - visible.y0) as u32);
     let across = f64::from(frame.width) / f64::from(layout.width);
     let down = f64::from(frame.height) / f64::from(layout.height);
@@ -69,7 +73,7 @@ fn resample(dst: &mut [u32], win_w: usize, frame: &Frame, layout: Layout, visibl
     let source = fir::images::ImageRef::new(
         frame.width,
         frame.height,
-        bytemuck::cast_slice(&frame.pixels),
+        bytemuck::cast_slice(pixels),
         fir::PixelType::U8x4,
     )?;
     let mut scaled = vec![0u32; width as usize * height as usize];
@@ -100,14 +104,14 @@ mod tests {
 
     fn frame(width: u32, height: u32) -> Frame {
         let pixels = (0..width * height).collect();
-        Frame { width, height, native: (width, height), pixels }
+        Frame::still(width, height, (width, height), pixels)
     }
 
     #[test]
     fn exact_size_is_copied_and_centred() {
         let mut buffer = [9; 12];
         let layout = Layout { width: 2, height: 1, x: 1, y: 1 };
-        draw_image(&mut buffer, (4, 3), &frame(2, 1), layout, false, 7);
+        draw_image(&mut buffer, (4, 3), &frame(2, 1), 0, layout, false, 7);
         assert_eq!(buffer, [7, 7, 7, 7, 7, 0, 1, 7, 7, 7, 7, 7]);
     }
 
@@ -115,7 +119,7 @@ mod tests {
     fn panned_image_is_clipped() {
         let mut buffer = [9; 4];
         let layout = Layout { width: 4, height: 4, x: -1, y: -2 };
-        draw_image(&mut buffer, (2, 2), &frame(4, 4), layout, false, 7);
+        draw_image(&mut buffer, (2, 2), &frame(4, 4), 0, layout, false, 7);
         assert_eq!(buffer, [9, 10, 13, 14]);
     }
 
@@ -123,21 +127,21 @@ mod tests {
     fn nearest_scaling_shrinks_and_enlarges() {
         let mut buffer = [9; 6];
         let layout = Layout { width: 2, height: 2, x: 0, y: 0 };
-        draw_image(&mut buffer, (3, 2), &frame(4, 4), layout, false, 7);
+        draw_image(&mut buffer, (3, 2), &frame(4, 4), 0, layout, false, 7);
         assert_eq!(buffer, [5, 7, 7, 13, 15, 7]);
 
         let mut buffer = [9; 8];
         let layout = Layout { width: 4, height: 2, x: 0, y: 0 };
-        draw_image(&mut buffer, (4, 2), &frame(2, 1), layout, false, 7);
+        draw_image(&mut buffer, (4, 2), &frame(2, 1), 0, layout, false, 7);
         assert_eq!(buffer, [0, 0, 1, 1, 0, 0, 1, 1]);
     }
 
     #[test]
     fn smooth_shrink_averages_pixels() {
-        let source = Frame { width: 4, height: 4, native: (4, 4), pixels: vec![0x808080; 16] };
+        let source = Frame::still(4, 4, (4, 4), vec![0x808080; 16]);
         let mut buffer = [9; 4];
         let layout = Layout { width: 2, height: 2, x: 0, y: 0 };
-        draw_image(&mut buffer, (2, 2), &source, layout, true, 7);
+        draw_image(&mut buffer, (2, 2), &source, 0, layout, true, 7);
         assert_eq!(buffer, [0x808080; 4]);
     }
 }

@@ -375,7 +375,10 @@ fn perform(work: Work, spec: Spec, keep: bool) -> (decode::Result<Frame>, Option
             };
             let frame = decode::finish(&source, spec);
             let larger = spec.target.is_none_or(|(w, h)| source.width() > w || source.height() > h);
-            (frame, (keep && larger).then(|| Arc::new(source)))
+            // An animation is never wanted at full resolution, and would
+            // take much more room than a still.
+            let worth_keeping = keep && larger && source.animation.is_none();
+            (frame, worth_keeping.then(|| Arc::new(source)))
         }
         Work::FromSource(source) => (decode::finish(&source, spec), None),
         Work::FromFrame(frame) => (decode::shrink(&frame, spec.target.unwrap_or_default()), None),

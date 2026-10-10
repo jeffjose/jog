@@ -1,35 +1,67 @@
+use std::time::Duration;
+
 /// A decoded image in the `0RGB` layout the window surface uses.
 pub struct Frame {
     pub width: u32,
     pub height: u32,
     /// Size of the full-resolution image this was (possibly) shrunk from.
     pub native: (u32, u32),
+    /// The picture, or the first picture of an animation.
     pub pixels: Vec<u32>,
+    /// The further pictures of an animation, each with how long the one
+    /// before it stays up. `None` for a still image.
+    pub animation: Option<Animation>,
+}
+
+/// The frames of an animated image after the first, at the same size.
+pub struct Animation {
+    pub frames: Vec<Vec<u32>>,
+    /// How long each picture shows, starting with the first in `pixels`.
+    pub delays: Vec<Duration>,
 }
 
 impl Frame {
+    pub fn still(width: u32, height: u32, native: (u32, u32), pixels: Vec<u32>) -> Frame {
+        Frame { width, height, native, pixels, animation: None }
+    }
+
     pub fn is_native(&self) -> bool {
         (self.width, self.height) == self.native
+    }
+
+    /// The picture at `index` of the animation, where 0 is `pixels`.
+    pub fn picture(&self, index: usize) -> &[u32] {
+        match (&self.animation, index) {
+            (Some(animation), 1..) => animation.frames.get(index - 1).map_or(&self.pixels, Vec::as_slice),
+            _ => &self.pixels,
+        }
     }
 
     pub fn transformed(&self, t: Transform) -> Frame {
         let (w, h) = (self.width as usize, self.height as usize);
         let (ow, oh) = if t.swaps_axes() { (h, w) } else { (w, h) };
-        let mut pixels = Vec::with_capacity(ow * oh);
-        for y in 0..oh {
-            for x in 0..ow {
-                let (sx, sy) = match t.turns {
-                    0 => (x, y),
-                    1 => (y, h - 1 - x),
-                    2 => (w - 1 - x, h - 1 - y),
-                    _ => (w - 1 - y, x),
-                };
-                let sx = if t.mirrored { w - 1 - sx } else { sx };
-                pixels.push(self.pixels[sy * w + sx]);
+        let turn = |source: &[u32]| {
+            let mut pixels = Vec::with_capacity(ow * oh);
+            for y in 0..oh {
+                for x in 0..ow {
+                    let (sx, sy) = match t.turns {
+                        0 => (x, y),
+                        1 => (y, h - 1 - x),
+                        2 => (w - 1 - x, h - 1 - y),
+                        _ => (w - 1 - y, x),
+                    };
+                    let sx = if t.mirrored { w - 1 - sx } else { sx };
+                    pixels.push(source[sy * w + sx]);
+                }
             }
-        }
+            pixels
+        };
         let native = if t.swaps_axes() { (self.native.1, self.native.0) } else { self.native };
-        Frame { width: ow as u32, height: oh as u32, native, pixels }
+        let animation = self.animation.as_ref().map(|animation| Animation {
+            frames: animation.frames.iter().map(|frame| turn(frame)).collect(),
+            delays: animation.delays.clone(),
+        });
+        Frame { width: ow as u32, height: oh as u32, native, pixels: turn(&self.pixels), animation }
     }
 }
 
@@ -90,7 +122,17 @@ mod tests {
     use super::*;
 
     fn frame(width: u32, height: u32, pixels: &[u32]) -> Frame {
-        Frame { width, height, native: (width, height), pixels: pixels.to_vec() }
+        Frame::still(width, height, (width, height), pixels.to_vec())
+    }
+
+    #[test]
+    fn animations_turn_with_the_first_picture() {
+        let mut f = frame(3, 2, &[1, 2, 3, 4, 5, 6]);
+        f.animation = Some(Animation { frames: vec![vec![6, 5, 4, 3, 2, 1]], delays: vec![Duration::from_millis(40); 2] });
+        let turned = f.transformed(Transform::CW);
+        assert_eq!(turned.picture(0), [4, 1, 5, 2, 6, 3]);
+        assert_eq!(turned.picture(1), [3, 6, 2, 5, 1, 4]);
+        assert_eq!(turned.picture(7), turned.picture(0), "out of range falls back to the first");
     }
 
     #[test]
