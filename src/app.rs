@@ -57,6 +57,10 @@ const RESUME_MARGIN: f64 = 10.0;
 const PREVIEW_TIMEOUT: Duration = Duration::from_millis(400);
 /// How soon a second click must follow the first to make a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// How long the grid takes to slide to another row, and the fewest and
+/// most pictures it can be set to show across.
+const GRID_SCROLL: Duration = Duration::from_millis(260);
+const GRID_COLUMNS: (i32, i32) = (2, 12);
 /// How long a thumbnail in the grid takes to give way to its trailer.
 const TRAILER_FADE: Duration = Duration::from_millis(350);
 /// How many videos' frames are kept at once.
@@ -478,6 +482,10 @@ pub struct App {
     shuffled: bool,
     /// Whether the panel of file names is open.
     show_list: bool,
+    /// How many pictures the grid shows across, when that has been set
+    /// with Ctrl and + or -; and when to draw it next while it slides.
+    grid_columns: Option<i32>,
+    grid_due: Option<Instant>,
     /// The first row the file list was scrolled to with the wheel, along
     /// with the position and list length it was scrolled at: once either
     /// changes, the list goes back to following the file on view.
@@ -710,9 +718,13 @@ impl Snapshot {
 }
 
 /// The grid view. The cursor is a list position, moved by the arrow keys or
-/// the pointer; the page on show is whichever one holds it.
+/// the pointer. The grid scrolls by the row to keep it in view, sliding
+/// from where it was (`from`, in rows) to where it is going (`target`).
 struct Grid {
     cursor: usize,
+    from: f64,
+    target: f64,
+    since: Instant,
 }
 
 /// Grid placement: equal cells filling the window above a footer line.
@@ -728,10 +740,12 @@ struct GridLayout {
 }
 
 impl GridLayout {
-    fn for_window(window: (u32, u32)) -> GridLayout {
+    /// `columns` is how many pictures go across; left out, it follows from
+    /// the width of the window.
+    fn for_window(window: (u32, u32), columns: Option<i32>) -> GridLayout {
         let (width, height) = (window.0 as i32, window.1 as i32);
         let usable = (height - Self::footer_height(window.1)).max(1);
-        let columns = (width / 240).clamp(2, 6);
+        let columns = columns.unwrap_or((width / 240).clamp(2, 6)).clamp(GRID_COLUMNS.0, GRID_COLUMNS.1);
         let cell_w = (width / columns).max(1);
         let cell_h = (cell_w * 3 / 4).clamp(1, usable);
         let rows = (usable / cell_h).max(1);
@@ -754,20 +768,64 @@ impl GridLayout {
         (self.columns * self.rows) as usize
     }
 
-    fn pages(&self, images: usize) -> usize {
-        images.div_ceil(self.per_page()).max(1)
-    }
 
     fn thumb_size(&self) -> (u32, u32) {
         ((self.cell_w - 2 * self.pad).max(1) as u32, (self.cell_h - 2 * self.pad).max(1) as u32)
     }
 
-    /// Index within the page of the cell at a window position.
-    fn cell_at(&self, x: f64, y: f64) -> Option<usize> {
+    /// The list position of the cell at a window position, with the grid
+    /// scrolled `scroll` rows down.
+    fn cell_at(&self, x: f64, y: f64, scroll: f64) -> Option<usize> {
         let column = ((x - f64::from(self.left)) / f64::from(self.cell_w)).floor() as i32;
-        let row = ((y - f64::from(self.top)) / f64::from(self.cell_h)).floor() as i32;
-        let inside = (0..self.columns).contains(&column) && (0..self.rows).contains(&row);
-        inside.then(|| (row * self.columns + column) as usize)
+        let down = (y - f64::from(self.top)) / f64::from(self.cell_h);
+        let row = (down + scroll).floor();
+        let inside = (0..self.columns).contains(&column) && (0.0..f64::from(self.rows)).contains(&down) && row >= 0.0;
+        inside.then(|| row as usize * self.columns as usize + column as usize)
+    }
+
+    /// The row a list position is in.
+    fn row_of(&self, pos: usize) -> f64 {
+        (pos / self.columns as usize) as f64
+    }
+
+    /// The furthest down the grid scrolls: the last row at the bottom.
+    fn last_scroll(&self, images: usize) -> f64 {
+        (images.div_ceil(self.columns as usize) as f64 - f64::from(self.rows)).max(0.0)
+    }
+}
+
+impl Grid {
+    /// A grid showing the row of `cursor` in the middle.
+    fn at(cursor: usize, layout: &GridLayout, images: usize) -> Grid {
+        let row = layout.row_of(cursor) - f64::from(layout.rows / 2);
+        let scroll = row.clamp(0.0, layout.last_scroll(images));
+        Grid { cursor, from: scroll, target: scroll, since: Instant::now() }
+    }
+
+    /// How many rows down the grid is scrolled just now: on its way from
+    /// where it was to where it is going, fast at first and settling in.
+    fn scroll(&self) -> f64 {
+        let part = (self.since.elapsed().as_secs_f64() / GRID_SCROLL.as_secs_f64()).min(1.0);
+        self.from + (self.target - self.from) * (1.0 - (1.0 - part).powi(3))
+    }
+
+    fn scrolling(&self) -> bool {
+        self.since.elapsed() < GRID_SCROLL && self.from != self.target
+    }
+
+    /// Sets the grid scrolling to `target` rows down from where it is now.
+    fn scroll_to(&mut self, target: f64) {
+        if target != self.target {
+            (self.from, self.target, self.since) = (self.scroll(), target, Instant::now());
+        }
+    }
+
+    /// Scrolls just far enough to bring the cursor's row into view.
+    fn follow(&mut self, layout: &GridLayout, images: usize) {
+        let row = layout.row_of(self.cursor);
+        let last_shown = self.target + f64::from(layout.rows) - 1.0;
+        let target = if row < self.target { row } else if row > last_shown { row - f64::from(layout.rows) + 1.0 } else { self.target };
+        self.scroll_to(target.clamp(0.0, layout.last_scroll(images)));
     }
 }
 
@@ -789,6 +847,8 @@ impl App {
             reversed: options.listing.reverse,
             shuffled: options.listing.randomize,
             show_list: false,
+            grid_columns: None,
+            grid_due: None,
             list_scroll: None,
             list_hover: None,
             durations: HashMap::new(),
@@ -953,13 +1013,14 @@ impl App {
         // window resizes; and for the grid's cells, the larger of the two
         // uses, so that the filmstrip and the grid share them.
         let mut thumbs = Vec::new();
-        let thumb_size = GridLayout::for_window(self.monitor).thumb_size();
+        let thumb_size = self.grid_layout(self.monitor).thumb_size();
         if let Some(grid) = &self.grid {
-            // The page on show, then the pages either side of it.
-            let per_page = GridLayout::for_window(self.window_size()).per_page() as i64;
-            let page = grid.cursor as i64 / per_page;
-            for page in [page, page + 1, page - 1] {
-                let positions = (page * per_page).max(0)..((page + 1) * per_page).min(len);
+            // The rows on show, then a screenful below and one above.
+            let layout = self.grid_layout(self.window_size());
+            let (columns, shown) = (i64::from(layout.columns), i64::from(layout.rows) + 1);
+            let top = grid.target.floor() as i64;
+            for rows in [top..top + shown, top + shown..top + 2 * shown, top - shown..top] {
+                let positions = (rows.start * columns).clamp(0, len)..(rows.end * columns).clamp(0, len);
                 thumbs.extend(positions.map(|at| self.list[at as usize]));
             }
         } else if self.strip_used {
@@ -2508,10 +2569,32 @@ impl App {
 
     // ---- Grid ----------------------------------------------------------
 
+    /// How the grid is laid out in a window of this size.
+    fn grid_layout(&self, window: (u32, u32)) -> GridLayout {
+        GridLayout::for_window(window, self.grid_columns)
+    }
+
+    /// Shows more or fewer pictures across the grid, making each smaller
+    /// or larger.
+    fn zoom_grid(&mut self, larger: bool) {
+        let layout = self.grid_layout(self.window_size());
+        let columns = (layout.columns + if larger { -1 } else { 1 }).clamp(GRID_COLUMNS.0, GRID_COLUMNS.1);
+        self.grid_columns = Some(columns);
+        // Start afresh around the cursor: the rows are not what they were.
+        let layout = self.grid_layout(self.window_size());
+        if let Some(grid) = &mut self.grid {
+            *grid = Grid::at(grid.cursor, &layout, self.list.len());
+        }
+        self.toast(format!("{columns} across"));
+        self.request();
+        self.redraw();
+    }
+
     fn toggle_grid(&mut self) {
+        let layout = self.grid_layout(self.window_size());
         self.grid = match self.grid {
             Some(_) => None,
-            None => Some(Grid { cursor: self.pos }),
+            None => Some(Grid::at(self.pos, &layout, self.list.len())),
         };
         self.menu = None;
         self.drag = None;
@@ -2532,11 +2615,12 @@ impl App {
 
     /// Puts the grid cursor on the thumbnail under the pointer, if any.
     fn point_cursor(&mut self) -> bool {
-        let layout = GridLayout::for_window(self.window_size());
+        let layout = self.grid_layout(self.window_size());
         let (len, (x, y)) = (self.list.len(), self.mouse);
         let Some(grid) = &mut self.grid else { return false };
-        let first = grid.cursor / layout.per_page() * layout.per_page();
-        let Some(pos) = layout.cell_at(x, y).map(|cell| first + cell).filter(|pos| *pos < len) else {
+        // Where the grid is sliding to, not where it is: a cell picked
+        // out mid-slide must not pull the grid back.
+        let Some(pos) = layout.cell_at(x, y, grid.target).filter(|pos| *pos < len) else {
             return false;
         };
         if pos != grid.cursor {
@@ -2555,34 +2639,18 @@ impl App {
         self.redraw();
     }
 
-    /// Moves the grid cursor one cell. Stepping off the left or right edge
-    /// lands on the same row of the neighbouring page; the top and bottom
-    /// edges stop it.
+    /// Moves the grid cursor one cell: along the list sideways, so that
+    /// the end of a row leads on to the start of the next, and by a row up
+    /// or down. Going down from above a short last row lands on its end.
     fn step_cursor(&mut self, dx: i64, dy: i64) {
-        let layout = GridLayout::for_window(self.window_size());
+        let columns = i64::from(self.grid_layout(self.window_size()).columns);
         let Some(grid) = &self.grid else { return };
-        let (columns, rows) = (i64::from(layout.columns), i64::from(layout.rows));
-        let (per_page, len) = (layout.per_page() as i64, self.list.len() as i64);
-        let cursor = grid.cursor as i64;
-        let (column, row) = (cursor % per_page % columns, cursor % per_page / columns);
-
-        let (to_column, to_row) = (column + dx, row + dy);
-        let mut target = cursor + dx + dy * columns;
-        if to_column >= columns {
-            target = cursor + per_page - (columns - 1);
-            // A short last page may not reach this row; take its last image.
-            let next_page = (cursor / per_page + 1) * per_page;
-            if next_page >= len {
-                return;
-            }
-            target = target.min(len - 1);
-        } else if to_column < 0 {
-            target = cursor - per_page + (columns - 1);
+        let (cursor, last) = (grid.cursor as i64, self.list.len() as i64 - 1);
+        let target = cursor + dx + dy * columns;
+        let below = dy > 0 && target > last && cursor / columns < last / columns;
+        if (0..=last).contains(&target) || below {
+            self.move_cursor(target.min(last) - cursor);
         }
-        if !(0..rows).contains(&to_row) || !(0..len).contains(&target) {
-            return;
-        }
-        self.move_cursor(target - cursor);
     }
 
     /// Shuffles the viewing order. The image being viewed stays current,
@@ -3145,11 +3213,14 @@ impl App {
     }
 
     fn grid_key(&mut self, key: Key<&str>, event_loop: &ActiveEventLoop) {
-        let layout = GridLayout::for_window(self.window_size());
+        let layout = self.grid_layout(self.window_size());
         match key {
             Key::Named(NamedKey::Escape) => return self.toggle_grid(),
             Key::Named(NamedKey::ArrowUp) => return self.step_cursor(0, -1),
             Key::Named(NamedKey::ArrowDown) => return self.step_cursor(0, 1),
+            // Ctrl with + or - makes the pictures larger or smaller.
+            Key::Character("+" | "=") if self.modifiers.control_key() => return self.zoom_grid(true),
+            Key::Character("-" | "_") if self.modifiers.control_key() => return self.zoom_grid(false),
             // Here `i` is for the names under the pictures.
             Key::Character("i") => {
                 self.grid_titles = !self.grid_titles;
@@ -3464,8 +3535,16 @@ impl App {
         self.scrolled -= steps;
         for _ in 0..steps.abs() as u32 {
             if self.grid.is_some() {
-                let per_page = GridLayout::for_window(self.window_size()).per_page() as i64;
-                self.move_cursor(if steps < 0.0 { per_page } else { -per_page });
+                // A row at a time, the cursor going with the grid so that
+                // it stays where it was in the window.
+                let layout = self.grid_layout(self.window_size());
+                let (rows, images) = (if steps < 0.0 { 1.0 } else { -1.0 }, self.list.len());
+                if let Some(grid) = &mut self.grid {
+                    let target = (grid.target + rows).clamp(0.0, layout.last_scroll(images));
+                    let moved = ((target - grid.target) * f64::from(layout.columns)) as i64;
+                    grid.scroll_to(target);
+                    self.move_cursor(moved);
+                }
             } else {
                 self.step(steps < 0.0);
             }
@@ -3664,6 +3743,23 @@ impl App {
         match source {
             None if self.grid.is_some() => {
                 let started = Instant::now();
+                // The grid slides after its cursor; while it does, it is
+                // drawn again and again.
+                let layout = self.grid_layout(window);
+                let images = self.list.len();
+                let mut moved = false;
+                if let Some(grid) = &mut self.grid {
+                    let was = grid.target;
+                    grid.follow(&layout, images);
+                    moved = grid.target != was;
+                    if grid.scrolling() {
+                        self.grid_due = Some(Instant::now() + Duration::from_millis(8));
+                    }
+                }
+                // Other rows are coming into view: their pictures are wanted.
+                if moved {
+                    self.request();
+                }
                 pixels.fill(GRID_COLOR);
                 self.draw_grid(&mut Canvas::new(pixels, window.0, window.1));
                 if self.options.debug {
@@ -3887,13 +3983,23 @@ impl App {
         self.text = Some(text);
     }
 
+    /// The list positions whose cells are in view, or partly so while the
+    /// grid slides: the rows on show and the one coming in below.
+    fn grid_shown(&self, layout: &GridLayout) -> std::ops::Range<usize> {
+        let scroll = self.grid.as_ref().map_or(0.0, Grid::scroll);
+        let columns = layout.columns as usize;
+        let first = scroll.floor().max(0.0) as usize * columns;
+        first.min(self.list.len())..(first + (layout.rows as usize + 1) * columns).min(self.list.len())
+    }
+
     /// The space a grid cell gives its picture: left, top, width and
     /// height. With titles on, a line under it is kept for the name.
-    fn grid_area(&self, layout: &GridLayout, cell: usize, window_height: u32) -> [i32; 4] {
-        let (column, row) = (cell as i32 % layout.columns, cell as i32 / layout.columns);
+    fn grid_area(&self, layout: &GridLayout, pos: usize, window_height: u32) -> [i32; 4] {
+        let scroll = self.grid.as_ref().map_or(0.0, Grid::scroll);
+        let column = (pos % layout.columns as usize) as i32;
         let title = if self.grid_titles { Text::line_height(ui_px(window_height)) + layout.pad / 2 } else { 0 };
         let left = layout.left + column * layout.cell_w + layout.pad;
-        let top = layout.top + row * layout.cell_h + layout.pad;
+        let top = layout.top + ((layout.row_of(pos) - scroll) * f64::from(layout.cell_h)).round() as i32 + layout.pad;
         [left, top, layout.cell_w - 2 * layout.pad, (layout.cell_h - 2 * layout.pad - title).max(1)]
     }
 
@@ -3908,14 +4014,13 @@ impl App {
 
     fn draw_grid(&self, canvas: &mut Canvas) {
         let Some(grid) = &self.grid else { return };
-        let layout = GridLayout::for_window((canvas.width as u32, canvas.height as u32));
-        let first = grid.cursor / layout.per_page() * layout.per_page();
+        let layout = self.grid_layout((canvas.width as u32, canvas.height as u32));
         let edge = (layout.pad / 4).max(2);
         let radius = (layout.cell_w / 36).max(4);
 
-        for (cell, pos) in (first..self.list.len()).take(layout.per_page()).enumerate() {
+        for pos in self.grid_shown(&layout) {
             let id = self.list[pos];
-            let area = self.grid_area(&layout, cell, canvas.height as u32);
+            let area = self.grid_area(&layout, pos, canvas.height as u32);
             // A video under the cursor plays as a trailer.
             let trailer = self.trailer.as_ref().filter(|trailer| trailer.id == id && pos == grid.cursor);
             let since = trailer.and_then(|trailer| trailer.since);
@@ -3965,12 +4070,11 @@ impl App {
     /// on, and in the corner of each video how long it is.
     fn draw_grid_labels(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
         let Some(cursor) = self.grid.as_ref().map(|grid| grid.cursor) else { return };
-        let layout = GridLayout::for_window((canvas.width as u32, canvas.height as u32));
-        let first = cursor / layout.per_page() * layout.per_page();
+        let layout = self.grid_layout((canvas.width as u32, canvas.height as u32));
         let line = Text::line_height(px);
-        for (cell, pos) in (first..self.list.len()).take(layout.per_page()).enumerate() {
+        for pos in self.grid_shown(&layout) {
             let id = self.list[pos];
-            let area = self.grid_area(&layout, cell, canvas.height as u32);
+            let area = self.grid_area(&layout, pos, canvas.height as u32);
             let size = self.loader.thumb(id).map(|thumb| (thumb.width, thumb.height));
             let [x, y, w, h] = size.map_or(area, |size| Self::grid_picture(area, size, false));
             self.want_duration(id);
@@ -4007,6 +4111,8 @@ impl App {
             width += actions.iter().map(|(label, _)| button_width(text, label) + pad).sum::<i32>();
         }
         let footer_height = GridLayout::footer_height(canvas.height as u32);
+        // The row coming in from below stops short of this line.
+        canvas.fill(0, canvas.height - footer_height, canvas.width, footer_height, GRID_COLOR);
         let mut x = (canvas.width - width) / 2;
         let y = canvas.height - footer_height + (footer_height - height) / 2;
 
@@ -4031,15 +4137,9 @@ impl App {
     /// The line under the grid: the image under the cursor and the page.
     fn grid_footer(&self) -> Option<String> {
         let grid = self.grid.as_ref()?;
-        let layout = GridLayout::for_window(self.window_size());
-        let pages = layout.pages(self.list.len());
         let path = &self.files[self.list[grid.cursor]];
         let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
-        let mut footer = format!("{name}   [{}/{}]", grid.cursor + 1, self.list.len());
-        if pages > 1 {
-            footer.push_str(&format!("      Page {} of {pages}", grid.cursor / layout.per_page() + 1));
-        }
-        Some(footer)
+        Some(format!("{name}   [{}/{}]", grid.cursor + 1, self.list.len()))
     }
 
     fn info_line(&mut self) -> String {
@@ -4268,9 +4368,10 @@ impl App {
         }
         let Some(id) = subject else { return };
         let proxy = self.proxy.clone();
-        let trailers = self.trailers.get_or_insert_with(|| Trailers::new(move |note| proxy.send_event(Event::Trailer(note)).is_ok()));
         let window = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
-        trailers.play(id, self.files[id].clone(), GridLayout::for_window(window).thumb_size());
+        let bounds = self.grid_layout(window).thumb_size();
+        let trailers = self.trailers.get_or_insert_with(|| Trailers::new(move |note| proxy.send_event(Event::Trailer(note)).is_ok()));
+        trailers.play(id, self.files[id].clone(), bounds);
         self.trailer = Some(Trailer { id, frame: None, since: None });
     }
 
@@ -4835,13 +4936,17 @@ impl ApplicationHandler<Event> for App {
             self.font_due = None;
             self.redraw();
         }
+        if self.grid_due.is_some_and(|due| due <= now) {
+            self.grid_due = None;
+            self.redraw();
+        }
         let snapshot_at = self.snapshot.as_ref().and_then(|snapshot| snapshot.at);
         if snapshot_at.is_some_and(|at| at <= now) {
             return self.finish_snapshot(event_loop);
         }
 
         let toast_until = self.toast.as_ref().map(|(_, until)| *until);
-        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.font_due];
+        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.font_due, self.grid_due];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
