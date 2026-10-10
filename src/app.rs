@@ -30,6 +30,7 @@ use crate::render;
 use crate::rng::Rng;
 use crate::search::{Facts, Query};
 use crate::story::{self, Found, Stories};
+use crate::trailer::{Note, Trailers};
 use crate::ui::{Canvas, Text};
 use crate::view::{Layout, View, Zoom};
 
@@ -56,12 +57,6 @@ const RESUME_MARGIN: f64 = 10.0;
 const PREVIEW_TIMEOUT: Duration = Duration::from_millis(400);
 /// How soon a second click must follow the first to make a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
-/// The grid's trailer of a video: how many stretches from along it are
-/// shown and for how long each. A video no longer than `TRAILER_WHOLE`
-/// seconds is simply played through.
-const TRAILER_STRETCHES: usize = 8;
-const TRAILER_STRETCH: Duration = Duration::from_millis(2500);
-const TRAILER_WHOLE: f64 = 20.0;
 /// How many videos' frames are kept at once.
 const STORIES_KEPT: usize = 4;
 /// How often the directories are listed again while watching.
@@ -104,6 +99,8 @@ pub enum Event {
     Duration(usize, Option<f64>),
     /// A frame from along a video, or word about fetching them.
     Story(Found),
+    /// Word from the thread playing the grid's trailer.
+    Trailer(Note),
 }
 
 /// A file operation that `u` can take back.
@@ -308,11 +305,8 @@ impl TextField {
 /// The trailer playing in the grid, under the cursor.
 struct Trailer {
     id: usize,
-    /// The frame last taken from the player.
+    /// The frame last taken from the thread playing it.
     frame: Option<Frame>,
-    /// Which stretch of a longer video comes next, and when.
-    stretch: usize,
-    next_at: Option<Instant>,
 }
 
 /// The go-to box: what is typed, the list positions that match it with
@@ -417,6 +411,7 @@ pub struct App {
     /// The video the grid is running through, which of its frames is up,
     /// and when the next one is due.
     trailer: Option<Trailer>,
+    trailers: Option<Trailers>,
     /// Set while the directories are watched; clearing it stops the thread
     /// that does the watching.
     watch: Option<Arc<AtomicBool>>,
@@ -713,6 +708,7 @@ impl App {
             story_order: VecDeque::new(),
             story_asked: None,
             trailer: None,
+            trailers: None,
             watch: None,
             sizes: HashMap::new(),
             positions: None,
@@ -1069,9 +1065,6 @@ impl App {
             // Only to empty the queue, so that mpv keeps signalling.
             preview.events();
             return;
-        }
-        if self.trailer.is_some() {
-            return self.trailer_frame();
         }
         // Size the picture to the video so that no bars are drawn into it.
         let native = self.shown.as_ref().map_or((16, 9), |(_, frame)| frame.native);
@@ -4109,62 +4102,25 @@ impl App {
         files::is_video(&self.files[id]).then_some(id)
     }
 
-    /// Keeps the grid's trailer going: starts it for the video under the
-    /// cursor, moves it on from one stretch to the next, and stops it when
-    /// the cursor leaves. A short video plays whole, round and round; a
-    /// longer one is shown in stretches from along it. Called on each
-    /// redraw and whenever a stretch has run its time.
+    /// Has the trailer thread play the video under the grid's cursor, and
+    /// stop when the cursor leaves it. Called on each redraw. Nothing here
+    /// waits on the player: the thread does all of that.
     fn tend_trailer(&mut self) {
         let subject = self.trailer_subject();
-        if self.trailer.as_ref().map(|trailer| trailer.id) != subject {
-            if self.trailer.take().is_some() {
-                if let Some(preview) = &self.preview {
-                    preview.set("pause", "yes");
-                    preview.set("loop-file", "no");
-                    preview.command_later(&[b"stop"]);
-                }
-                // The seek bar's previews must open their own file afresh.
-                (self.preview_id, self.preview_frame, self.preview_sent) = (None, None, None);
-            }
-            let Some(id) = subject else { return };
-            self.warm_player();
-            // Not there yet the first time; its arrival redraws.
-            let Some(preview) = &self.preview else { return };
-            preview.set("loop-file", "inf");
-            preview.open(&self.files[id]);
-            preview.set("pause", "no");
-            self.trailer = Some(Trailer { id, frame: None, stretch: 0, next_at: None });
-        }
-        let (Some(trailer), Some(preview)) = (&mut self.trailer, &self.preview) else { return };
-        // Known once the file is open.
-        let Some(length) = preview.number("duration") else { return };
-        self.durations.insert(trailer.id, Some(length));
-        if length <= TRAILER_WHOLE {
+        if self.trailer.as_ref().map(|trailer| trailer.id) == subject {
             return;
         }
-        if trailer.next_at.is_none_or(|at| at <= Instant::now()) {
-            // From the middle of each part: the very start is often black.
-            let at = length * (trailer.stretch as f64 + 0.5) / TRAILER_STRETCHES as f64;
-            preview.command_later(&[b"seek", at.to_string().as_bytes(), b"absolute+keyframes"]);
-            trailer.stretch = (trailer.stretch + 1) % TRAILER_STRETCHES;
-            trailer.next_at = Some(Instant::now() + TRAILER_STRETCH);
+        if self.trailer.take().is_some() {
+            if let Some(trailers) = &self.trailers {
+                trailers.stop();
+            }
         }
-    }
-
-    /// Takes a frame of the trailer from the player, at the size of the
-    /// grid's cells, and has the grid drawn with it.
-    fn trailer_frame(&mut self) {
-        let (Some(trailer), Some(preview)) = (&mut self.trailer, &self.preview) else { return };
+        let Some(id) = subject else { return };
+        let proxy = self.proxy.clone();
+        let trailers = self.trailers.get_or_insert_with(|| Trailers::new(move |note| proxy.send_event(Event::Trailer(note)).is_ok()));
         let window = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
-        let bounds = GridLayout::for_window(window).thumb_size();
-        let native = preview.number("dwidth").zip(preview.number("dheight")).map_or((16, 9), |(w, h)| (w as u32, h as u32));
-        let (width, height) = fit_size((native.0.max(1), native.1.max(1)), bounds, true);
-        let frame = trailer.frame.get_or_insert_with(|| Frame::still(width, height, native, Vec::new()));
-        (frame.width, frame.height) = (width, height);
-        frame.pixels.resize(width as usize * height as usize, 0);
-        preview.render(&mut frame.pixels, width, height);
-        self.tend_trailer();
-        self.redraw();
+        trailers.play(id, self.files[id].clone(), GridLayout::for_window(window).thumb_size());
+        self.trailer = Some(Trailer { id, frame: None });
     }
 
     /// Sees to it that the frames of the video picked out in the go-to box
@@ -4569,8 +4525,6 @@ impl ApplicationHandler<Event> for App {
                 self.preview = preview.ok();
                 // As for the player: empty the queue so that mpv signals.
                 self.preview_signal(Signal::Events);
-                // The grid may be waiting to play a trailer with it.
-                self.redraw();
             }
             Event::Listed(listed) => self.take_listing(listed, true),
             Event::Duration(id, seconds) => {
@@ -4584,6 +4538,17 @@ impl ApplicationHandler<Event> for App {
                 }
                 if self.story_subject() == Some(id) {
                     self.redraw();
+                }
+            }
+            Event::Trailer(Note::Length(id, seconds)) => drop(self.durations.insert(id, Some(seconds))),
+            Event::Trailer(Note::Frame) => {
+                // One of a video the cursor has since left is dropped.
+                let taken = self.trailers.as_ref().and_then(Trailers::take);
+                if let (Some(trailer), Some((id, frame))) = (&mut self.trailer, taken) {
+                    if trailer.id == id {
+                        trailer.frame = Some(frame);
+                        self.redraw();
+                    }
                 }
             }
             Event::Story(Found::Done(id)) => {
@@ -4664,17 +4629,13 @@ impl ApplicationHandler<Event> for App {
         if self.picture_due.is_some_and(|due| due <= now) {
             self.next_picture(now);
         }
-        if self.trailer.as_ref().and_then(|trailer| trailer.next_at).is_some_and(|due| due <= now) {
-            self.tend_trailer();
-        }
         let snapshot_at = self.snapshot.as_ref().and_then(|snapshot| snapshot.at);
         if snapshot_at.is_some_and(|at| at <= now) {
             return self.finish_snapshot(event_loop);
         }
 
         let toast_until = self.toast.as_ref().map(|(_, until)| *until);
-        let trailer_at = self.trailer.as_ref().and_then(|trailer| trailer.next_at);
-        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, trailer_at];
+        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
