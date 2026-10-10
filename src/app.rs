@@ -78,6 +78,7 @@ const DIM_TEXT_COLOR: u32 = 0x9A9A9A;
 const MENU_COLOR: u32 = 0x1E1E1E;
 const MENU_EDGE_COLOR: u32 = 0x555555;
 const HIGHLIGHT_COLOR: u32 = 0x2D5B9A;
+const HELP_TITLE_COLOR: u32 = 0x8AB4F8;
 const PLACEHOLDER_COLOR: u32 = 0x2A2A2A;
 const MARK_COLOR: u32 = 0xFFB020;
 const GRID_COLOR: u32 = 0x101010;
@@ -4535,43 +4536,77 @@ fn draw_prompt(
     drawn
 }
 
-/// Draws the list of shortcuts as a panel in the middle of the window.
+/// The keys of one line of the shortcuts, each with how wide it is drawn
+/// and whether as a key cap. A few words together describe something
+/// that is not a key, and are written plainly.
+fn help_keys<'a>(text: &mut Text, keys: &'a str, px: u32) -> Vec<(&'a str, i32, bool)> {
+    let pad = px as i32 / 2;
+    let parts = keys.split("  ").filter(|key| !key.is_empty());
+    parts.map(|key| if key.contains(' ') { (key, text.width(key, px), false) } else { (key, (text.width(key, px) + pad).max(px as i32 * 3 / 2), true) }).collect()
+}
+
+/// Draws the list of shortcuts as a panel in the middle of the window:
+/// columns of sections, each key on a cap of its own.
 fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32) {
-    let line_height = Text::line_height(px);
-    let (pad, gap) = (px as i32, px as i32 * 2);
+    let small = (px * 5 / 6).max(11);
+    let row = Text::line_height(px) + px as i32 / 3;
+    let (pad, gap, between) = (px as i32 * 3 / 2, px as i32, px as i32 / 3);
+    let keys_width = |text: &mut Text, keys: &str| -> i32 {
+        let parts = help_keys(text, keys, small);
+        parts.iter().map(|(_, width, _)| width + between).sum::<i32>() - between
+    };
     // Each column is as wide as its widest keys plus its widest description.
     let columns: Vec<(i32, i32, i32)> = commands::HELP
         .iter()
         .map(|sections| {
             let entries = sections.iter().flat_map(|(_, entries)| entries.iter());
-            let keys = entries.clone().map(|(keys, _)| text.width(keys, px)).max().unwrap_or(0);
+            let keys = entries.clone().map(|(keys, _)| keys_width(text, keys)).max().unwrap_or(0);
             let labels = entries.map(|(_, label)| text.width(label, px)).max().unwrap_or(0);
-            let lines: usize = sections.iter().map(|(_, entries)| entries.len() + 2).sum();
-            (keys, labels, lines as i32 - 1)
+            let rows: usize = sections.iter().map(|(_, entries)| entries.len() + 2).sum();
+            (keys, labels, rows as i32 - 1)
         })
         .collect();
     let width = columns.iter().map(|(keys, labels, _)| keys + gap + labels).sum::<i32>()
-        + gap * (columns.len() as i32 - 1)
+        + 2 * pad * (columns.len() as i32 - 1)
         + 2 * pad;
-    let height = columns.iter().map(|c| c.2).max().unwrap_or(0) * line_height + 2 * pad;
+    let (title, hint) = ("Keyboard shortcuts", "Any key closes this.  > in the find box lists every command.");
+    let head = row * 2;
+    let height = head + columns.iter().map(|c| c.2).max().unwrap_or(0) * row + row + 2 * pad;
     let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
-    canvas.fill(left, top, width, height, MENU_COLOR);
-    canvas.outline(left, top, width, height, 1, MENU_EDGE_COLOR);
+    panel(canvas, left, top, width, height, px as i32);
+    text.draw(canvas, left + pad, top + pad, px * 5 / 4, TEXT_COLOR, title);
+    let hint_width = text.width(hint, small);
+    text.draw(canvas, left + width - pad - hint_width, top + height - pad - row / 2, small, DIM_TEXT_COLOR, hint);
 
     let mut x = left + pad;
     for (sections, (keys_width, labels_width, _)) in commands::HELP.iter().zip(columns) {
-        let mut y = top + pad;
+        let mut y = top + pad + head;
         for (title, entries) in sections.iter() {
-            text.draw(canvas, x, y, px, DIM_TEXT_COLOR, title);
-            y += line_height;
+            text.draw(canvas, x, y, px, HELP_TITLE_COLOR, title);
+            canvas.fill(x, y + row - row / 5, keys_width + gap + labels_width, 1, MENU_EDGE_COLOR);
+            y += row;
             for (keys, label) in entries.iter() {
-                text.draw(canvas, x, y, px, TEXT_COLOR, keys);
-                text.draw(canvas, x + keys_width + gap, y, px, TEXT_COLOR, label);
-                y += line_height;
+                let mut key_x = x;
+                for (key, width, cap) in help_keys(text, keys, small) {
+                    let key_top = y + (row - Text::line_height(small)) / 2;
+                    if cap {
+                        let (cap_top, cap_height) = (y + row / 10, row - row / 5);
+                        canvas.round_fill(key_x, cap_top, width, cap_height, px as i32 / 4, PLACEHOLDER_COLOR, 256);
+                        canvas.round_outline(key_x, cap_top, width, cap_height, px as i32 / 4, 1, MENU_EDGE_COLOR);
+                        let inset = (width - text.width(key, small)) / 2;
+                        text.draw(canvas, key_x + inset, key_top, small, TEXT_COLOR, key);
+                    } else {
+                        text.draw(canvas, key_x, key_top, small, DIM_TEXT_COLOR, key);
+                    }
+                    key_x += width + between;
+                }
+                let label_top = y + (row - Text::line_height(px)) / 2;
+                text.draw(canvas, x + keys_width + gap, label_top, px, TEXT_COLOR, label);
+                y += row;
             }
-            y += line_height;
+            y += row;
         }
-        x += keys_width + gap + labels_width + gap;
+        x += keys_width + gap + labels_width + 2 * pad;
     }
 }
 
