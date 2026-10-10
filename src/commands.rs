@@ -60,6 +60,8 @@ pub enum Command {
     MarkAll,
     InvertMarks,
     ClearMarks,
+    /// Narrow the list to the marked files.
+    OnlyMarked,
     CopyName,
     CopyPath,
     CopyTo,
@@ -188,18 +190,25 @@ pub struct MenuItem {
     pub keys: &'static str,
     pub command: Command,
     pub applies: Applies,
+    /// The menu this item opens beside it, instead of running `command`.
+    /// Empty for an ordinary item.
+    pub sub: &'static [Option<MenuItem>],
 }
 
 const fn item(label: &'static str, keys: &'static str, command: Command) -> Option<MenuItem> {
-    Some(MenuItem { label, keys, command, applies: Applies::Always })
+    Some(MenuItem { label, keys, command, applies: Applies::Always, sub: &[] })
 }
 
 const fn image_item(label: &'static str, keys: &'static str, command: Command) -> Option<MenuItem> {
-    Some(MenuItem { label, keys, command, applies: Applies::Images })
+    Some(MenuItem { label, keys, command, applies: Applies::Images, sub: &[] })
 }
 
 const fn video_item(label: &'static str, keys: &'static str, command: Command) -> Option<MenuItem> {
-    Some(MenuItem { label, keys, command, applies: Applies::Videos })
+    Some(MenuItem { label, keys, command, applies: Applies::Videos, sub: &[] })
+}
+
+const fn submenu(label: &'static str, sub: &'static [Option<MenuItem>], applies: Applies) -> Option<MenuItem> {
+    Some(MenuItem { label, keys: "\u{25B8}", command: Command::ToggleMenu, applies, sub })
 }
 
 /// The right-click menu. `None` is a separator.
@@ -209,47 +218,71 @@ pub const MENU: &[Option<MenuItem>] = &[
     video_item("Next", "Ctrl+Right", Command::Next),
     video_item("Previous", "Ctrl+Left", Command::Previous),
     item("Search...", "/", Command::Search),
-    Some(MenuItem { label: "Show all files again", keys: "Esc", command: Command::ClearFilter, applies: Applies::Filtered }),
+    Some(MenuItem { label: "Show all files again", keys: "Esc", command: Command::ClearFilter, applies: Applies::Filtered, sub: &[] }),
     item("Random", "z", Command::Random),
     None,
+    submenu("Playback", PLAYBACK, Applies::Videos),
+    submenu("Zoom", ZOOM, Applies::Always),
+    submenu("Rotate", ROTATE, Applies::Always),
+    submenu("View", VIEW, Applies::Always),
+    submenu("Marks", MARKS, Applies::Always),
+    submenu("File", FILE, Applies::Always),
+    submenu("Debug", DEBUG, Applies::Always),
+    None,
+    item("Keyboard shortcuts", "?", Command::ToggleHelp),
+    item("Quit", "q", Command::Quit),
+];
+
+const PLAYBACK: &[Option<MenuItem>] = &[
     video_item("Play / pause", "Space", Command::PlayPause),
     video_item("Forward 5 seconds", "Right", Command::SeekForward),
     video_item("Back 5 seconds", "Left", Command::SeekBack),
     video_item("Next frame", "Shift+Right", Command::FrameForward),
     video_item("Previous frame", "Shift+Left", Command::FrameBack),
-    video_item("Volume up", "Up", Command::VolumeUp),
-    video_item("Volume down", "Down", Command::VolumeDown),
+    video_item("Play from the start", "", Command::Restart),
+    None,
     video_item("Faster", "]", Command::SpeedUp),
     video_item("Slower", "[", Command::SpeedDown),
     video_item("Normal speed", "\\", Command::SpeedReset),
-    video_item("Play from the start", "", Command::Restart),
     None,
+    video_item("Volume up", "Up", Command::VolumeUp),
+    video_item("Volume down", "Down", Command::VolumeDown),
+];
+
+const ZOOM: &[Option<MenuItem>] = &[
     item("Zoom in", "+", Command::ZoomIn),
     item("Zoom out", "-", Command::ZoomOut),
     item("Actual size", "*", Command::ZoomActual),
     item("Fit to screen", "0", Command::ZoomFit),
     item("Fill screen", "!", Command::ZoomFill),
     item("Fit small images to screen", "Z", Command::ToggleEnlarge),
-    None,
+];
+
+const ROTATE: &[Option<MenuItem>] = &[
     item("Rotate right", ")", Command::RotateRight),
     item("Rotate left", "(", Command::RotateLeft),
     item("Flip vertically", "_", Command::Flip),
     item("Mirror horizontally", "|", Command::Mirror),
-    None,
+];
+
+const VIEW: &[Option<MenuItem>] = &[
     item("Fullscreen", "f", Command::ToggleFullscreen),
     item("Grid view", "g", Command::ToggleGrid),
     item("Filmstrip", "t", Command::ToggleFilmstrip),
-    item("Info", "i", Command::ToggleInfo),
-    item("Debug timings", "I", Command::ToggleDebug),
-    image_item("EXIF data", "e", Command::ToggleExif),
     item("Slideshow", "h", Command::ToggleSlideshow),
     None,
+    item("Info", "i", Command::ToggleInfo),
+    image_item("EXIF data", "e", Command::ToggleExif),
+];
+
+const MARKS: &[Option<MenuItem>] = &[
     item("Mark", "x", Command::Mark),
     item("Marked images...", "X", Command::MarkMenu),
+    item("Show only marked", "", Command::OnlyMarked),
     item("Clear all marks", "", Command::ClearMarks),
-    item("Copy file name", "c", Command::CopyName),
-    item("Copy full path", "C", Command::CopyPath),
-    None,
+];
+
+const FILE: &[Option<MenuItem>] = &[
     item("Copy to folder", "v", Command::CopyTo),
     item("Move to folder", "m", Command::MoveTo),
     item("Rename", "F2", Command::Rename),
@@ -258,16 +291,19 @@ pub const MENU: &[Option<MenuItem>] = &[
     image_item("Convert to WebP", "", Command::Convert(Format::WebP)),
     item("Undo", "u", Command::Undo),
     None,
-    item("Print files to terminal", "", Command::ToggleVerbose),
-    item("Print timings to terminal", "", Command::ToggleDebugLog),
+    item("Copy file name", "c", Command::CopyName),
+    item("Copy full path", "C", Command::CopyPath),
     None,
     item("Reload", "r", Command::Reload),
     item("Remove from list", "Del", Command::Remove),
     item("Move to trash", "Ctrl+Del", Command::Trash),
     item("Delete...", "d", Command::Delete),
-    None,
-    item("Keyboard shortcuts", "?", Command::ToggleHelp),
-    item("Quit", "q", Command::Quit),
+];
+
+const DEBUG: &[Option<MenuItem>] = &[
+    item("Timings on screen", "I", Command::ToggleDebug),
+    item("Print files to terminal", "", Command::ToggleVerbose),
+    item("Print timings to terminal", "", Command::ToggleDebugLog),
 ];
 
 /// The `X` menu: what can be done with the marked images.

@@ -464,6 +464,8 @@ struct Menu {
     title: Option<String>,
     rows: Vec<MenuRow>,
     selected: Option<usize>,
+    /// The menu opened beside the selected item, if it has one.
+    sub: Option<Box<Menu>>,
 }
 
 struct MenuRow {
@@ -1627,6 +1629,17 @@ impl App {
             Action(slot) => self.run_action(slot),
             Mark => self.toggle_mark(),
             MarkMenu => self.open_mark_menu(),
+            OnlyMarked if self.marks.is_empty() => self.toast("Nothing is marked"),
+            OnlyMarked => {
+                // The same as typing it into the search box and keeping it.
+                self.start_search();
+                if let Some(search) = &mut self.search {
+                    search.field.text = "is:marked".chars().collect();
+                    search.field.cursor = search.field.text.len();
+                }
+                self.search_changed();
+                self.finish_search(SearchEnd::Keep);
+            }
             MarkAll => {
                 self.marks = self.list.iter().copied().collect();
                 self.toast(format!("Marked all {}", self.marks.len()));
@@ -2077,7 +2090,7 @@ impl App {
         let Some(search) = &self.search else { return Vec::new() };
         let mut buttons = Vec::new();
         if !search.no_match && !Query::parse(&search.field.string()).is_empty() {
-            buttons.push((SearchEnd::Keep, format!("Keep {} \u{2192}", self.list.len())));
+            buttons.push((SearchEnd::Keep, format!("Show only {} \u{2192}", self.list.len())));
         }
         if search.prior_filter.is_some() {
             buttons.push((SearchEnd::All, format!("Show all {}", search.base.len())));
@@ -2206,7 +2219,34 @@ impl App {
     /// Opens a menu of `entries`. One with a title is keyboard-first: it
     /// sits in the middle of the window with its first item selected. One
     /// without opens at the pointer.
-    fn open_menu(&mut self, all_entries: &'static [Option<MenuItem>], title: Option<String>) {
+    fn open_menu(&mut self, entries: &'static [Option<MenuItem>], title: Option<String>) {
+        let at = (self.mouse.0 as i32, self.mouse.1 as i32);
+        self.menu = Some(self.build_menu(entries, title, at));
+    }
+
+    /// Opens the menu belonging to the selected item, beside it. From the
+    /// keyboard its first item is selected, ready for the arrow keys.
+    fn open_submenu(&mut self, select_first: bool) {
+        let Some(menu) = &self.menu else { return };
+        let Some(row) = menu.selected.map(|row| &menu.rows[row]) else { return };
+        let Some(item) = row.item.filter(|item| !item.sub.is_empty()) else { return };
+        let (left, right, top) = (menu.x, menu.x + menu.width - 1, menu.y + row.top - menu.px as i32 / 2);
+        let mut sub = self.build_menu(item.sub, None, (right, top));
+        // Where there is no room to the right, it opens to the left.
+        if sub.x < right {
+            sub.x = (left - sub.width + 1).max(0);
+        }
+        if select_first {
+            sub.selected = sub.rows.iter().position(|row| row.item.is_some());
+        }
+        if let Some(menu) = &mut self.menu {
+            menu.sub = Some(Box::new(sub));
+        }
+    }
+
+    /// Lays out a menu of `entries` with its corner at `at`, or as near as
+    /// the window allows; one with a title goes in the middle instead.
+    fn build_menu(&mut self, all_entries: &'static [Option<MenuItem>], title: Option<String>, at: (i32, i32)) -> Menu {
         let (width, height) = self.window_size();
         let px = ui_px(height);
 
@@ -2254,8 +2294,8 @@ impl App {
         let menu_height = top + pad;
 
         let centred = ((width as i32 - menu_width) / 2, (height as i32 - menu_height) / 2);
-        let (x, y) = if title.is_some() { centred } else { (self.mouse.0 as i32, self.mouse.1 as i32) };
-        self.menu = Some(Menu {
+        let (x, y) = if title.is_some() { centred } else { at };
+        Menu {
             x: x.clamp(0, (width as i32 - menu_width).max(0)),
             y: y.clamp(0, (height as i32 - menu_height).max(0)),
             width: menu_width,
@@ -2264,7 +2304,8 @@ impl App {
             selected: title.as_ref().and(rows.iter().position(|row| row.item.is_some())),
             rows,
             title,
-        });
+            sub: None,
+        }
     }
 
     /// The `X` menu: what can be done with the marked images.
@@ -2312,9 +2353,18 @@ impl App {
                 }
             }
         };
+        // The keys go to the menu opened last.
+        let opens = menu.sub.is_none() && menu.selected.is_some_and(|row| menu.rows[row].item.is_some_and(|item| !item.sub.is_empty()));
+        let inner = menu.sub.is_some();
+        let active = match &mut menu.sub {
+            Some(sub) => &mut **sub,
+            None => menu,
+        };
         match key {
-            Key::Named(NamedKey::ArrowDown) => step(menu, true),
-            Key::Named(NamedKey::ArrowUp) => step(menu, false),
+            Key::Named(NamedKey::ArrowDown) => step(active, true),
+            Key::Named(NamedKey::ArrowUp) => step(active, false),
+            Key::Named(NamedKey::ArrowRight) if opens => self.open_submenu(true),
+            Key::Named(NamedKey::ArrowLeft | NamedKey::Escape) if inner => menu.sub = None,
             Key::Named(NamedKey::Enter) => self.activate_menu(event_loop),
             Key::Named(NamedKey::Escape | NamedKey::Tab) => self.menu = None,
             _ => {}
@@ -2322,11 +2372,18 @@ impl App {
         self.redraw();
     }
 
-    /// Closes the menu, running the selected item if there is one.
+    /// Runs the selected item and closes the menu, or opens the menu that
+    /// the item stands for. With nothing selected it only closes.
     fn activate_menu(&mut self, event_loop: &ActiveEventLoop) {
-        let Some(menu) = self.menu.take() else { return };
-        if let Some(item) = menu.selected.and_then(|row| menu.rows[row].item) {
-            self.execute(item.command, event_loop);
+        let Some(menu) = &self.menu else { return };
+        let active = menu.sub.as_deref().unwrap_or(menu);
+        match active.selected.and_then(|row| active.rows[row].item) {
+            Some(item) if !item.sub.is_empty() => self.open_submenu(true),
+            Some(item) => {
+                self.menu = None;
+                self.execute(item.command, event_loop);
+            }
+            None => self.menu = None,
         }
         self.redraw();
     }
@@ -2502,9 +2559,22 @@ impl App {
 
         if let Some(menu) = &mut self.menu {
             // Moving the pointer elsewhere leaves a keyboard selection alone.
+            if let Some(sub) = &mut menu.sub {
+                let hovered = sub.row_at(x, y);
+                if hovered.is_some() {
+                    if hovered != sub.selected {
+                        sub.selected = hovered;
+                        self.redraw();
+                    }
+                    return;
+                }
+            }
             let hovered = menu.row_at(x, y);
             if hovered.is_some() && hovered != menu.selected {
                 menu.selected = hovered;
+                // Resting on an item that has a menu of its own opens it.
+                menu.sub = None;
+                self.open_submenu(false);
                 self.redraw();
             }
             return;
@@ -2596,7 +2666,15 @@ impl App {
         match (button, pressed) {
             (MouseButton::Left, true) if self.menu.is_some() => {
                 if let Some(menu) = &mut self.menu {
-                    menu.selected = menu.row_at(x, y);
+                    // A click outside both menus selects nothing: it closes them.
+                    let inner = menu.sub.as_mut().map(|sub| (sub.row_at(x, y), sub));
+                    match inner {
+                        Some((Some(row), sub)) => sub.selected = Some(row),
+                        _ => {
+                            menu.sub = None;
+                            menu.selected = menu.row_at(x, y);
+                        }
+                    }
                 }
                 self.activate_menu(event_loop);
             }
@@ -3335,6 +3413,9 @@ impl App {
             text.draw(canvas, menu.x + pad + px as i32, line, px, TEXT_COLOR, item.label);
             let keys_left = menu.x + menu.width - pad - text.width(item.keys, px);
             text.draw(canvas, keys_left, line, px, DIM_TEXT_COLOR, item.keys);
+        }
+        if let Some(sub) = &menu.sub {
+            self.draw_menu(canvas, text, sub);
         }
     }
 }
