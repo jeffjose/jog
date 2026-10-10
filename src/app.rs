@@ -558,6 +558,8 @@ impl App {
         // The frame that just arrived may call for a full-resolution decode.
         self.request();
         self.sync_video();
+        // The still may have just arrived, and with it the size to lay out.
+        self.apply_video_view();
         if let Some(window) = &self.window {
             window.set_title(&format!("{} [{}/{}] - jog", self.name(), self.pos + 1, self.list.len()));
         }
@@ -645,6 +647,7 @@ impl App {
             let started = Instant::now();
             player.play(&self.files[id]);
             self.video = Some(Video { id, showing: false, started, seeking: None });
+            self.apply_video_view();
         }
     }
 
@@ -657,7 +660,7 @@ impl App {
         for event in events {
             // The still stays up until the player has a frame to show.
             let showing = event == PlayerEvent::Showing;
-            if showing && !video.showing && std::env::var_os("JOG_DEBUG").is_some() {
+            if showing && !video.showing && self.options.debug {
                 eprintln!("jog: {:>7.1?} video start {}", video.started.elapsed(), self.files[video.id].display());
             }
             video.showing = showing;
@@ -699,8 +702,8 @@ impl App {
             Key::Named(NamedKey::Space) => VideoAction::Pause,
             Key::Named(NamedKey::ArrowRight) => arrow(true),
             Key::Named(NamedKey::ArrowLeft) => arrow(false),
-            Key::Named(NamedKey::ArrowUp) | Key::Character("+" | "=") => VideoAction::Volume(5),
-            Key::Named(NamedKey::ArrowDown) | Key::Character("-") => VideoAction::Volume(-5),
+            Key::Named(NamedKey::ArrowUp) => VideoAction::Volume(5),
+            Key::Named(NamedKey::ArrowDown) => VideoAction::Volume(-5),
             _ => return false,
         };
         self.video_action(action);
@@ -836,7 +839,48 @@ impl App {
     fn view_changed(&mut self) {
         self.settle_at = Some(Instant::now() + SETTLE);
         self.request();
+        self.apply_video_view();
         self.redraw();
+    }
+
+    /// Passes the zoom, pan, rotation and mirroring on to the player, which
+    /// does its own scaling. The still for the video, already turned the
+    /// same way, supplies the size to lay out.
+    fn apply_video_view(&self) {
+        let (Some(player), Some(video)) = (&self.player, &self.video) else { return };
+        let window = self.window_size();
+        let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map(|(_, frame)| frame.native);
+        let (zoom, pan) = match native {
+            Some(native) if window.0 > 0 && window.1 > 0 => {
+                let layout = self.view.layout(native, window);
+                // mpv's zoom is a power of two on top of filling the window.
+                let filling = fit_size(native, window, true);
+                let zoom = (f64::from(layout.width) / f64::from(filling.0)).log2();
+                // Its pan is the offset from centre as a share of the scaled size.
+                let pan = |origin: i32, size: u32, across: u32| {
+                    (f64::from(origin) + f64::from(size) / 2.0 - f64::from(across) / 2.0) / f64::from(size)
+                };
+                (zoom, (pan(layout.x, layout.width, window.0), pan(layout.y, layout.height, window.1)))
+            }
+            _ => (0.0, (0.0, 0.0)),
+        };
+        player.set("video-zoom", &zoom.to_string());
+        player.set("video-pan-x", &pan.0.to_string());
+        player.set("video-pan-y", &pan.1.to_string());
+
+        let transform = self.transforms.get(&video.id).copied().unwrap_or_default();
+        // Done with filters: mpv's own rotate option trips an assertion in
+        // its software renderer. A transform mirrors first, then turns.
+        let mirror = transform.mirrored().then_some("hflip");
+        let turn = match transform.turns() {
+            1 => Some("transpose=clock"),
+            2 => Some("hflip,vflip"),
+            3 => Some("transpose=cclock"),
+            _ => None,
+        };
+        let steps: Vec<&str> = mirror.into_iter().chain(turn).collect();
+        let filter = if steps.is_empty() { String::new() } else { format!("lavfi=[{}]", steps.join(",")) };
+        player.set("vf", &filter);
     }
 
     fn set_zoom(&mut self, zoom: Zoom) {
@@ -1874,7 +1918,7 @@ impl App {
             return self.snapshot_step(event_loop);
         }
         let Some(snapshot) = self.snapshot.take() else { return };
-        if let (Some(player), true) = (&self.player, std::env::var_os("JOG_DEBUG").is_some()) {
+        if let (Some(player), true) = (&self.player, self.options.debug) {
             let count = |property| player.number(property).unwrap_or(0.0);
             let (position, late, dropped) = (count("time-pos"), count("frame-drop-count"), count("vo-drop-frame-count"));
             eprintln!("jog: video at {position:.1}s, {late} frames decoded late, {dropped} not shown");
@@ -2413,6 +2457,7 @@ impl ApplicationHandler<Event> for App {
                 self.update_monitor();
                 self.menu = None;
                 self.request();
+                self.apply_video_view();
                 self.redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),

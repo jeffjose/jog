@@ -55,6 +55,15 @@ impl Transform {
         self.turns % 2 == 1
     }
 
+    /// Quarter turns clockwise, applied after any mirroring.
+    pub fn turns(self) -> u8 {
+        self.turns
+    }
+
+    pub fn mirrored(self) -> bool {
+        self.mirrored
+    }
+
     /// The transform equivalent to applying `self` and then `next`.
     pub fn then(self, next: Transform) -> Transform {
         // Mirroring reverses the direction of any rotation done before it.

@@ -43,6 +43,7 @@ Slideshow and actions:
       --action1..9 CMD       shell commands for keys 1 to 9
   -o, --output-dir DIR       folder that v copies and m moves images into
       --print-marked         print the marked files on exit
+      --debug                print decode and video start times (also JOG_DEBUG=1)
 
 Overlays:
   -d, --draw-info            show name, position, dimensions, zoom and size
@@ -115,6 +116,7 @@ pub struct Options {
     pub filmstrip: bool,
     pub output_dir: Option<PathBuf>,
     pub print_marked: bool,
+    pub debug: bool,
 }
 
 pub enum Parsed {
@@ -165,6 +167,7 @@ fn is_switch(name: &str) -> bool {
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
         "cycle-once", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
+        "debug",
     ];
     switches.contains(&name)
 }
@@ -200,6 +203,7 @@ fn parse_with(
         filmstrip: false,
         output_dir: None,
         print_marked: false,
+        debug: std::env::var_os("JOG_DEBUG").is_some(),
     };
     let mut fullscreen = None;
     if let Some((path, text)) = config {
@@ -309,6 +313,7 @@ fn apply(
         "filmstrip" => options.filmstrip = true,
         "output-dir" => options.output_dir = Some(expand_home(&value()?)),
         "print-marked" => options.print_marked = true,
+        "debug" => options.debug = true,
         "action" => options.actions[0] = Some(value()?),
         other => {
             let slot = other.strip_prefix("action").and_then(|n| n.parse::<usize>().ok());
@@ -486,6 +491,7 @@ mod tests {
         let options = parse_args(&["-o", "/keep", "--print-marked"]).unwrap();
         assert_eq!(options.output_dir, Some(PathBuf::from("/keep")));
         assert!(options.print_marked);
+        assert!(parse_args(&["--debug"]).unwrap().debug);
     }
 
     #[test]

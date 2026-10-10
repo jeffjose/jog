@@ -133,11 +133,15 @@ pub struct Loader {
 impl Loader {
     /// `on_loaded` is called from a worker thread for each job that finishes
     /// (or fails) and is still wanted.
-    pub fn new(files: Vec<PathBuf>, background: u32, on_loaded: impl Fn(Job) + Send + Sync + 'static) -> Self {
+    pub fn new(
+        files: Vec<PathBuf>,
+        background: u32,
+        debug: bool,
+        on_loaded: impl Fn(Job) + Send + Sync + 'static,
+    ) -> Self {
         let state = Mutex::new(State { files, ..State::default() });
         let shared = Arc::new(Shared { background, state, wake: Condvar::new() });
         let on_loaded = Arc::new(on_loaded);
-        let debug = std::env::var_os("JOG_DEBUG").is_some();
         let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_WORKERS);
 
         for index in 0..workers {

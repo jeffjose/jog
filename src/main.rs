@@ -63,7 +63,7 @@ fn main() -> ExitCode {
     };
     let proxy = event_loop.create_proxy();
     let loaded = proxy.clone();
-    let loader = Loader::new(files.clone(), options.background, move |job| {
+    let loader = Loader::new(files.clone(), options.background, options.debug, move |job| {
         let _ = loaded.send_event(Event::Loaded(job));
     });
 
