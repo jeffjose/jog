@@ -83,6 +83,8 @@ Keys:
                              Also is:video is:image is:gif is:marked, and
                              sizes such as >10mb or <1gb (b, kb, mb, gb)
   Ctrl+arrows, Alt+arrows    scroll, by a page   Z  small images: fit screen / actual size
+  Ctrl+K                     go to a file: type part of its name, Up / Down to
+                             pick among the matches, Enter to go
   S                          sort: name, newest, size, shuffle, reverse
   ( / )                      rotate              _ |           flip, mirror
   [ / ]                      slower / faster     \\             normal speed

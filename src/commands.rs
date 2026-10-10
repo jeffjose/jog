@@ -82,6 +82,8 @@ pub enum Command {
     Restart,
     Search,
     ClearFilter,
+    /// The go-to box: type part of a name, pick a match, go to it.
+    Palette,
     /// The `S` menu, and what it offers: an order for the list, a shuffle,
     /// and the same order backwards.
     SortMenu,
@@ -147,6 +149,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "/" => Search,
             "!" => ZoomFill,
             "Z" => ToggleEnlarge,
+            "k" if modifiers.control_key() || modifiers.super_key() => Palette,
             "k" => ToggleKeepView,
             "]" => SpeedUp,
             "[" => SpeedDown,
@@ -231,6 +234,7 @@ pub const MENU: &[Option<MenuItem>] = &[
     video_item("Next", "Ctrl+Right", Command::Next),
     video_item("Previous", "Ctrl+Left", Command::Previous),
     item("Search...", "/", Command::Search),
+    item("Go to file...", "Ctrl+K", Command::Palette),
     Some(MenuItem { label: "Show all files again", keys: "Esc", command: Command::ClearFilter, applies: Applies::Filtered, sub: &[] }),
     item("Shuffle", "z", Command::Shuffle),
     None,
@@ -379,6 +383,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Wheel", "Next / previous image"),
                 ("/", "Search: Enter goes, Tab keeps matches"),
                 ("", "is:video  is:marked  >10mb  ^start  !without"),
+                ("Ctrl+K", "Go to a file: type, Up / Down, Enter"),
                 ("Esc", "Clear a kept search, else quit"),
             ],
         ),

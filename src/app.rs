@@ -294,6 +294,27 @@ impl TextField {
     }
 }
 
+/// The go-to box: what is typed, the list positions that match it with
+/// the closest first, and which of them is picked out.
+struct Palette {
+    field: TextField,
+    matches: Vec<usize>,
+    selected: usize,
+}
+
+/// Where the go-to box is drawn and which of its matches are in view.
+struct PaletteLayout {
+    left: i32,
+    top: i32,
+    width: i32,
+    /// Height of the part typed into, and of each match below it.
+    head: i32,
+    row_height: i32,
+    first: usize,
+    rows: usize,
+    px: u32,
+}
+
 /// The rename box: the file being renamed and the name as typed so far.
 struct Prompt {
     id: usize,
@@ -341,6 +362,7 @@ pub struct App {
     undo: Vec<Undo>,
     prompt: Option<Prompt>,
     search: Option<Search>,
+    palette: Option<Palette>,
     /// A search that was kept: what was typed and every file, in order.
     /// `list` then holds only the matches.
     filter: Option<(String, Vec<usize>)>,
@@ -640,6 +662,7 @@ impl App {
             undo: Vec::new(),
             prompt: None,
             search: None,
+            palette: None,
             filter: None,
             sort: options.listing.sort.filter(|_| !options.listing.randomize),
             reversed: options.listing.reverse,
@@ -819,6 +842,12 @@ impl App {
                     }
                 }
             }
+        }
+        // The go-to box shows a small picture beside each match.
+        if self.grid.is_none() {
+            let shown = self.palette_shown();
+            thumbs.retain(|id| !shown.contains(id));
+            thumbs.splice(0..0, shown);
         }
         let request = Request {
             wanted,
@@ -1192,7 +1221,7 @@ impl App {
     /// of, or it was the last file.
     fn play_next(&mut self) {
         let open = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || self.search.is_some();
-        let occupied = open || self.drag.is_some();
+        let occupied = open || self.drag.is_some() || self.palette.is_some();
         if self.options.autoplay && self.slide_at.is_none() && !occupied && self.pos + 1 < self.list.len() {
             self.step(true);
         }
@@ -1652,6 +1681,11 @@ impl App {
             }
             ToggleWatch => self.set_watch(self.watch.is_none()),
             ToggleList => self.show_list = !self.show_list,
+            Palette => {
+                self.menu = None;
+                self.palette = Some(self::Palette { field: TextField::default(), matches: Vec::new(), selected: 0 });
+                self.palette_changed();
+            }
             Remove => self.remove_current(event_loop),
             Trash => self.trash(event_loop),
             Save => {
@@ -2615,7 +2649,7 @@ impl App {
     /// just past the end being viewed is gone to.
     fn take_listing(&mut self, listed: Vec<PathBuf>, watching: bool) {
         // Not under an open search box, whose own lists would go stale.
-        if self.search.is_some() {
+        if self.search.is_some() || self.palette.is_some() {
             return;
         }
         let seen: HashSet<&Path> = self.files.iter().map(PathBuf::as_path).collect();
@@ -2641,7 +2675,7 @@ impl App {
             self.loader.add_file(path.clone());
             self.files.push(path);
             // Among a kept search's matches only if it matches too.
-            let matches = query.as_ref().is_none_or(|query| self.score(query, id).is_some());
+            let matches = query.as_ref().is_none_or(|query| self.score(query, id, false).is_some());
             if let Some((_, all)) = &mut self.filter {
                 all.push(id);
             }
@@ -2721,15 +2755,160 @@ impl App {
         self.redraw();
     }
 
-    /// How well file `id` matches a search, or `None` if it does not.
-    fn score(&mut self, query: &Query, id: usize) -> Option<i32> {
+    // ---- Go to ---------------------------------------------------------
+
+    /// Finds the matches for what the go-to box now says: every file with
+    /// nothing typed, starting from the one on view, otherwise the closest
+    /// match first.
+    fn palette_changed(&mut self) {
+        let Some(palette) = &self.palette else { return };
+        let query = Query::parse(&palette.field.string());
+        let (matches, selected) = if query.is_empty() {
+            ((0..self.list.len()).collect(), self.pos)
+        } else {
+            let mut pass = |loose: bool| -> Vec<(usize, i32)> {
+                let positions = 0..self.list.len();
+                positions.filter_map(|pos| Some((pos, self.score(&query, self.list[pos], loose)?))).collect()
+            };
+            // As in the search box: scattered letters only as a last resort.
+            let mut scored = pass(false);
+            if scored.is_empty() {
+                scored = pass(true);
+            }
+            scored.sort_by_key(|(_, score)| -score);
+            (scored.into_iter().map(|(pos, _)| pos).collect(), 0)
+        };
+        if let Some(palette) = &mut self.palette {
+            (palette.matches, palette.selected) = (matches, selected);
+        }
+        self.request();
+        self.redraw();
+    }
+
+    fn palette_key(&mut self, key: Key<&str>) {
+        let rows = self.palette_layout().map_or(1, |layout| layout.rows.max(1));
+        let Some(palette) = &mut self.palette else { return };
+        let last = palette.matches.len().saturating_sub(1);
+        match key {
+            Key::Named(NamedKey::Escape) => self.palette = None,
+            Key::Named(NamedKey::Enter) => self.finish_palette(),
+            Key::Named(NamedKey::ArrowDown) => palette.selected = (palette.selected + 1).min(last),
+            Key::Named(NamedKey::ArrowUp) => palette.selected = palette.selected.saturating_sub(1),
+            Key::Named(NamedKey::PageDown) => palette.selected = (palette.selected + rows).min(last),
+            Key::Named(NamedKey::PageUp) => palette.selected = palette.selected.saturating_sub(rows),
+            key => {
+                if palette.field.key(key, self.modifiers) {
+                    return self.palette_changed();
+                }
+            }
+        }
+        self.request();
+        self.redraw();
+    }
+
+    /// Closes the go-to box and goes to the match picked out in it.
+    fn finish_palette(&mut self) {
+        let Some(palette) = self.palette.take() else { return };
+        if let Some(&pos) = palette.matches.get(palette.selected) {
+            self.go_to(pos, pos > self.pos);
+        }
+        self.redraw();
+    }
+
+    /// The go-to box sits in the upper middle of the window, with as many
+    /// matches under it as fit, the one picked out among them.
+    fn palette_layout(&self) -> Option<PaletteLayout> {
+        let palette = self.palette.as_ref()?;
+        let (width, height) = self.window_size();
+        let px = ui_px(height);
+        let line = Text::line_height(px);
+        let (head, row_height) = (line + 2 * px as i32, line * 2);
+        let top = height as i32 / 8;
+        let fit = ((height as i32 * 3 / 4 - top - head) / row_height).clamp(1, 12) as usize;
+        let rows = fit.min(palette.matches.len());
+        let first = (palette.selected + 1).saturating_sub(rows);
+        let box_width = (px as i32 * 48).min(width as i32);
+        Some(PaletteLayout { left: (width as i32 - box_width) / 2, top, width: box_width, head, row_height, first, rows, px })
+    }
+
+    /// The files whose matches the go-to box is showing.
+    fn palette_shown(&self) -> Vec<usize> {
+        let (Some(palette), Some(layout)) = (&self.palette, self.palette_layout()) else { return Vec::new() };
+        let shown = palette.matches.iter().skip(layout.first).take(layout.rows);
+        shown.map(|pos| self.list[*pos]).collect()
+    }
+
+    /// The row of the go-to box at a window position, counted through all
+    /// of its matches.
+    fn palette_row_at(&self, x: f64, y: f64) -> Option<usize> {
+        let layout = self.palette_layout()?;
+        let (x, y) = (x as i32 - layout.left, y as i32 - layout.top - layout.head);
+        let row = y.div_euclid(layout.row_height);
+        ((0..layout.width).contains(&x) && (0..layout.rows as i32).contains(&row)).then(|| layout.first + row as usize)
+    }
+
+    fn draw_palette(&self, canvas: &mut Canvas, text: &mut Text, layout: &PaletteLayout) {
+        let Some(palette) = &self.palette else { return };
+        let (px, pad) = (layout.px, layout.px as i32);
+        let line = Text::line_height(px);
+        let height = layout.head + layout.rows as i32 * layout.row_height + if layout.rows > 0 { pad / 2 } else { 0 };
+        canvas.fill(layout.left, layout.top, layout.width, height, MENU_COLOR);
+        canvas.outline(layout.left, layout.top, layout.width, height, 1, MENU_EDGE_COLOR);
+
+        let label = "Go to:   ";
+        let typed = palette.field.string();
+        let before_cursor: String = palette.field.text[..palette.field.cursor].iter().collect();
+        let note = match palette.matches.len() {
+            0 => "no match".to_string(),
+            count => format!("{} of {count}", palette.selected + 1),
+        };
+        let (x, y) = (layout.left + pad, layout.top + pad);
+        let typed_left = x + text.width(label, px);
+        text.draw(canvas, x, y, px, DIM_TEXT_COLOR, label);
+        text.draw(canvas, typed_left, y, px, TEXT_COLOR, &typed);
+        canvas.fill(typed_left + text.width(&before_cursor, px), y, (pad / 10).max(2), line, TEXT_COLOR);
+        let note_left = layout.left + layout.width - pad - text.width(&note, px);
+        text.draw(canvas, note_left, y, px, DIM_TEXT_COLOR, &note);
+
+        // Each match: a small picture, the name, and a video's length.
+        let thumb = ((layout.row_height - pad / 4) * 16 / 9, layout.row_height - pad / 4);
+        for row in 0..layout.rows {
+            let at = layout.first + row;
+            let (pos, top) = (palette.matches[at], layout.top + layout.head + row as i32 * layout.row_height);
+            let id = self.list[pos];
+            if at == palette.selected {
+                canvas.fill(layout.left + 1, top, layout.width - 2, layout.row_height, HIGHLIGHT_COLOR);
+            }
+            let (cell_left, cell_top) = (layout.left + pad, top + pad / 8);
+            match self.loader.thumb(id) {
+                Some(frame) => {
+                    let (w, h) = fit_size((frame.width, frame.height), (thumb.0 as u32, thumb.1 as u32), true);
+                    canvas.image(&frame, cell_left + (thumb.0 - w as i32) / 2, cell_top + (thumb.1 - h as i32) / 2, w as i32, h as i32);
+                }
+                None => canvas.fill(cell_left, cell_top, thumb.0, thumb.1, PLACEHOLDER_COLOR),
+            }
+            let text_top = top + (layout.row_height - line) / 2;
+            let length = self.durations.get(&id).copied().flatten().map(clock).unwrap_or_default();
+            let length_width = text.width(&length, px);
+            let right = layout.left + layout.width - pad;
+            text.draw(canvas, right - length_width, text_top, px, DIM_TEXT_COLOR, &length);
+            let name_left = cell_left + thumb.0 + pad;
+            let name = clipped(text, &self.name_of(id), right - length_width - pad - name_left, px);
+            let color = if self.marks.contains(&id) { MARK_COLOR } else { TEXT_COLOR };
+            text.draw(canvas, name_left, text_top, px, color, &name);
+        }
+    }
+
+    /// How well file `id` matches a search, or `None` if it does not. With
+    /// `loose`, letters scattered through the name count too.
+    fn score(&mut self, query: &Query, id: usize, loose: bool) -> Option<i32> {
         let path = &self.files[id];
         let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
         let size = match query.wants_size() {
             true => *self.sizes.entry(id).or_insert_with(|| std::fs::metadata(path).ok().map(|meta| meta.len())),
             false => None,
         };
-        query.score(&Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), size }, false)
+        query.score(&Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), size }, loose)
     }
 
     fn sort_by(&mut self, sort: Sort) {
@@ -2802,6 +2981,9 @@ impl App {
         }
         if self.search.is_some() {
             return self.search_key(key);
+        }
+        if self.palette.is_some() {
+            return self.palette_key(key);
         }
         if self.menu.is_some() {
             return self.menu_key(key, event_loop);
@@ -2908,6 +3090,21 @@ impl App {
         if self.help {
             self.help = !pressed;
             return self.redraw();
+        }
+        if self.palette.is_some() {
+            // A click on a match goes to it; one anywhere else closes the box.
+            if button == MouseButton::Left && pressed {
+                let row = self.palette_row_at(x, y);
+                match (&mut self.palette, row) {
+                    (Some(palette), Some(row)) => {
+                        palette.selected = row;
+                        self.finish_palette();
+                    }
+                    _ => self.palette = None,
+                }
+                self.redraw();
+            }
+            return;
         }
         if self.search.is_some() {
             // A click picks a match the way Enter does: in the grid, the
@@ -3016,6 +3213,11 @@ impl App {
         if lines == 0.0 || self.menu.is_some() {
             return;
         }
+        // In the go-to box it moves through the matches.
+        if self.palette.is_some() {
+            let key = if lines < 0.0 { NamedKey::ArrowDown } else { NamedKey::ArrowUp };
+            return self.palette_key(Key::Named(key));
+        }
         // Over the file list the wheel moves the list, not the file on view.
         let (x, y) = self.mouse;
         if let Some(panel) = self.list_panel().filter(|panel| (x as i32) < panel.width && (y as i32) < panel.bottom) {
@@ -3116,6 +3318,8 @@ impl App {
                         "End" => Key::Named(NamedKey::End),
                         "F2" => Key::Named(NamedKey::F2),
                         "F5" => Key::Named(NamedKey::F5),
+                        // `{Ctrl+k}`: a letter with a modifier held.
+                        letter if letter.chars().count() == 1 => Key::Character(letter),
                         _ => continue,
                     }
                 }
@@ -3398,6 +3602,7 @@ impl App {
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty();
         let panel = if viewing { self.list_panel() } else { None };
         let boxes = self.menu.is_some() || self.prompt.is_some() || self.search.is_some() || self.confirm.is_some() || panel.is_some();
+        let boxes = boxes || self.palette.is_some();
         if nothing_to_write && !boxes && !self.help {
             return;
         }
@@ -3434,6 +3639,12 @@ impl App {
         let box_bottom = if viewing { bottom } else { height - GridLayout::footer_height(height as u32) };
         if let Some(prompt) = &self.prompt {
             draw_prompt(canvas, &mut text, "Rename:   ", &prompt.field, "", &[], 0, px, box_bottom);
+        }
+        if let Some(layout) = self.palette_layout() {
+            for id in self.palette_shown() {
+                self.want_duration(id);
+            }
+            self.draw_palette(canvas, &mut text, &layout);
         }
         let buttons = self.search_buttons();
         if let Some(search) = &mut self.search {
@@ -4076,7 +4287,9 @@ impl ApplicationHandler<Event> for App {
                 self.start_snapshot(event_loop);
             }
             Event::Loaded(Job::Full(id)) if id == self.id() => self.redraw(),
-            Event::Loaded(Job::Thumb(_)) if self.strip_visible() || self.grid.is_some() => self.redraw(),
+            Event::Loaded(Job::Thumb(_)) if self.strip_visible() || self.grid.is_some() || self.palette.is_some() => {
+                self.redraw()
+            }
             Event::Loaded(_) => {}
             Event::Converted { created, failed, format } => self.converted(created, failed, format),
             Event::Video(signal) => self.video_signal(signal),
