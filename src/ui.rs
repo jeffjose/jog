@@ -35,6 +35,29 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Blends in a bar with fully rounded ends, `amount`/256 opaque. Only the
+    /// leftmost `upto` pixels of its width are drawn, which is how a
+    /// progress bar fills the same shape as its track.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pill(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32, amount: u32, upto: i32) {
+        let radius = f64::from(h) / 2.0;
+        for row in 0..h.max(0) {
+            let py = y + row;
+            if py < 0 || py >= self.height {
+                continue;
+            }
+            // How far the rounded end cuts into this row.
+            let from_middle = f64::from(row) + 0.5 - radius;
+            let inset = (radius - (radius * radius - from_middle * from_middle).max(0.0).sqrt()).round() as i32;
+            let left = (x + inset).max(0);
+            let right = (x + w - inset).min(x + upto).min(self.width);
+            for px in left..right {
+                let pixel = &mut self.pixels[(py * self.width + px) as usize];
+                *pixel = mix(*pixel, color, amount);
+            }
+        }
+    }
+
     pub fn outline(&mut self, x: i32, y: i32, w: i32, h: i32, thickness: i32, color: u32) {
         self.fill(x, y, w, thickness, color);
         self.fill(x, y + h - thickness, w, thickness, color);

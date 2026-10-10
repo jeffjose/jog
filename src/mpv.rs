@@ -91,6 +91,15 @@ impl Api {
     }
 }
 
+/// What a player is for.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Role {
+    /// Playing the video on view. `silent` discards the audio.
+    Playback { silent: bool },
+    /// Fetching frames to show while the pointer is over the seek bar.
+    Preview,
+}
+
 /// Why mpv wants attention. Sent from mpv's own threads.
 #[derive(Clone, Copy, Debug)]
 pub enum Signal {
@@ -155,8 +164,8 @@ pub fn available() -> bool {
 
 impl Player {
     /// Starts an idle player. `wake` is called from mpv's threads and must
-    /// only pass the signal on; `silent` discards the audio.
-    pub fn new(silent: bool, wake: impl Fn(Signal) + Send + Sync + 'static) -> Result<Player, String> {
+    /// only pass the signal on.
+    pub fn new(role: Role, wake: impl Fn(Signal) + Send + Sync + 'static) -> Result<Player, String> {
         let library = open_library().ok_or("libmpv is not installed")?;
         let api = Api::load(&library).map_err(|error| format!("unusable libmpv: {error}"))?;
 
@@ -180,9 +189,23 @@ impl Player {
                 ("osc", "no"),
                 ("terminal", "no"),
                 ("audio-client-name", "jog"),
-                ("ao", if silent { "null" } else { "" }),
             ];
-            for (name, value) in options.into_iter().filter(|(_, value)| !value.is_empty()) {
+            // A preview only ever shows single frames near where it is asked
+            // to look, so it trades accuracy and picture quality for speed.
+            let preview: &[(&str, &str)] = &[
+                ("pause", "yes"),
+                ("aid", "no"),
+                ("sid", "no"),
+                ("hr-seek", "no"),
+                ("vd-lavc-fast", "yes"),
+                ("vd-lavc-skiploopfilter", "all"),
+            ];
+            let extra: &[(&str, &str)] = match role {
+                Role::Playback { silent: false } => &[],
+                Role::Playback { silent: true } => &[("ao", "null")],
+                Role::Preview => preview,
+            };
+            for (name, value) in options.iter().chain(extra) {
                 (api.set_option_string)(handle, c_string(name).as_ptr(), c_string(value).as_ptr());
             }
             if (api.initialize)(handle) < 0 {
@@ -216,9 +239,15 @@ impl Player {
         unsafe { (self.api.command)(self.handle, pointers.as_mut_ptr()) };
     }
 
+    /// Opens a file in place of whatever was open, without changing whether
+    /// the player is paused.
+    pub fn open(&self, path: &Path) {
+        self.command(&[b"loadfile", path.as_os_str().as_bytes()]);
+    }
+
     /// Starts playing a file, replacing whatever was playing.
     pub fn play(&self, path: &Path) {
-        self.command(&[b"loadfile", path.as_os_str().as_bytes()]);
+        self.open(path);
         self.set("pause", "no");
     }
 

@@ -66,11 +66,11 @@ pub struct Playlist {
 
 /// Turns command-line paths into the list of images to show.
 ///
-/// A single file opens its whole directory, starting at that file. Otherwise
-/// directories expand to the images inside them and files are taken as given.
+/// Directories expand to the images inside them; files are taken as given,
+/// so naming one file shows just that file.
 pub fn collect(args: &[PathBuf], listing: &Listing) -> Playlist {
     let mut files = Vec::new();
-    let mut start_at = listing.start_at.clone();
+    let start_at = listing.start_at.clone();
 
     if let Some(list) = &listing.filelist {
         match std::fs::read_to_string(list) {
@@ -80,18 +80,6 @@ pub fn collect(args: &[PathBuf], listing: &Listing) -> Playlist {
     }
 
     match args {
-        [only] if only.is_file() && listing.filelist.is_none() => {
-            let dir = match only.parent() {
-                Some(p) if !p.as_os_str().is_empty() => p,
-                _ => Path::new("."),
-            };
-            list_dir(dir, listing.recursive, &mut files);
-            if !files.iter().any(|f| f.file_name() == only.file_name()) {
-                // Explicitly named, so show it even though the extension is unknown.
-                files.insert(0, only.clone());
-            }
-            start_at.get_or_insert_with(|| only.clone());
-        }
         [] if listing.filelist.is_none() => list_dir(Path::new("."), listing.recursive, &mut files),
         _ => {
             for arg in args {

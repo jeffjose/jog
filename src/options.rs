@@ -7,8 +7,9 @@ use crate::view::Zoom;
 pub const USAGE: &str = "\
 Usage: jog [OPTIONS] [FILE|DIR]...
 
-With one file, opens its directory starting at that file.
-With no arguments, opens the current directory.
+Shows the files named, and the images and videos in any directories named.
+With no arguments, opens the current directory. To open a directory at a
+particular file: jog DIR --start-at FILE
 
 Window:
   -F, --fullscreen           start fullscreen (the default)
@@ -81,7 +82,8 @@ Keys:
   Enter, 0-9                 run action          q Esc         quit
 
 Videos (mp4, mkv, webm and so on; needs libmpv) play in place. While one is up:
-  Space                      play / pause        Left / Right  seek 5 seconds
+  Space                      play / pause        Left / Right  seek 5 seconds (faster held)
+  PgUp / PgDn                seek 1 minute       pointer at the bottom: seek bar with previews
   Shift+Left / Shift+Right   step one frame      Up / Down     volume
   Ctrl+Left / Ctrl+Right, or , . < > n p         previous / next file
 

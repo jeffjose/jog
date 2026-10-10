@@ -351,7 +351,9 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             "While a video plays",
             &[
                 ("Space", "Play / pause"),
-                ("Left  Right", "Seek back / forward 5 seconds"),
+                ("Left  Right", "Seek 5 seconds; faster while held"),
+                ("PgUp  PgDn", "Seek back / forward 1 minute"),
+                ("Pointer at the bottom", "Seek bar: hover to preview, click to jump"),
                 ("Shift+Left  Shift+Right", "Previous / next frame"),
                 ("Up  Down", "Volume"),
                 ("Ctrl+Left  Ctrl+Right", "Previous / next file"),

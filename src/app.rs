@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ use crate::files;
 use crate::frame::{fit_size, Frame, Transform};
 use crate::loader::{Job, Loader, Request};
 use crate::meta::{self, Meta};
-use crate::mpv::{Player, PlayerEvent, Signal};
+use crate::mpv::{Player, PlayerEvent, Role, Signal};
 use crate::ops;
 use crate::options::{LastSlide, Options};
 use crate::render;
@@ -41,6 +42,8 @@ const DEFAULT_SLIDE_DELAY: f64 = 3.0;
 const VIDEO_END_POLL: Duration = Duration::from_millis(200);
 /// Seconds that `<` and `>` move through a video.
 const SEEK_STEP: f64 = 5.0;
+/// Seconds that Page Up and Page Down move through a video.
+const SEEK_JUMP: f64 = 60.0;
 /// How long after a seek the player's reported position cannot be trusted.
 const SEEK_SETTLE: Duration = Duration::from_millis(500);
 
@@ -59,6 +62,9 @@ pub enum Event {
     Converted { created: Vec<PathBuf>, failed: usize, format: Format },
     Video(Signal),
     Player(Result<Player, String>),
+    /// The same pair for the player that fetches seek-bar previews.
+    Preview(Signal),
+    PreviewPlayer(Result<Player, String>),
 }
 
 /// A file operation that `u` can take back.
@@ -86,6 +92,16 @@ struct Video {
     started: Instant,
     /// When the last seek was asked for and the time it was aiming at.
     seeking: Option<(Instant, f64)>,
+}
+
+/// The seek bar's track: its left end, length and vertical centre. `unit`
+/// is the interface text size, which everything about the bar scales with.
+#[derive(Clone, Copy)]
+struct SeekBar {
+    x: i32,
+    width: i32,
+    middle: i32,
+    unit: i32,
 }
 
 /// Something to do to the video on view.
@@ -175,6 +191,15 @@ pub struct App {
     /// Set once the player has been asked for, so that happens only once.
     player_asked: bool,
     video: Option<Video>,
+    /// A second, muted player that fetches the frames shown while the
+    /// pointer is over the seek bar, the file it has open, and its picture.
+    preview: Option<Player>,
+    preview_id: Option<usize>,
+    preview_frame: Option<Frame>,
+    /// Where along the seek bar the pointer is, from 0 to 1, while over it.
+    hover: Option<f64>,
+    /// How many times in a row a seek key has repeated from being held.
+    held: u32,
     toast: Option<(String, Instant)>,
     /// While set, the video's time and a larger progress bar are shown.
     time_until: Option<Instant>,
@@ -208,6 +233,8 @@ impl SceneKey {
 
 enum Drag {
     Pan,
+    /// Dragging along the seek bar.
+    Scrub,
     Zoom { start_x: f64, start_scale: f64, anchor: (f64, f64), moved: bool },
 }
 
@@ -396,6 +423,11 @@ impl App {
             player: None,
             player_asked: false,
             video: None,
+            preview: None,
+            preview_id: None,
+            preview_frame: None,
+            hover: None,
+            held: 0,
             toast: None,
             time_until: None,
             meta: None,
@@ -605,6 +637,7 @@ impl App {
             self.start_video(id);
         } else if !wanted && playing.is_some() {
             self.video = None;
+            self.hover = None;
             if let Some(player) = &self.player {
                 player.stop();
             }
@@ -622,9 +655,87 @@ impl App {
         let silent = self.snapshot.is_some();
         std::thread::spawn(move || {
             let wake = proxy.clone();
-            let player = Player::new(silent, move |signal| drop(wake.send_event(Event::Video(signal))));
+            let role = Role::Playback { silent };
+            let player = Player::new(role, move |signal| drop(wake.send_event(Event::Video(signal))));
+            let playable = player.is_ok();
             let _ = proxy.send_event(Event::Player(player));
+            if playable {
+                let wake = proxy.clone();
+                let preview = Player::new(Role::Preview, move |signal| drop(wake.send_event(Event::Preview(signal))));
+                let _ = proxy.send_event(Event::PreviewPlayer(preview));
+            }
         });
+    }
+
+    /// Asks the preview player for the frame at a point along the video.
+    fn request_preview(&mut self, fraction: f64) {
+        let (Some(preview), Some(video), Some((_, length))) = (&self.preview, &self.video, self.video_time()) else {
+            return;
+        };
+        if self.preview_id != Some(video.id) {
+            preview.open(&self.files[video.id]);
+            self.preview_id = Some(video.id);
+            self.preview_frame = None;
+        }
+        // The nearest keyframe is close enough, and much quicker to reach.
+        preview.command(&[b"seek", (fraction * length).to_string().as_bytes(), b"absolute+keyframes"]);
+    }
+
+    fn preview_signal(&mut self, signal: Signal) {
+        let Some(preview) = &self.preview else { return };
+        if let Signal::Events = signal {
+            // Only to empty the queue, so that mpv keeps signalling.
+            preview.events();
+            return;
+        }
+        // Size the picture to the video so that no bars are drawn into it.
+        let native = self.shown.as_ref().map_or((16, 9), |(_, frame)| frame.native);
+        let unit = ui_px(self.window_size().1);
+        let (width, height) = fit_size(native, (unit * 16, unit * 12), true);
+        let frame = self.preview_frame.get_or_insert_with(|| Frame { width, height, native, pixels: Vec::new() });
+        (frame.width, frame.height) = (width, height);
+        frame.pixels.resize(width as usize * height as usize, 0);
+        preview.render(&mut frame.pixels, width, height);
+        if self.hover.is_some() {
+            self.redraw();
+        }
+    }
+
+    /// Jumps to a point along the video, from 0 to 1.
+    fn seek_to(&mut self, fraction: f64) {
+        let (Some(player), Some((_, length))) = (&self.player, self.video_time()) else { return };
+        let target = fraction.clamp(0.0, 1.0) * length;
+        player.command(&[b"seek", target.to_string().as_bytes(), b"absolute+exact"]);
+        if let Some(video) = &mut self.video {
+            video.seeking = Some((Instant::now(), target));
+        }
+        self.redraw();
+    }
+
+    /// Where the seek bar's track is: inset from the sides and lifted off
+    /// the bottom edge, or off the filmstrip when that is pinned open.
+    fn seek_bar(&self) -> SeekBar {
+        let (width, height) = self.window_size();
+        let unit = ui_px(height) as i32;
+        let base = if self.strip_pinned { Strip::for_height(height).top } else { height as i32 };
+        SeekBar { x: unit * 6, width: (width as i32 - unit * 12).max(1), middle: base - unit * 2, unit }
+    }
+
+    /// Tracks the pointer over the seek bar: shows it at full size, and the
+    /// frame for the spot under the pointer.
+    fn video_pointer(&mut self, x: f64, y: f64) {
+        let bar = self.seek_bar();
+        // From a little above the bar down to the edge it is lifted off.
+        let zone = f64::from(bar.middle - bar.unit * 4)..f64::from(bar.middle + bar.unit * 2);
+        let fraction = ((x - f64::from(bar.x)) / f64::from(bar.width)).clamp(0.0, 1.0);
+        let hover = zone.contains(&y).then_some(fraction);
+        if hover != self.hover {
+            self.hover = hover;
+            if let Some(fraction) = hover {
+                self.request_preview(fraction);
+            }
+            self.redraw();
+        }
     }
 
     fn player_ready(&mut self, player: Result<Player, String>) {
@@ -687,13 +798,20 @@ impl App {
         if self.player.is_none() || modifiers.alt_key() {
             return false;
         }
+        // Holding a seek key down covers ground faster the longer it is held.
+        self.held = if repeat { self.held + 1 } else { 0 };
+        let step = match self.held {
+            0..=7 => SEEK_STEP,
+            8..=23 => SEEK_STEP * 3.0,
+            _ => SEEK_STEP * 12.0,
+        };
         let arrow = |forward: bool| {
             if modifiers.control_key() {
                 VideoAction::File(forward)
             } else if modifiers.shift_key() {
                 VideoAction::Frame(forward)
             } else {
-                VideoAction::Seek(if forward { SEEK_STEP } else { -SEEK_STEP })
+                VideoAction::Seek(if forward { step } else { -step })
             }
         };
         let action = match key {
@@ -702,6 +820,8 @@ impl App {
             Key::Named(NamedKey::Space) => VideoAction::Pause,
             Key::Named(NamedKey::ArrowRight) => arrow(true),
             Key::Named(NamedKey::ArrowLeft) => arrow(false),
+            Key::Named(NamedKey::PageDown) => VideoAction::Seek(SEEK_JUMP),
+            Key::Named(NamedKey::PageUp) => VideoAction::Seek(-SEEK_JUMP),
             Key::Named(NamedKey::ArrowUp) => VideoAction::Volume(5),
             Key::Named(NamedKey::ArrowDown) => VideoAction::Volume(-5),
             _ => return false,
@@ -1754,6 +1874,19 @@ impl App {
                     self.view_changed();
                 }
             }
+            Some(Drag::Scrub) => {
+                let bar = self.seek_bar();
+                let fraction = ((x - f64::from(bar.x)) / f64::from(bar.width)).clamp(0.0, 1.0);
+                self.hover = Some(fraction);
+                self.request_preview(fraction);
+                self.seek_to(fraction);
+            }
+            // Over a video the bottom of the window belongs to the seek bar,
+            // so the filmstrip does not also open there; `t` still pins it.
+            None if self.video.is_some() => {
+                self.set_strip_hover(false);
+                self.video_pointer(x, y);
+            }
             None => {
                 let height = self.window_size().1;
                 // A thin strip at the bottom edge opens the filmstrip; once
@@ -1799,6 +1932,11 @@ impl App {
                     menu.selected = menu.row_at(x, y);
                 }
                 self.activate_menu(event_loop);
+            }
+            (MouseButton::Left, true) if self.hover.is_some() => {
+                // Click to jump there; keep the button down to scrub.
+                self.seek_to(self.hover.unwrap_or(0.0));
+                self.drag = Some(Drag::Scrub);
             }
             (MouseButton::Left, true) => {
                 let (width, height) = self.window_size();
@@ -1884,6 +2022,16 @@ impl App {
                         _ => (ModifiersState::empty(), name),
                     };
                     self.modifiers = held;
+                    // `{Move:X,Y}` moves the pointer and `{Click}` clicks.
+                    if let Some((x, y)) = name.strip_prefix("Move:").and_then(|to| to.split_once(',')) {
+                        self.mouse_moved(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
+                        continue;
+                    }
+                    if name == "Click" {
+                        self.mouse_button(MouseButton::Left, true, event_loop);
+                        self.mouse_button(MouseButton::Left, false, event_loop);
+                        continue;
+                    }
                     match name {
                         "Enter" => Key::Named(NamedKey::Enter),
                         "Escape" => Key::Named(NamedKey::Escape),
@@ -2023,18 +2171,53 @@ impl App {
                 top_left.push(format!("{} / {}", clock(position), clock(length)));
             }
         }
-        // A bar along the bottom shows how far playback has got. After a
-        // seek, a frame step or a pause it grows and the time appears above
-        // it in large figures.
+        // The seek bar: a rounded track lifted off the bottom edge, always in
+        // the same place. It is slim during playback. Under the pointer, or
+        // after a seek, a frame step or a pause, it thickens and gains a
+        // handle and the times at either end.
         let mut time = Vec::new();
+        let mut time_bottom = bottom;
+        // Text placed by an anchor: ending at it, centred on it, or starting at it.
+        let mut labels: Vec<(i32, i32, Ordering, String)> = Vec::new();
         if let Some((position, length)) = self.video_time().filter(|_| viewing) {
-            let prominent = self.time_until.is_some();
-            let thickness = if prominent { px as i32 } else { (px as i32 / 2).max(5) };
-            let base = strip.map_or(height, |s| s.top);
-            let done = (f64::from(width) * position / length) as i32;
-            canvas.shade(0, base - thickness, width, thickness, 90);
-            canvas.fill(0, base - thickness, done, thickness, TEXT_COLOR);
-            if prominent {
+            let bar = self.seek_bar();
+            let unit = bar.unit;
+            let line = Text::line_height(px);
+            let active = self.hover.is_some() || self.time_until.is_some();
+            let thickness = if active { unit * 2 / 3 } else { (unit / 3).max(4) };
+            let top = bar.middle - thickness / 2;
+            if active {
+                // Darken the picture behind it, fading in from above.
+                for band in 0..6 {
+                    canvas.shade(0, bar.middle - unit * 4 + band * unit, width, unit, (230 - 22 * band) as u32);
+                }
+            }
+            let done = (f64::from(bar.width) * position / length) as i32;
+            canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 72, bar.width);
+            canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 256, done.max(thickness / 2));
+            if active {
+                let handle = unit * 5 / 4;
+                canvas.pill(bar.x + done - handle / 2, bar.middle - handle / 2, handle, handle, TEXT_COLOR, 256, handle);
+                labels.push((bar.x - unit, bar.middle - line / 2, Ordering::Less, clock(position)));
+                labels.push((bar.x + bar.width + unit, bar.middle - line / 2, Ordering::Greater, clock(length)));
+            }
+            time_bottom = bar.middle - unit * 4;
+
+            if let Some(fraction) = self.hover {
+                // A tick where the pointer is, the time there, and above
+                // that the frame from that part of the video.
+                let at = bar.x + (f64::from(bar.width) * fraction) as i32;
+                canvas.fill(at - 1, top - unit / 3, 2, thickness + unit * 2 / 3, MARK_COLOR);
+                let label_top = bar.middle - unit * 2 - line / 2;
+                labels.push((at.clamp(unit * 4, width - unit * 4), label_top, Ordering::Equal, clock(fraction * length)));
+                if let Some(frame) = &self.preview_frame {
+                    let (w, h) = (frame.width as i32, frame.height as i32);
+                    let left = (at - w / 2).clamp(unit, (width - unit - w).max(unit));
+                    let picture_top = label_top - unit / 2 - h;
+                    canvas.fill(left - 2, picture_top - 2, w + 4, h + 4, MENU_EDGE_COLOR);
+                    canvas.image(frame, left, picture_top, w, h);
+                }
+            } else if self.time_until.is_some() {
                 // To the hundredth while paused, where single frames matter.
                 let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
                 let now = if paused { clock_precise(position) } else { clock(position) };
@@ -2058,7 +2241,7 @@ impl App {
         };
 
         let blocks = [&top_left, &exif, &actions, &toast, &error, &footer, &time];
-        let nothing_to_write = blocks.iter().all(|lines| lines.is_empty());
+        let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty();
         if nothing_to_write && self.menu.is_none() && self.prompt.is_none() && self.confirm.is_none() && !self.help {
             return;
         }
@@ -2068,8 +2251,17 @@ impl App {
         text_block(canvas, &mut text, &exif, px, |_, h| (margin, bottom - h));
         text_block(canvas, &mut text, &actions, px, |w, h| (width - margin - w, bottom - h));
         text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w, margin));
-        // Twice the usual size, centred just above the progress bar.
-        text_block(canvas, &mut text, &time, px * 2, |w, h| ((width - w) / 2, bottom - px as i32 - h));
+        // Twice the usual size, centred just above the seek bar.
+        text_block(canvas, &mut text, &time, px * 2, |w, h| ((width - w) / 2, time_bottom - h));
+        for (anchor, top, side, label) in &labels {
+            let label_width = text.width(label, px);
+            let left = match side {
+                Ordering::Less => anchor - label_width,
+                Ordering::Equal => anchor - label_width / 2,
+                Ordering::Greater => *anchor,
+            };
+            text.draw(canvas, left, *top, px, TEXT_COLOR, label);
+        }
         text_block(canvas, &mut text, &error, px, |w, h| ((width - w) / 2, (height - h) / 2));
         if let Some(menu) = &self.menu {
             self.draw_menu(canvas, &mut text, menu);
@@ -2446,6 +2638,9 @@ impl ApplicationHandler<Event> for App {
             Event::Converted { created, failed, format } => self.converted(created, failed, format),
             Event::Video(signal) => self.video_signal(signal),
             Event::Player(player) => self.player_ready(player),
+            Event::Preview(signal) => self.preview_signal(signal),
+            // Without it the seek bar still works, just without pictures.
+            Event::PreviewPlayer(preview) => self.preview = preview.ok(),
         }
     }
 
@@ -2466,7 +2661,12 @@ impl ApplicationHandler<Event> for App {
                 self.key_pressed(event.logical_key.as_ref(), event.repeat, numpad, event_loop);
             }
             WindowEvent::CursorMoved { position, .. } => self.mouse_moved(position.x, position.y),
-            WindowEvent::CursorLeft { .. } => self.set_strip_hover(false),
+            WindowEvent::CursorLeft { .. } => {
+                self.set_strip_hover(false);
+                if self.hover.take().is_some() {
+                    self.redraw();
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.mouse_button(button, state == ElementState::Pressed, event_loop)
             }
