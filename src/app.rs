@@ -12,7 +12,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
-use crate::commands::{self, Command, MenuItem};
+use crate::commands::{self, Applies, Command, MenuItem};
 use crate::convert::{self, Format};
 use crate::files;
 use crate::frame::{fit_size, Frame, Transform};
@@ -990,6 +990,16 @@ impl App {
             Rename => self.start_rename(),
             Delete => self.ask_delete(),
             Convert(format) => self.convert(format),
+            // The menu's way to the keys that `video_key` handles.
+            PlayPause | SeekForward | SeekBack | VolumeUp | VolumeDown => {
+                self.video_key(match command {
+                    PlayPause => Key::Named(NamedKey::Space),
+                    SeekForward => Key::Character(">"),
+                    SeekBack => Key::Character("<"),
+                    VolumeUp => Key::Named(NamedKey::ArrowUp),
+                    _ => Key::Named(NamedKey::ArrowDown),
+                });
+            }
             Quit => event_loop.exit(),
         }
         self.redraw();
@@ -1354,9 +1364,32 @@ impl App {
     /// Opens a menu of `entries`. One with a title is keyboard-first: it
     /// sits in the middle of the window with its first item selected. One
     /// without opens at the pointer.
-    fn open_menu(&mut self, entries: &'static [Option<MenuItem>], title: Option<String>) {
+    fn open_menu(&mut self, all_entries: &'static [Option<MenuItem>], title: Option<String>) {
         let (width, height) = self.window_size();
         let px = ui_px(height);
+
+        // Leave out what does not apply to the files in question: zooming a
+        // video, say, or pausing a photo. A marked set can hold both kinds.
+        let ids = if title.is_some() { self.targets() } else { vec![self.list[self.focus()]] };
+        let videos = ids.iter().filter(|id| files::is_video(&self.files[**id])).count();
+        let applies = |item: &MenuItem| match item.applies {
+            Applies::Always => true,
+            Applies::Images => videos < ids.len(),
+            Applies::Videos => videos > 0,
+        };
+        let mut entries: Vec<Option<&'static MenuItem>> = Vec::new();
+        for entry in all_entries {
+            match entry {
+                Some(item) if applies(item) => entries.push(Some(item)),
+                // A separator only after an item, so none double up.
+                None if matches!(entries.last(), Some(Some(_))) => entries.push(None),
+                _ => {}
+            }
+        }
+        if matches!(entries.last(), Some(None)) {
+            entries.pop();
+        }
+
         let text = self.text.get_or_insert_with(Text::load);
         let (row_height, separator_height, pad) = (px as i32 * 9 / 5, px as i32 * 3 / 5, px as i32 / 2);
 
@@ -1370,9 +1403,9 @@ impl App {
 
         let mut top = pad + if title.is_some() { row_height } else { 0 };
         let mut rows = Vec::new();
-        for entry in entries {
-            let row_height = if entry.is_some() { row_height } else { separator_height };
-            rows.push(MenuRow { top, height: row_height, item: entry.as_ref() });
+        for &item in &entries {
+            let row_height = if item.is_some() { row_height } else { separator_height };
+            rows.push(MenuRow { top, height: row_height, item });
             top += row_height;
         }
         let menu_height = top + pad;

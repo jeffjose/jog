@@ -59,6 +59,11 @@ pub enum Command {
     Undo,
     Rename,
     Convert(Format),
+    PlayPause,
+    SeekForward,
+    SeekBack,
+    VolumeUp,
+    VolumeDown,
     Quit,
 }
 
@@ -149,39 +154,63 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
     })
 }
 
+/// Which kind of file a menu item makes sense for.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Applies {
+    Always,
+    Images,
+    Videos,
+}
+
 pub struct MenuItem {
     pub label: &'static str,
     pub keys: &'static str,
     pub command: Command,
+    pub applies: Applies,
 }
 
 const fn item(label: &'static str, keys: &'static str, command: Command) -> Option<MenuItem> {
-    Some(MenuItem { label, keys, command })
+    Some(MenuItem { label, keys, command, applies: Applies::Always })
+}
+
+const fn image_item(label: &'static str, keys: &'static str, command: Command) -> Option<MenuItem> {
+    Some(MenuItem { label, keys, command, applies: Applies::Images })
+}
+
+const fn video_item(label: &'static str, keys: &'static str, command: Command) -> Option<MenuItem> {
+    Some(MenuItem { label, keys, command, applies: Applies::Videos })
 }
 
 /// The right-click menu. `None` is a separator.
 pub const MENU: &[Option<MenuItem>] = &[
-    item("Next image", ">", Command::Next),
-    item("Previous image", "<", Command::Previous),
-    item("Random image", "z", Command::Random),
+    image_item("Next", ">", Command::Next),
+    image_item("Previous", "<", Command::Previous),
+    video_item("Next", "Right", Command::Next),
+    video_item("Previous", "Left", Command::Previous),
+    item("Random", "z", Command::Random),
     None,
-    item("Zoom in", "+", Command::ZoomIn),
-    item("Zoom out", "-", Command::ZoomOut),
-    item("Actual size", "*", Command::ZoomActual),
-    item("Fit to screen", "/", Command::ZoomFit),
-    item("Fill screen", "!", Command::ZoomFill),
-    item("Fit small images to screen", "Z", Command::ToggleEnlarge),
+    video_item("Play / pause", "Space", Command::PlayPause),
+    video_item("Forward 5 seconds", ">", Command::SeekForward),
+    video_item("Back 5 seconds", "<", Command::SeekBack),
+    video_item("Volume up", "Up", Command::VolumeUp),
+    video_item("Volume down", "Down", Command::VolumeDown),
+    image_item("Zoom in", "+", Command::ZoomIn),
+    image_item("Zoom out", "-", Command::ZoomOut),
+    image_item("Actual size", "*", Command::ZoomActual),
+    image_item("Fit to screen", "/", Command::ZoomFit),
+    image_item("Fill screen", "!", Command::ZoomFill),
+    image_item("Fit small images to screen", "Z", Command::ToggleEnlarge),
     None,
-    item("Rotate right", "]", Command::RotateRight),
-    item("Rotate left", "[", Command::RotateLeft),
-    item("Flip vertically", "_", Command::Flip),
-    item("Mirror horizontally", "|", Command::Mirror),
+    image_item("Rotate right", "]", Command::RotateRight),
+    image_item("Rotate left", "[", Command::RotateLeft),
+    image_item("Flip vertically", "_", Command::Flip),
+    image_item("Mirror horizontally", "|", Command::Mirror),
     None,
     item("Fullscreen", "f", Command::ToggleFullscreen),
     item("Grid view", "g", Command::ToggleGrid),
     item("Filmstrip", "t", Command::ToggleFilmstrip),
     item("Info", "i", Command::ToggleInfo),
-    item("EXIF data", "e", Command::ToggleExif),
+    image_item("EXIF data", "e", Command::ToggleExif),
     item("Slideshow", "h", Command::ToggleSlideshow),
     None,
     item("Mark", "x", Command::Mark),
@@ -193,9 +222,9 @@ pub const MENU: &[Option<MenuItem>] = &[
     item("Copy to folder", "v", Command::CopyTo),
     item("Move to folder", "m", Command::MoveTo),
     item("Rename", "r", Command::Rename),
-    item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
-    item("Convert to PNG", "", Command::Convert(Format::Png)),
-    item("Convert to WebP", "", Command::Convert(Format::WebP)),
+    image_item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
+    image_item("Convert to PNG", "", Command::Convert(Format::Png)),
+    image_item("Convert to WebP", "", Command::Convert(Format::WebP)),
     item("Undo", "u", Command::Undo),
     None,
     item("Reload", "F5", Command::Reload),
@@ -216,9 +245,9 @@ pub const MARK_MENU: &[Option<MenuItem>] = &[
     item("Copy full paths", "C", Command::CopyPath),
     item("Save list to a file", "L", Command::SaveFilelist),
     None,
-    item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
-    item("Convert to PNG", "", Command::Convert(Format::Png)),
-    item("Convert to WebP", "", Command::Convert(Format::WebP)),
+    image_item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
+    image_item("Convert to PNG", "", Command::Convert(Format::Png)),
+    image_item("Convert to WebP", "", Command::Convert(Format::WebP)),
     None,
     item("Move to trash", "Ctrl+Del", Command::Trash),
     item("Delete...", "d", Command::Delete),
