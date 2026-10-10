@@ -58,6 +58,23 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Fills a triangle pointing right, the "play" symbol, in a square of
+    /// side `size` with its top-left at `(x, y)`.
+    pub fn play_symbol(&mut self, x: i32, y: i32, size: i32, color: u32) {
+        for row in 0..size {
+            // Widest at the middle row, a point at the right.
+            let from_middle = (2 * row + 1 - size).abs();
+            self.fill(x, y + row, size - from_middle, 1, color);
+        }
+    }
+
+    /// Fills two upright bars, the "pause" symbol, in the same square.
+    pub fn pause_symbol(&mut self, x: i32, y: i32, size: i32, color: u32) {
+        let bar = size / 3;
+        self.fill(x, y, bar, size, color);
+        self.fill(x + size - bar, y, bar, size, color);
+    }
+
     pub fn outline(&mut self, x: i32, y: i32, w: i32, h: i32, thickness: i32, color: u32) {
         self.fill(x, y, w, thickness, color);
         self.fill(x, y + h - thickness, w, thickness, color);

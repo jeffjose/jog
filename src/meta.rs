@@ -20,7 +20,23 @@ pub fn human_size(bytes: u64) -> String {
     match bytes {
         0..=1023 => format!("{bytes} B"),
         1024..=1_048_575 => format!("{:.0} KB", bytes as f64 / 1024.0),
-        _ => format!("{:.1} MB", bytes as f64 / 1_048_576.0),
+        1_048_576..=1_073_741_823 => format!("{:.1} MB", bytes as f64 / 1_048_576.0),
+        _ => format!("{:.1} GB", bytes as f64 / 1_073_741_824.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_step_up_a_unit_at_1024() {
+        assert_eq!(human_size(1023), "1023 B");
+        assert_eq!(human_size(1024), "1 KB");
+        assert_eq!(human_size(7_654_321), "7.3 MB");
+        assert_eq!(human_size(1_073_741_823), "1024.0 MB");
+        assert_eq!(human_size(1_073_741_824), "1.0 GB");
+        assert_eq!(human_size(2_469_606_195), "2.3 GB");
     }
 }
 

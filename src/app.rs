@@ -106,6 +106,30 @@ struct SeekBar {
     unit: i32,
 }
 
+impl SeekBar {
+    /// The square at the far left holding the play / pause symbol, as its
+    /// top-left corner and side.
+    fn symbol(&self) -> (i32, i32, i32) {
+        let side = self.unit * 5 / 4;
+        (self.unit * 3 / 2, self.middle - side / 2, side)
+    }
+
+    /// Whether a window position is on the symbol, with some slack around
+    /// it to make it easy to hit.
+    fn on_symbol(&self, x: f64, y: f64) -> bool {
+        let (left, top, side) = self.symbol();
+        let slack = f64::from(self.unit / 2);
+        let within = |at: f64, from: i32| at >= f64::from(from) - slack && at < f64::from(from + side) + slack;
+        within(x, left) && within(y, top)
+    }
+
+    /// Whether a horizontal position is on the track, give or take a little.
+    fn on_track(&self, x: f64) -> bool {
+        let slack = f64::from(self.unit);
+        x >= f64::from(self.x) - slack && x < f64::from(self.x + self.width) + slack
+    }
+}
+
 /// Something to do to the video on view.
 enum VideoAction {
     Pause,
@@ -749,7 +773,9 @@ impl App {
         let (width, height) = self.window_size();
         let unit = ui_px(height) as i32;
         let base = if self.strip_pinned { Strip::for_height(height).top } else { height as i32 };
-        SeekBar { x: unit * 6, width: (width as i32 - unit * 12).max(1), middle: base - unit * 2, unit }
+        // Room on the left for the play / pause symbol and the elapsed
+        // time, and on the right for the duration.
+        SeekBar { x: unit * 8, width: (width as i32 - unit * 14).max(1), middle: base - unit * 2, unit }
     }
 
     /// Tracks the pointer over the seek bar: shows it at full size, and the
@@ -1965,9 +1991,14 @@ impl App {
                 self.activate_menu(event_loop);
             }
             (MouseButton::Left, true) if self.hover.is_some() => {
-                // Click to jump there; keep the button down to scrub.
-                self.seek_to(self.hover.unwrap_or(0.0), true);
-                self.drag = Some(Drag::Scrub);
+                let bar = self.seek_bar();
+                if bar.on_symbol(x, y) {
+                    self.video_action(VideoAction::Pause);
+                } else if bar.on_track(x) {
+                    // Click to jump there; keep the button down to scrub.
+                    self.seek_to(self.hover.unwrap_or(0.0), true);
+                    self.drag = Some(Drag::Scrub);
+                }
             }
             (MouseButton::Left, true) => {
                 let (width, height) = self.window_size();
@@ -2226,11 +2257,20 @@ impl App {
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 256, done.max(thickness / 2));
             let handle = unit * 5 / 4;
             canvas.pill(bar.x + done - handle / 2, bar.middle - handle / 2, handle, handle, TEXT_COLOR, 256, handle);
+            // The symbol shows the state: a triangle while playing, two bars
+            // while paused.
+            let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
+            let (symbol_left, symbol_top, side) = bar.symbol();
+            if paused {
+                canvas.pause_symbol(symbol_left, symbol_top, side, TEXT_COLOR);
+            } else {
+                canvas.play_symbol(symbol_left, symbol_top, side, TEXT_COLOR);
+            }
             labels.push((bar.x - unit, bar.middle - line / 2, Ordering::Less, clock(position)));
             labels.push((bar.x + bar.width + unit, bar.middle - line / 2, Ordering::Greater, clock(length)));
             time_bottom = bar.middle - unit * 4;
 
-            if let Some(fraction) = self.hover {
+            if let Some(fraction) = self.hover.filter(|_| bar.on_track(self.mouse.0)) {
                 // A tick where the pointer is, the time there, and above
                 // that the frame from that part of the video.
                 let at = bar.x + (f64::from(bar.width) * fraction) as i32;
@@ -2654,6 +2694,12 @@ impl ApplicationHandler<Event> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
+        // A playing video keeps events coming without a pause, and a
+        // scripted run's timetable would otherwise wait for the pause.
+        let snapshot_due = self.snapshot.as_ref().and_then(|snapshot| snapshot.at);
+        if snapshot_due.is_some_and(|at| at <= Instant::now()) {
+            self.finish_snapshot(event_loop);
+        }
         match event {
             Event::Loaded(Job::Fitted(id)) if id == self.id() => {
                 self.refresh();
