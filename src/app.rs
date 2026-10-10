@@ -2051,6 +2051,9 @@ impl App {
             SearchEnd::Keep if narrowed => {
                 if self.options.verbose {
                     eprintln!("jog: search \"{typed}\" kept: {} of {} files", self.list.len(), search.base.len());
+                    for (pos, id) in self.list.iter().enumerate() {
+                        eprintln!("jog:     [{}] {}", pos + 1, self.files[*id].display());
+                    }
                 }
                 self.filter = Some((typed, search.base));
                 self.toast(format!("Showing {} of {} (Esc for all)", self.list.len(), self.total()));
