@@ -1216,8 +1216,19 @@ impl App {
             Key::Named(NamedKey::ArrowDown) => VideoAction::Volume(-5),
             _ => return false,
         };
+        // Forward from the end goes on to the next file. Only on a fresh
+        // press: a key held down to reach the end stops there.
+        let forward = matches!(action, VideoAction::Seek(seconds) if seconds > 0.0);
+        let action = if forward && !repeat && self.at_video_end() { VideoAction::File(true) } else { action };
         self.video_action(action);
         true
+    }
+
+    /// Whether the video has played, or been taken, to its last frame.
+    fn at_video_end(&self) -> bool {
+        let Some(player) = &self.player else { return false };
+        let ended = player.flag("eof-reached") == Some(true);
+        ended || self.video_time().is_some_and(|(position, length)| position >= length - 0.25)
     }
 
     fn video_action(&mut self, action: VideoAction) {
@@ -1532,13 +1543,6 @@ impl App {
             Last => self.go_to(self.list.len() - 1, false),
             JumpForward => self.jump(true),
             JumpBack => self.jump(false),
-            Random => {
-                let len = self.list.len();
-                if len > 1 {
-                    let pick = self.rng.below(len - 1);
-                    self.go_to(if pick >= self.pos { pick + 1 } else { pick }, true);
-                }
-            }
             NextDir | PreviousDir => {
                 let forward = command == NextDir;
                 if let Some(pos) = self.other_dir(forward) {
@@ -2092,18 +2096,27 @@ impl App {
         let Some(search) = &mut self.search else { return };
         let query = Query::parse(&search.field.string());
         let wants_size = query.wants_size();
-        let scored: Vec<(usize, i32)> = (search.base.iter())
-            .filter_map(|&id| {
-                let path = &self.files[id];
-                let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
-                let size = match wants_size {
-                    true => *self.sizes.entry(id).or_insert_with(|| std::fs::metadata(path).ok().map(|meta| meta.len())),
-                    false => None,
-                };
-                let facts = Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), size };
-                Some((id, query.score(&facts)?))
-            })
-            .collect();
+        let mut pass = |loose: bool| -> Vec<(usize, i32)> {
+            (search.base.iter())
+                .filter_map(|&id| {
+                    let path = &self.files[id];
+                    let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+                    let size = match wants_size {
+                        true => *self.sizes.entry(id).or_insert_with(|| std::fs::metadata(path).ok().map(|meta| meta.len())),
+                        false => None,
+                    };
+                    let facts = Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), size };
+                    Some((id, query.score(&facts, loose)?))
+                })
+                .collect()
+        };
+        // Names with the letters together, as typed. Only when there are
+        // none do names with them scattered count: in a folder of long
+        // names nearly any word is in most of them that way.
+        let mut scored = pass(false);
+        if scored.is_empty() {
+            scored = pass(true);
+        }
         search.no_match = scored.is_empty();
         if search.no_match {
             return self.redraw();
@@ -2506,11 +2519,18 @@ impl App {
         self.move_cursor(target - cursor);
     }
 
-    /// Shuffles the viewing order. The image being viewed stays current.
+    /// Shuffles the viewing order. The image being viewed stays current,
+    /// and comes first, so that going on from it passes every other file.
     fn shuffle(&mut self) {
         (self.sort, self.reversed, self.shuffled) = (None, false, true);
+        let viewed = self.id();
         let mut rng = std::mem::replace(&mut self.rng, Rng::from_clock());
-        self.reorder(|ids, _| rng.shuffle(ids));
+        self.reorder(|ids, _| {
+            rng.shuffle(ids);
+            if let Some(at) = ids.iter().position(|id| *id == viewed) {
+                ids.swap(0, at);
+            }
+        });
         self.rng = rng;
     }
 
@@ -2692,7 +2712,7 @@ impl App {
             true => *self.sizes.entry(id).or_insert_with(|| std::fs::metadata(path).ok().map(|meta| meta.len())),
             false => None,
         };
-        query.score(&Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), size })
+        query.score(&Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), size }, false)
     }
 
     fn sort_by(&mut self, sort: Sort) {
@@ -2719,7 +2739,7 @@ impl App {
         match commands::for_key(key, ModifiersState::empty(), false) {
             Some(Command::Next) => self.step_cursor(1, 0),
             Some(Command::Previous) => self.step_cursor(-1, 0),
-            Some(Command::Random) => self.shuffle(),
+            Some(Command::Shuffle) => self.execute(Command::Shuffle, event_loop),
             Some(Command::JumpForward) => self.move_cursor(layout.per_page() as i64),
             Some(Command::JumpBack) => self.move_cursor(-(layout.per_page() as i64)),
             Some(Command::First) => self.move_cursor(i64::MIN),

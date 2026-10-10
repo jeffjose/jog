@@ -97,12 +97,12 @@ impl Query {
 
     /// How well a file matches, higher being better, or `None` if it does
     /// not match at all.
-    pub fn score(&self, file: &Facts) -> Option<i32> {
+    pub fn score(&self, file: &Facts, loose: bool) -> Option<i32> {
         let name = file.name.to_lowercase();
         let mut total = 0;
         for term in &self.terms {
             total += match term {
-                Term::Fuzzy(letters) => fuzzy(letters, &name)?,
+                Term::Fuzzy(letters) => fuzzy(letters, &name, loose)?,
                 Term::Prefix(start) => name.starts_with(start.as_str()).then_some(200)?,
                 Term::Without(part) => (!name.contains(part.as_str())).then_some(0)?,
                 Term::Is(kind) => {
@@ -124,10 +124,11 @@ impl Query {
     }
 }
 
-/// Scores `letters` appearing in order within `name`. Runs of adjacent
+/// Scores `letters` within `name`: together as typed, or, when `loose`,
+/// scattered through it in that order. Runs of adjacent
 /// letters and matches at the start of the name or of a word count for more,
 /// so that the closest names come first.
-fn fuzzy(letters: &[char], name: &str) -> Option<i32> {
+fn fuzzy(letters: &[char], name: &str, loose: bool) -> Option<i32> {
     let name: Vec<char> = name.chars().collect();
     let word_start = |at: usize| at == 0 || !name[at - 1].is_alphanumeric();
 
@@ -138,6 +139,9 @@ fn fuzzy(letters: &[char], name: &str) -> Option<i32> {
         return Some(100 + place + 10 * letters.len() as i32);
     }
 
+    if !loose {
+        return None;
+    }
     let (mut score, mut wanted, mut previous) = (0, 0, None);
     for (at, letter) in name.iter().enumerate() {
         if wanted < letters.len() && *letter == letters[wanted] {
@@ -162,8 +166,15 @@ mod tests {
     fn matches<'a>(query: &str, names: &[&'a str]) -> Vec<&'a str> {
         let query = Query::parse(query);
         let facts = |name: &'a str| Facts { name, video: name.ends_with(".mp4"), marked: name == "bark.jpg", size: Some(name.len() as u64 * 1024) };
-        let mut scored: Vec<(i32, &str)> =
-            names.iter().filter_map(|name| Some((query.score(&facts(name))?, *name))).collect();
+        // As the search box does: scattered letters only when nothing has
+        // them together.
+        let pass = |loose: bool| -> Vec<(i32, &'a str)> {
+            names.iter().filter_map(|name| Some((query.score(&facts(name), loose)?, *name))).collect()
+        };
+        let mut scored = pass(false);
+        if scored.is_empty() {
+            scored = pass(true);
+        }
         scored.sort_by_key(|(score, _)| -score);
         scored.into_iter().map(|(_, name)| name).collect()
     }
@@ -183,6 +194,13 @@ mod tests {
         assert_eq!(matches("foo !bar", NAMES), ["food.webp", "My-Foo.png"]);
         assert_eq!(matches("foo .jpg", NAMES), ["foo-bar.jpg"]);
         assert_eq!(matches(".jpg", NAMES).len(), 3);
+    }
+
+    #[test]
+    fn scattered_letters_only_when_nothing_has_them_together() {
+        let names = ["barbie-pink.mp4", "t-bare-rabbit-lingerie.mp4", "bark.jpg"];
+        assert_eq!(matches("barbie", &names), ["barbie-pink.mp4"]);
+        assert_eq!(matches("brbt", &names), ["t-bare-rabbit-lingerie.mp4"]);
     }
 
     #[test]

@@ -73,7 +73,7 @@ Config file:
 Keys:
   > . n Right Space          next image          < , Left Backspace  previous
   Home / End                 first / last        PgDn / PgUp   jump 5%
-  z                          random image        { / }         previous / next directory
+  z                          shuffle the list    { / }         previous / next directory
   + Up / - Down              zoom in / out       * 0 !         100%, fit, fill
   /                          search: type to narrow the list, then Enter to go to
                              the match, Tab to keep only the matches, Esc to cancel
