@@ -2179,8 +2179,12 @@ impl App {
         let source = if self.grid.is_some() { None } else { self.source() };
         match source {
             None if self.grid.is_some() => {
+                let started = Instant::now();
                 pixels.fill(GRID_COLOR);
                 self.draw_grid(&mut Canvas::new(pixels, window.0, window.1));
+                if self.options.debug {
+                    eprintln!("jog: {:>7.1?} draw  grid", started.elapsed());
+                }
             }
             Some(frame) => {
                 let layout = self.view.layout(frame.native, window);
@@ -2192,9 +2196,14 @@ impl App {
                 let smooth = self.antialias && settled && !magnified;
                 let key = SceneKey { frame, layout, smooth, window };
                 if !self.scene_key.as_ref().is_some_and(|current| current.matches(&key)) {
+                    let started = Instant::now();
                     self.scene.resize(pixels.len(), 0);
                     let background = self.options.background;
                     render::draw_image(&mut self.scene, window, &key.frame, layout, smooth, background);
+                    if self.options.debug {
+                        let how = if smooth { "smooth" } else { "nearest" };
+                        eprintln!("jog: {:>7.1?} draw  {how} {}x{} -> {}x{}", started.elapsed(), key.frame.width, key.frame.height, layout.width, layout.height);
+                    }
                     self.scene_key = Some(key);
                 }
                 pixels.copy_from_slice(&self.scene);
