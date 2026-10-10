@@ -13,7 +13,7 @@ const RAW_EXTS: &[&str] = &[
 ];
 
 const VIDEO_EXTS: &[&str] = &[
-    "mp4", "mkv", "webm", "mov", "avi", "m4v", "mpg", "mpeg", "wmv", "flv", "ts", "m2ts",
+    "mp4", "mkv", "webm", "mov", "avi", "m4v", "mpg", "mpeg", "wmv", "flv", "m2ts",
 ];
 
 fn has_ext(path: &Path, exts: &[&str]) -> bool {

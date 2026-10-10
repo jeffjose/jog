@@ -609,12 +609,14 @@ impl App {
     }
 
     fn video_signal(&mut self, signal: Signal) {
-        let (Some(player), Some(video)) = (&self.player, &mut self.video) else { return };
-        if let Signal::Events = signal {
-            for event in player.events() {
-                // The still stays up until the player has a frame to show.
-                video.showing = event == PlayerEvent::Showing;
-            }
+        let Some(player) = &self.player else { return };
+        // Read the events even when no video is wanted: mpv only signals
+        // again once its queue has been emptied.
+        let events = if let Signal::Events = signal { player.events() } else { Vec::new() };
+        let Some(video) = &mut self.video else { return };
+        for event in events {
+            // The still stays up until the player has a frame to show.
+            video.showing = event == PlayerEvent::Showing;
         }
         if video.showing {
             self.redraw();

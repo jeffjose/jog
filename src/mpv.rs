@@ -137,17 +137,23 @@ fn c_string(text: impl AsRef<[u8]>) -> CString {
     CString::new(text.as_ref()).unwrap_or_default()
 }
 
+fn open_library() -> Option<Library> {
+    let chosen = std::env::var("JOG_LIBMPV").ok();
+    let names = chosen.iter().map(String::as_str).chain(LIBRARY_NAMES.iter().copied());
+    // SAFETY: loading libmpv runs only its ordinary library initialisers.
+    names.filter_map(|name| unsafe { Library::new(name) }.ok()).next()
+}
+
+/// Whether videos can be played on this machine.
+pub fn available() -> bool {
+    open_library().is_some()
+}
+
 impl Player {
     /// Starts an idle player. `wake` is called from mpv's threads and must
     /// only pass the signal on; `silent` discards the audio.
     pub fn new(silent: bool, wake: impl Fn(Signal) + Send + Sync + 'static) -> Result<Player, String> {
-        let chosen = std::env::var("JOG_LIBMPV").ok();
-        let names = chosen.iter().map(String::as_str).chain(LIBRARY_NAMES.iter().copied());
-        // SAFETY: loading libmpv runs only its ordinary library initialisers.
-        let library = names
-            .filter_map(|name| unsafe { Library::new(name) }.ok())
-            .next()
-            .ok_or("libmpv is not installed (on Debian or Ubuntu: sudo apt install libmpv2 or libmpv1)")?;
+        let library = open_library().ok_or("libmpv is not installed")?;
         let api = Api::load(&library).map_err(|error| format!("unusable libmpv: {error}"))?;
 
         // SAFETY: plain calls into libmpv with valid, NUL-terminated strings;
