@@ -76,6 +76,8 @@ pub enum Command {
     PlayPause,
     SeekForward,
     SeekBack,
+    /// Go to this many seconds into the video.
+    SeekTo(f64),
     VolumeUp,
     VolumeDown,
     /// Play the video from its beginning.

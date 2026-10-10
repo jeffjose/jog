@@ -58,7 +58,8 @@ impl Query {
             .filter_map(|word| {
                 let lower = word.to_lowercase();
                 // One of these still being typed narrows nothing yet.
-                if let Some(kind) = lower.strip_prefix("is:") {
+                // `#video` is the short way to write `is:video`.
+                if let Some(kind) = lower.strip_prefix("is:").or_else(|| lower.strip_prefix('#')) {
                     return Some(Term::Is(match kind {
                         "video" => Kind::Video,
                         "image" => Kind::Image,
@@ -206,6 +207,9 @@ mod tests {
     #[test]
     fn kinds_and_sizes() {
         assert_eq!(matches("is:video", NAMES), ["berserker-bloodmoon.mp4"]);
+        assert_eq!(matches("#video", NAMES), ["berserker-bloodmoon.mp4"]);
+        assert_eq!(matches("#marked", NAMES), ["bark.jpg"]);
+        assert!(Query::parse("#vid").is_empty());
         assert_eq!(matches("is:image foo", NAMES).len(), 3);
         assert_eq!(matches("is:marked", NAMES), ["bark.jpg"]);
         // Each name stands for a file of as many kilobytes as it has letters.

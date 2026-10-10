@@ -423,6 +423,17 @@ struct Palette {
     /// Where the buttons were last drawn, for clicks: left, top, width
     /// and height.
     drawn: Vec<(PaletteEnd, [i32; 4])>,
+    /// What is listed in place of files when the box is given a command
+    /// to find, with `>`, or a time to go to, with `:`: what each is called,
+    /// its key, and the command itself.
+    commands: Vec<(String, &'static str, Command)>,
+}
+
+impl Palette {
+    /// How many rows there are to pick among: commands, or else files.
+    fn rows(&self) -> usize {
+        if self.commands.is_empty() { self.matches.len() } else { self.commands.len() }
+    }
 }
 
 /// Where the go-to box is drawn and which of its matches are in view.
@@ -454,6 +465,8 @@ pub struct App {
     undo: Vec<Undo>,
     prompt: Option<Prompt>,
     palette: Option<Palette>,
+    /// A command picked in the find box, to be run now that it has closed.
+    run_next: Option<Command>,
     /// A search that was kept: what was typed and every file, in order.
     /// `list` then holds only the matches.
     filter: Option<(String, Vec<usize>)>,
@@ -769,6 +782,7 @@ impl App {
             undo: Vec::new(),
             prompt: None,
             palette: None,
+            run_next: None,
             filter: None,
             sort: options.listing.sort.filter(|_| !options.listing.randomize),
             reversed: options.listing.reverse,
@@ -1858,6 +1872,11 @@ impl App {
             SpeedReset => self.change_speed(None),
             PlayPause => self.video_action(VideoAction::Pause),
             SeekForward => self.video_action(VideoAction::Seek(SEEK_STEP)),
+            SeekTo(seconds) => {
+                if let Some((_, length)) = self.video_time() {
+                    self.seek_to(seconds / length, true);
+                }
+            }
             SeekBack => self.video_action(VideoAction::Seek(-SEEK_STEP)),
             FrameForward => self.video_action(VideoAction::Frame(true)),
             FrameBack => self.video_action(VideoAction::Frame(false)),
@@ -2758,7 +2777,7 @@ impl App {
         let text: Vec<char> = self.filter.as_ref().map(|(typed, _)| typed.chars().collect()).unwrap_or_default();
         let field = TextField::new(text.clone(), text.len());
         self.menu = None;
-        self.palette = Some(Palette { field, matches: Vec::new(), narrowed: false, selected: 0, focus: 0, drawn: Vec::new() });
+        self.palette = Some(Palette { field, matches: Vec::new(), narrowed: false, selected: 0, focus: 0, drawn: Vec::new(), commands: Vec::new() });
         self.palette_changed();
         // Start on the file on view, where it is among the matches.
         let current = self.list[self.focus()];
@@ -2772,12 +2791,93 @@ impl App {
     /// match first.
     fn palette_changed(&mut self) {
         let Some(palette) = &self.palette else { return };
-        let (matches, narrowed) = self.matching(&palette.field.string());
+        let typed = palette.field.string();
+        let (matches, narrowed, commands) = match typed.chars().next() {
+            // `>` and then a number is a size to find files by.
+            Some('>') if !typed[1..].starts_with(|c: char| c.is_ascii_digit()) => (Vec::new(), false, self.commands_matching(&typed[1..])),
+            Some(':') => self.place_named(&typed[1..]),
+            _ => {
+                let (matches, narrowed) = self.matching(&typed);
+                (matches, narrowed, Vec::new())
+            }
+        };
         if let Some(palette) = &mut self.palette {
             (palette.matches, palette.narrowed, palette.selected, palette.focus) = (matches, narrowed, 0, 0);
+            palette.commands = commands;
         }
         self.request();
         self.redraw();
+    }
+
+    /// The commands whose names match what follows a `>` in the box, the
+    /// closest first: everything in the menu that applies to the file on
+    /// view, those in a submenu named with it, as in "Sort: Newest first".
+    fn commands_matching(&mut self, typed: &str) -> Vec<(String, &'static str, Command)> {
+        let video = files::is_video(&self.files[self.list[self.focus()]]);
+        let mut all = Vec::new();
+        let mut groups: Vec<(&str, &'static [Option<MenuItem>])> = vec![("", commands::MENU)];
+        while let Some((group, items)) = groups.pop() {
+            for item in items.iter().flatten() {
+                let applies = match item.applies {
+                    Applies::Always => true,
+                    Applies::Images => !video,
+                    Applies::Videos => video,
+                    Applies::Filtered => self.filter.is_some(),
+                };
+                match item.command {
+                    _ if !applies => {}
+                    _ if !item.sub.is_empty() => groups.push((item.label, item.sub)),
+                    // The box itself is not something to run from it.
+                    Command::Search | Command::Palette => {}
+                    command if group.is_empty() => all.push((item.label.to_string(), item.keys, command)),
+                    command => all.push((format!("{group}: {}", item.label), item.keys, command)),
+                }
+            }
+        }
+        all.sort_by(|a, b| a.0.cmp(&b.0));
+        let query = Query::parse(typed);
+        if query.is_empty() {
+            return all;
+        }
+        let score = |name: &str, loose: bool| query.score(&Facts { name, video: false, marked: false, size: None }, loose);
+        let pass = |loose: bool| -> Vec<(i32, (String, &'static str, Command))> {
+            all.iter().filter_map(|entry| Some((score(&entry.0, loose)?, entry.clone()))).collect()
+        };
+        let mut scored = pass(false);
+        if scored.is_empty() {
+            scored = pass(true);
+        }
+        scored.sort_by_key(|(score, _)| -score);
+        scored.into_iter().map(|(_, entry)| entry).collect()
+    }
+
+    /// What follows a `:` in the box names a place: `42` is the 42nd file
+    /// of the list, `1:30` or `90s` a time in the video on view, and `50%`
+    /// that far through the video, or through the list when no video is
+    /// on view. Given back as the box's matches, whether they narrow the
+    /// list (never), and its commands.
+    fn place_named(&mut self, typed: &str) -> (Vec<usize>, bool, Vec<(String, &'static str, Command)>) {
+        let typed = typed.trim();
+        let length = self.video_time().map(|(_, length)| length);
+        let seek = |seconds: f64| vec![(format!("Go to {} in this video", clock(seconds)), "", Command::SeekTo(seconds))];
+        let file = |app: &App, number: usize| vec![app.list[number.clamp(1, app.list.len()) - 1]];
+        let number = |text: &str| text.parse::<f64>().ok().filter(|number| *number >= 0.0);
+        if let Some(percent) = typed.strip_suffix('%').and_then(number) {
+            let part = (percent / 100.0).min(1.0);
+            return match length {
+                Some(length) => (Vec::new(), false, seek(length * part)),
+                None => (file(self, (part * self.list.len() as f64).ceil() as usize), false, Vec::new()),
+            };
+        }
+        // Hours, minutes and seconds, or minutes and seconds, or seconds.
+        let parts: Option<Vec<f64>> = typed.trim_end_matches('s').split(':').map(number).collect();
+        let seconds = parts.filter(|parts| parts.len() <= 3).map(|parts| parts.iter().fold(0.0, |total, part| total * 60.0 + part));
+        let timed = typed.contains(':') || typed.ends_with('s');
+        match (seconds, length) {
+            (Some(seconds), Some(length)) if timed => (Vec::new(), false, seek(seconds.min(length))),
+            (Some(place), _) if !timed => (file(self, place as usize), false, Vec::new()),
+            _ => (Vec::new(), false, Vec::new()),
+        }
     }
 
     /// The buttons at the right of the box, in order: carry on with only
@@ -2800,7 +2900,7 @@ impl App {
         let buttons = self.palette_buttons();
         let Some(palette) = &mut self.palette else { return };
         palette.focus = palette.focus.min(buttons.len());
-        let last = palette.matches.len().saturating_sub(1);
+        let last = palette.rows().saturating_sub(1);
         let at_end = palette.field.cursor == palette.field.text.len();
         // Moving among the matches takes the keyboard back from a button.
         let pick = |palette: &mut Palette, to: usize| (palette.selected, palette.focus) = (to.min(last), 0);
@@ -2839,6 +2939,12 @@ impl App {
     /// with only its matches, or going back to every file.
     fn finish_palette(&mut self, end: PaletteEnd) {
         let Some(palette) = self.palette.take() else { return };
+        // A command is left for whoever closed the box to run, with what
+        // running one needs.
+        if let (PaletteEnd::Go, Some((_, _, command))) = (end, palette.commands.get(palette.selected)) {
+            self.run_next = Some(*command);
+            return self.redraw();
+        }
         let picked = palette.matches.get(palette.selected).copied();
         match end {
             PaletteEnd::Keep => {
@@ -2882,7 +2988,7 @@ impl App {
         let above = frame.1 + px as i32;
         let fit = ((height as i32 * 3 / 4 - above - head) / row_height).clamp(1, 10) as usize;
         let top = (height as i32 - above - head - fit as i32 * row_height) / 2 + above;
-        let rows = fit.min(palette.matches.len());
+        let rows = fit.min(palette.rows());
         let first = (palette.selected + 1).saturating_sub(rows);
         let box_width = (px as i32 * 48).min(width as i32);
         Some(PaletteLayout { left: (width as i32 - box_width) / 2, top, width: box_width, head, row_height, first, rows, px, frame })
@@ -2932,10 +3038,15 @@ impl App {
             }
         }
 
-        let label = "Find:   ";
+        let label = match palette.field.text.first() {
+            _ if !palette.commands.is_empty() && palette.field.text.first() == Some(&':') => "Go to:   ",
+            Some('>') if palette.matches.is_empty() => "Run:   ",
+            Some(':') => "Go to:   ",
+            _ => "Find:   ",
+        };
         let typed = palette.field.string();
         let before_cursor: String = palette.field.text[..palette.field.cursor].iter().collect();
-        let note = match palette.matches.len() {
+        let note = match palette.rows() {
             0 => "no match".to_string(),
             count => format!("{} of {count}", palette.selected + 1),
         };
@@ -2969,10 +3080,23 @@ impl App {
         let thumb = ((layout.row_height - pad / 4) * 16 / 9, layout.row_height - pad / 4);
         for row in 0..layout.rows {
             let at = layout.first + row;
-            let (id, top) = (palette.matches[at], layout.top + layout.head + row as i32 * layout.row_height);
+            let top = layout.top + layout.head + row as i32 * layout.row_height;
             if at == palette.selected {
                 canvas.round_fill(layout.left + pad / 3, top, layout.width - 2 * (pad / 3), layout.row_height, pad / 2, HIGHLIGHT_COLOR, 256);
             }
+            // A command: what it is called, a mark if it is on, and its key.
+            if let Some((name, keys, command)) = palette.commands.get(at) {
+                let text_top = top + (layout.row_height - line) / 2;
+                if self.is_checked(*command) {
+                    let mark = pad / 2;
+                    canvas.round_fill(layout.left + pad, top + (layout.row_height - mark) / 2, mark, mark, mark / 4, TEXT_COLOR, 256);
+                }
+                text.draw(canvas, layout.left + 2 * pad, text_top, px, TEXT_COLOR, name);
+                let keys_left = layout.left + layout.width - pad - text.width(keys, px);
+                text.draw(canvas, keys_left, text_top, px, DIM_TEXT_COLOR, keys);
+                continue;
+            }
+            let id = palette.matches[at];
             let (cell_left, cell_top) = (layout.left + pad, top + pad / 8);
             match self.loader.thumb(id) {
                 Some(frame) => {
@@ -3084,7 +3208,12 @@ impl App {
             return self.prompt_key(key);
         }
         if self.palette.is_some() {
-            return self.palette_key(key);
+            self.palette_key(key);
+            // A command picked in the box is run once the box has closed.
+            if let Some(command) = self.run_next.take() {
+                self.execute(command, event_loop);
+            }
+            return;
         }
         if self.menu.is_some() {
             return self.menu_key(key, event_loop);
@@ -3206,6 +3335,9 @@ impl App {
                     (Some(palette), None, Some(row)) => {
                         palette.selected = row;
                         self.finish_palette(PaletteEnd::Go);
+                        if let Some(command) = self.run_next.take() {
+                            self.execute(command, event_loop);
+                        }
                     }
                     _ => self.palette = None,
                 }
@@ -4110,7 +4242,7 @@ impl App {
     /// The video whose frames the go-to box lays out: the match picked out.
     fn story_subject(&self) -> Option<usize> {
         let palette = self.palette.as_ref()?;
-        let id = *palette.matches.get(palette.selected)?;
+        let id = *palette.matches.get(palette.selected).filter(|_| palette.commands.is_empty())?;
         files::is_video(&self.files[id]).then_some(id)
     }
 
