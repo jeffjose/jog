@@ -51,6 +51,8 @@ const RESUME_MIN_LENGTH: f64 = 60.0;
 const RESUME_MARGIN: f64 = 10.0;
 /// How long to wait on the preview player before asking it again.
 const PREVIEW_TIMEOUT: Duration = Duration::from_millis(400);
+/// How soon a second click must follow the first to make a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// Seconds that Page Up and Page Down move through a video.
 const SEEK_JUMP: f64 = 60.0;
 /// How long after a seek the player's reported position cannot be trusted.
@@ -404,6 +406,8 @@ pub struct App {
 
     modifiers: ModifiersState,
     mouse: (f64, f64),
+    /// When and where the image was last clicked, to tell a double click.
+    last_click: Option<(Instant, (f64, f64))>,
     drag: Option<Drag>,
     slide_delay: Duration,
     slide_at: Option<Instant>,
@@ -646,6 +650,7 @@ impl App {
             scrolled: 0.0,
             modifiers: ModifiersState::empty(),
             mouse: (0.0, 0.0),
+            last_click: None,
             drag: None,
             slide_delay,
             slide_at: options.slideshow_delay.map(|_| Instant::now() + slide_delay),
@@ -861,9 +866,11 @@ impl App {
     /// is the image on view.
     fn sync_video(&mut self) {
         let id = self.id();
-        // Not while searching: each match in turn would start playing.
-        let wanted = self.grid.is_none() && self.search.is_none() && files::is_video(&self.files[id]);
         let playing = self.video.as_ref().map(|video| video.id);
+        // While searching, the one already playing carries on, but none is
+        // started: each match in turn would start playing.
+        let startable = self.search.is_none() || playing == Some(id);
+        let wanted = self.grid.is_none() && startable && files::is_video(&self.files[id]);
         if wanted && playing != Some(id) {
             self.start_video(id);
         } else if !wanted && playing.is_some() {
@@ -1403,6 +1410,12 @@ impl App {
         self.view_changed();
     }
 
+    /// Whether the image, as zoomed, has parts off to the side of the window.
+    fn wider_than_window(&self) -> bool {
+        let window = self.window_size();
+        self.native().is_some_and(|native| self.view.layout(native, window).width > window.0)
+    }
+
     fn pan(&mut self, dx: f64, dy: f64) {
         let Some(native) = self.native() else { return };
         self.view.pan(dx, dy, native, self.window_size());
@@ -1483,6 +1496,9 @@ impl App {
                 self.keep_view = !self.keep_view;
                 self.toast(if self.keep_view { "Keeping zoom between images" } else { "Zoom resets between images" });
             }
+            // With nothing to scroll sideways, Ctrl+Left and Ctrl+Right move
+            // between files, as they do over a video.
+            Scroll(dx, 0, false) if !self.wider_than_window() => self.step(dx > 0),
             Scroll(dx, dy, page) => {
                 let window = self.window_size();
                 let amount = |size: u32, dir: i8| f64::from(size) * f64::from(dir) / if page { 1.0 } else { 10.0 };
@@ -1955,8 +1971,6 @@ impl App {
         self.menu = None;
         // The filmstrip shows the matches while typing outside the grid.
         self.strip_used = true;
-        // Typing should not have each match in turn start playing.
-        self.sync_video();
         self.request();
         self.redraw();
     }
@@ -2494,7 +2508,16 @@ impl App {
                         self.go_to(pos as usize, offset > 0);
                     }
                 } else {
-                    self.drag = Some(Drag::Pan);
+                    // A second click in the same spot does what `f` does.
+                    let near = |(at, (cx, cy)): (Instant, (f64, f64))| {
+                        at.elapsed() < DOUBLE_CLICK && (x - cx).abs() < 8.0 && (y - cy).abs() < 8.0
+                    };
+                    if self.last_click.take().is_some_and(near) {
+                        self.toggle_fullscreen();
+                    } else {
+                        self.last_click = Some((Instant::now(), (x, y)));
+                        self.drag = Some(Drag::Pan);
+                    }
                 }
             }
             (MouseButton::Middle, true) => {
@@ -2765,8 +2788,7 @@ impl App {
             canvas.fill(0, 0, width, (px as i32 / 3).max(4), MARK_COLOR);
         }
         let mut top_left = Vec::new();
-        if let Some((typed, all)) = &self.filter {
-            // Always shown, so that a narrowed list is never a surprise.
+        if let Some((typed, all)) = self.filter.as_ref().filter(|_| self.show_info) {
             top_left.push(format!("Search \"{typed}\": {} of {}   (Esc for all)", self.list.len(), all.len()));
         }
         if viewing && !self.marks.is_empty() {

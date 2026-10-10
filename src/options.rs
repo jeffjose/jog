@@ -96,7 +96,9 @@ where they were left unless --no-resume is given. While one is up:
   Ctrl+Left / Ctrl+Right, or , . < > n p         previous / next file
 
 Mouse: drag to pan, middle-drag to zoom, wheel for next/previous,
-Ctrl+wheel to zoom, bottom edge for the filmstrip.";
+Ctrl+wheel to zoom, double click for fullscreen, bottom edge for the
+filmstrip. Ctrl+Left / Ctrl+Right also change file when an image has
+nothing to scroll sideways.";
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum LastSlide {
