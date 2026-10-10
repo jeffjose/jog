@@ -6,6 +6,7 @@ mod files;
 mod frame;
 mod loader;
 mod meta;
+mod mpv;
 mod ops;
 mod options;
 mod render;

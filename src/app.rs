@@ -14,9 +14,11 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::commands::{self, Command, MenuItem};
 use crate::convert::{self, Format};
+use crate::files;
 use crate::frame::{fit_size, Frame, Transform};
 use crate::loader::{Job, Loader, Request};
 use crate::meta::{self, Meta};
+use crate::mpv::{Player, PlayerEvent, Signal};
 use crate::ops;
 use crate::options::{LastSlide, Options};
 use crate::render;
@@ -35,6 +37,10 @@ const SMOOTH_ALWAYS: usize = 12_000_000;
 const SHOW_PIXELS_AT: u32 = 4;
 const TOAST: Duration = Duration::from_millis(1500);
 const DEFAULT_SLIDE_DELAY: f64 = 3.0;
+/// Seconds that `<` and `>` move through a video.
+const SEEK_STEP: f64 = 5.0;
+/// How long after a seek the player's reported position cannot be trusted.
+const SEEK_SETTLE: Duration = Duration::from_millis(500);
 
 const TEXT_COLOR: u32 = 0xEEEEEE;
 const DIM_TEXT_COLOR: u32 = 0x9A9A9A;
@@ -49,6 +55,7 @@ const GRID_COLOR: u32 = 0x101010;
 pub enum Event {
     Loaded(Job),
     Converted { created: Vec<PathBuf>, failed: usize, format: Format },
+    Video(Signal),
 }
 
 /// A file operation that `u` can take back.
@@ -65,6 +72,15 @@ struct Moved {
     pos: usize,
     from: PathBuf,
     to: PathBuf,
+}
+
+/// The video the player has been given, and whether it has produced a
+/// frame yet. Until then the still from the loader is shown.
+struct Video {
+    id: usize,
+    showing: bool,
+    /// When the last seek was asked for and the time it was aiming at.
+    seeking: Option<(Instant, f64)>,
 }
 
 /// A clickable button and the command it runs.
@@ -136,6 +152,11 @@ pub struct App {
     grid_buttons: Vec<Button>,
     help: bool,
     snapshot: Option<Snapshot>,
+    /// Created the first time a video comes up.
+    player: Option<Player>,
+    /// Set when the player could not be started, so it is not retried.
+    player_failed: bool,
+    video: Option<Video>,
     toast: Option<(String, Instant)>,
     meta: Option<(usize, Meta)>,
     text: Option<Text>,
@@ -224,6 +245,7 @@ impl Strip {
 /// wait for decodes, write the rendered frame to a file and quit. Driven by
 /// the `JOG_SNAPSHOT` (output `.ppm` path), `JOG_SNAPSHOT_KEYS`,
 /// `JOG_SNAPSHOT_POINTER` (`X,Y`) and `JOG_SNAPSHOT_WAIT` (ms) variables.
+/// A `{Wait}` in the keys pauses for one waiting period before going on.
 struct Snapshot {
     path: PathBuf,
     keys: String,
@@ -351,6 +373,9 @@ impl App {
             grid_buttons: Vec::new(),
             help: false,
             snapshot: Snapshot::from_env(),
+            player: None,
+            player_failed: false,
+            video: None,
             toast: None,
             meta: None,
             text: None,
@@ -488,6 +513,10 @@ impl App {
         if *id != self.id() || frame.is_native() || window.0 == 0 || window.1 == 0 {
             return false;
         }
+        // A video's frame is only a still; the player draws the real thing.
+        if files::is_video(&self.files[*id]) {
+            return false;
+        }
         self.view.layout(frame.native, window).width > frame.width
     }
 
@@ -507,6 +536,7 @@ impl App {
         }
         // The frame that just arrived may call for a full-resolution decode.
         self.request();
+        self.sync_video();
         if let Some(window) = &self.window {
             window.set_title(&format!("{} [{}/{}] - jog", self.name(), self.pos + 1, self.list.len()));
         }
@@ -538,6 +568,103 @@ impl App {
         }
         self.request();
         self.refresh();
+    }
+
+    // ---- Video ---------------------------------------------------------
+
+    /// Starts or stops the player so that it is playing exactly when a video
+    /// is the image on view.
+    fn sync_video(&mut self) {
+        let id = self.id();
+        let wanted = self.grid.is_none() && files::is_video(&self.files[id]);
+        let playing = self.video.as_ref().map(|video| video.id);
+        if wanted && playing != Some(id) {
+            self.start_video(id);
+        } else if !wanted && playing.is_some() {
+            self.video = None;
+            if let Some(player) = &self.player {
+                player.stop();
+            }
+        }
+    }
+
+    fn start_video(&mut self, id: usize) {
+        if self.player.is_none() && !self.player_failed {
+            let proxy = self.proxy.clone();
+            // A scripted test run must not make any sound.
+            let silent = self.snapshot.is_some();
+            match Player::new(silent, move |signal| drop(proxy.send_event(Event::Video(signal)))) {
+                Ok(player) => self.player = Some(player),
+                Err(error) => {
+                    self.player_failed = true;
+                    eprintln!("jog: cannot play videos: {error}");
+                    self.toast(format!("Cannot play videos: {error}"));
+                }
+            }
+        }
+        if let Some(player) = &self.player {
+            player.play(&self.files[id]);
+            self.video = Some(Video { id, showing: false, seeking: None });
+        }
+    }
+
+    fn video_signal(&mut self, signal: Signal) {
+        let (Some(player), Some(video)) = (&self.player, &mut self.video) else { return };
+        if let Signal::Events = signal {
+            for event in player.events() {
+                // The still stays up until the player has a frame to show.
+                video.showing = event == PlayerEvent::Showing;
+            }
+        }
+        if video.showing {
+            self.redraw();
+        }
+    }
+
+    /// Handles the keys that mean something else while a video plays.
+    /// Returns whether the key was one of them.
+    fn video_key(&mut self, key: Key<&str>) -> bool {
+        let (Some(player), Some(video)) = (&self.player, &mut self.video) else { return false };
+        if self.modifiers.control_key() || self.modifiers.alt_key() {
+            return false;
+        }
+        let mut seek = |seconds: f64| {
+            player.command(&[b"seek", seconds.to_string().as_bytes(), b"relative+exact"]);
+            let length = player.number("duration").unwrap_or(0.0);
+            // mpv has not moved yet when asked straight after a seek, so
+            // quick presses build on where the last one was heading.
+            let from = match video.seeking {
+                Some((at, target)) if at.elapsed() < SEEK_SETTLE => target,
+                _ => player.number("time-pos").unwrap_or(0.0),
+            };
+            let target = (from + seconds).clamp(0.0, length);
+            video.seeking = Some((Instant::now(), target));
+            format!("{} / {}", clock(target), clock(length))
+        };
+        let volume = |change: &[u8]| {
+            player.command(&[b"add", b"volume", change]);
+            format!("Volume {:.0}%", player.number("volume").unwrap_or(0.0))
+        };
+        let message = match key {
+            Key::Named(NamedKey::Space) => {
+                player.command(&[b"cycle", b"pause"]);
+                if player.flag("pause") == Some(true) { "Paused".to_string() } else { "Playing".to_string() }
+            }
+            Key::Character(">" | ".") => seek(SEEK_STEP),
+            Key::Character("<" | ",") => seek(-SEEK_STEP),
+            Key::Named(NamedKey::ArrowUp) | Key::Character("+" | "=") => volume(b"5"),
+            Key::Named(NamedKey::ArrowDown) | Key::Character("-") => volume(b"-5"),
+            _ => return false,
+        };
+        self.toast(message);
+        true
+    }
+
+    /// How far through the video playback is, from 0 to 1.
+    fn video_progress(&self) -> Option<f64> {
+        let player = self.player.as_ref().filter(|_| self.video.is_some())?;
+        let length = player.number("duration").filter(|length| *length > 0.0)?;
+        Some((player.number("time-pos")? / length).clamp(0.0, 1.0))
     }
 
     fn reset_view(&mut self) {
@@ -1298,6 +1425,7 @@ impl App {
         self.menu = None;
         self.drag = None;
         self.request();
+        self.sync_video();
         self.redraw();
     }
 
@@ -1332,6 +1460,7 @@ impl App {
         let Some(grid) = self.grid.take() else { return };
         self.go_to(grid.cursor, grid.cursor >= self.pos);
         self.request();
+        self.sync_video();
         self.redraw();
     }
 
@@ -1431,6 +1560,9 @@ impl App {
         }
         if self.grid.is_some() {
             return self.grid_key(key, event_loop);
+        }
+        if self.video.is_some() && self.video_key(key.clone()) {
+            return;
         }
         if let Some(command) = commands::for_key(key, self.modifiers, numpad) {
             if !repeat || command.repeats() {
@@ -1569,12 +1701,21 @@ impl App {
         if snapshot.at.is_some() {
             return;
         }
-        snapshot.at = Some(Instant::now() + snapshot.wait);
         self.mouse = snapshot.pointer;
+        self.snapshot_step(event_loop);
+    }
+
+    /// Presses the scripted keys up to the next `{Wait}`, which stands for
+    /// one waiting period, and schedules what follows.
+    fn snapshot_step(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(snapshot) = &mut self.snapshot else { return };
+        snapshot.at = Some(Instant::now() + snapshot.wait);
+        let script = std::mem::take(&mut snapshot.keys);
+        let (keys, later) = script.split_once("{Wait}").unwrap_or((&script, ""));
+        snapshot.keys = later.to_string();
         // Plain characters are typed; `{Enter}`, `{Tab}`, `{F2}` and so on
         // press the named key.
-        let keys = snapshot.keys.clone();
-        let mut rest = keys.as_str();
+        let mut rest = keys;
         while let Some(c) = rest.chars().next() {
             let named = rest.strip_prefix('{').and_then(|inner| inner.split_once('}'));
             let key = match named {
@@ -1609,6 +1750,9 @@ impl App {
 
     /// Writes what would be on screen to the snapshot file and quits.
     fn finish_snapshot(&mut self, event_loop: &ActiveEventLoop) {
+        if self.snapshot.as_ref().is_some_and(|snapshot| !snapshot.keys.is_empty()) {
+            return self.snapshot_step(event_loop);
+        }
         let Some(snapshot) = self.snapshot.take() else { return };
         let window = self.window_size();
         let mut pixels = vec![0u32; window.0 as usize * window.1 as usize];
@@ -1648,6 +1792,11 @@ impl App {
     }
 
     fn paint(&mut self, pixels: &mut [u32], window: (u32, u32)) {
+        let playing = self.grid.is_none() && self.video.as_ref().is_some_and(|video| video.showing);
+        let player = self.player.as_ref().filter(|_| playing);
+        if player.is_some_and(|player| player.render(pixels, window.0, window.1)) {
+            return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
+        }
         let source = if self.grid.is_some() { None } else { self.source() };
         match source {
             None if self.grid.is_some() => {
@@ -1701,6 +1850,17 @@ impl App {
         if viewing && self.show_info {
             top_left.push(format!("{}   [{}/{}]", self.name(), self.pos + 1, self.list.len()));
             top_left.push(self.info_line());
+            if let (Some(player), Some(_)) = (&self.player, &self.video) {
+                let time = |property| clock(player.number(property).unwrap_or(0.0));
+                top_left.push(format!("{} / {}", time("time-pos"), time("duration")));
+            }
+        }
+        if let Some(progress) = self.video_progress().filter(|_| viewing) {
+            // A line along the bottom edge shows how far playback has got.
+            let thickness = (px as i32 / 4).max(3);
+            let done = (f64::from(width) * progress) as i32;
+            canvas.shade(0, height - thickness, width, thickness, 100);
+            canvas.fill(0, height - thickness, done, thickness, TEXT_COLOR);
         }
         let exif = if viewing && self.show_exif { self.current_meta().exif.clone() } else { Vec::new() };
         let footer: Vec<String> = self.grid_footer().into_iter().collect();
@@ -2013,6 +2173,17 @@ fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32) {
     }
 }
 
+/// A playback time as `m:ss`, or `h:mm:ss` from an hour up.
+fn clock(seconds: f64) -> String {
+    let total = seconds.max(0.0) as u64;
+    let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 /// Fills in an action template: `%f` is the path and `%n` the file name,
 /// both quoted for the shell, and `%%` a literal percent sign.
 fn expand_action(template: &str, path: &Path) -> String {
@@ -2082,6 +2253,7 @@ impl ApplicationHandler<Event> for App {
             Event::Loaded(Job::Thumb(_)) if self.strip_visible() || self.grid.is_some() => self.redraw(),
             Event::Loaded(_) => {}
             Event::Converted { created, failed, format } => self.converted(created, failed, format),
+            Event::Video(signal) => self.video_signal(signal),
         }
     }
 

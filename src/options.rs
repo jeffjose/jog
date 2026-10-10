@@ -79,6 +79,10 @@ Keys:
   Delete                     remove from list    Ctrl+Delete   move to trash
   Enter, 0-9                 run action          q Esc         quit
 
+Videos (mp4, mkv, webm and so on; needs libmpv) play in place. While one is up:
+  Space                      play / pause        < >           seek 5 seconds
+  Up / Down                  volume              Left Right n p  previous / next file
+
 Mouse: drag to pan, middle-drag to zoom, wheel for next/previous,
 Ctrl+wheel to zoom, bottom edge for the filmstrip.";
 

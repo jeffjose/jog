@@ -12,6 +12,10 @@ const RAW_EXTS: &[&str] = &[
     "srw", "3fr", "erf", "kdc", "mrw", "iiq", "rwl", "x3f",
 ];
 
+const VIDEO_EXTS: &[&str] = &[
+    "mp4", "mkv", "webm", "mov", "avi", "m4v", "mpg", "mpeg", "wmv", "flv", "ts", "m2ts",
+];
+
 fn has_ext(path: &Path, exts: &[&str]) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -22,8 +26,12 @@ pub fn is_raw(path: &Path) -> bool {
     has_ext(path, RAW_EXTS)
 }
 
+pub fn is_video(path: &Path) -> bool {
+    has_ext(path, VIDEO_EXTS)
+}
+
 fn is_supported(path: &Path) -> bool {
-    has_ext(path, RASTER_EXTS) || is_raw(path)
+    has_ext(path, RASTER_EXTS) || is_raw(path) || is_video(path)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

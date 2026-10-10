@@ -314,6 +314,15 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             ],
         ),
         (
+            "While a video plays",
+            &[
+                ("Space", "Play / pause"),
+                ("<  >", "Seek back / forward 5 seconds"),
+                ("Up  Down", "Volume"),
+                ("Left  Right  n  p", "Previous / next file"),
+            ],
+        ),
+        (
             "Other",
             &[
                 ("h", "Start / pause slideshow"),

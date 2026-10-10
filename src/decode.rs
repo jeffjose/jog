@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::io::Cursor;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use fast_image_resize as fir;
 use image::metadata::Orientation;
@@ -24,6 +25,10 @@ pub struct Spec {
 }
 
 pub fn load(path: &Path, spec: Spec) -> Result<Frame> {
+    if files::is_video(path) {
+        let (image, orientation) = decode(&video_poster(path)?)?;
+        return finish(image, orientation, spec);
+    }
     let bytes = std::fs::read(path)?;
     let (image, orientation) = if files::is_raw(path) {
         decode_raw_preview(&bytes, spec.target)?
@@ -31,6 +36,27 @@ pub fn load(path: &Path, spec: Spec) -> Result<Frame> {
         decode(&bytes)?
     };
     finish(image, orientation, spec)
+}
+
+/// A still from a video, as an encoded image, for thumbnails and for showing
+/// while the player starts. Taken one second in, where there is usually
+/// more to see than in the opening frame.
+fn video_poster(path: &Path) -> Result<Vec<u8>> {
+    for seek in ["1", "0"] {
+        let output = Command::new("ffmpeg")
+            .args(["-v", "error", "-ss", seek, "-i"])
+            .arg(path)
+            .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "bmp", "-"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map_err(|error| format!("cannot run ffmpeg for a video still: {error}"))?;
+        // Nothing comes out when the video is shorter than the seek.
+        if !output.stdout.is_empty() {
+            return Ok(output.stdout);
+        }
+    }
+    Err("ffmpeg could not read a frame from this video".into())
 }
 
 /// The image at full resolution, upright, with any transparency intact.
