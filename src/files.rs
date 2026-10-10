@@ -3,9 +3,15 @@ use std::path::{Path, PathBuf};
 
 use crate::rng::Rng;
 
+/// Formats the built-in decoders read.
 const RASTER_EXTS: &[&str] = &[
-    "jpg", "jpeg", "jpe", "jfif", "png", "webp", "gif", "bmp", "tif", "tiff",
+    "jpg", "jpeg", "jpe", "jfif", "png", "webp", "gif", "bmp", "tif", "tiff", "tga", "ico", "qoi",
+    "hdr", "exr", "dds", "ff", "pnm", "pbm", "pgm", "ppm", "pam",
 ];
+
+/// Formats left to ffmpeg, which decodes them when it was built with the
+/// right libraries.
+const FFMPEG_EXTS: &[&str] = &["svg", "svgz", "avif", "heic", "heif", "jxl", "psd"];
 
 const RAW_EXTS: &[&str] = &[
     "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "dng", "raf", "orf", "rw2", "pef",
@@ -13,7 +19,8 @@ const RAW_EXTS: &[&str] = &[
 ];
 
 const VIDEO_EXTS: &[&str] = &[
-    "mp4", "mkv", "webm", "mov", "avi", "m4v", "mpg", "mpeg", "wmv", "flv", "m2ts",
+    "mp4", "mkv", "webm", "mov", "avi", "m4v", "mpg", "mpeg", "wmv", "flv", "m2ts", "mts", "m2t",
+    "ts", "3gp", "3g2", "ogv", "ogm", "vob", "asf", "f4v", "rm", "rmvb", "divx", "mxf", "y4m",
 ];
 
 fn has_ext(path: &Path, exts: &[&str]) -> bool {
@@ -30,8 +37,12 @@ pub fn is_video(path: &Path) -> bool {
     has_ext(path, VIDEO_EXTS)
 }
 
+pub fn needs_ffmpeg(path: &Path) -> bool {
+    has_ext(path, FFMPEG_EXTS)
+}
+
 fn is_supported(path: &Path) -> bool {
-    has_ext(path, RASTER_EXTS) || is_raw(path) || is_video(path)
+    has_ext(path, RASTER_EXTS) || needs_ffmpeg(path) || is_raw(path) || is_video(path)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

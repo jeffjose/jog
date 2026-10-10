@@ -7,7 +7,7 @@ description = "An extremely fast, lightweight image viewer"
 [dependencies]
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
 softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
-image = { version = "0.25.5", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
+image = { version = "0.25.5", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff", "tga", "ico", "qoi", "hdr", "exr", "dds", "ff", "pnm"] }
 fast_image_resize = { version = "6", features = ["rayon"] }
 memchr = "2"
 fontdue = "0.9"

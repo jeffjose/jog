@@ -48,13 +48,32 @@ impl Source {
 /// Decodes a file. `spec` says what the result is for, which picks the
 /// still of a video and the preview of a RAW file.
 pub fn read(path: &Path, spec: Spec) -> Result<Source> {
-    let (image, orientation) = if files::is_video(path) {
-        decode(&video_still(path, spec.thumbnail)?)?
-    } else {
-        let bytes = std::fs::read(path)?;
-        if files::is_raw(path) { decode_raw_preview(&bytes, spec.target)? } else { decode(&bytes)? }
-    };
+    let (image, orientation) = decode_file(path, spec.target, spec.thumbnail)?;
     Ok(Source { image: flatten(image, spec.background), orientation: transform_for(orientation) })
+}
+
+/// Decodes whatever kind of file `path` is. `target` picks the preview of
+/// a RAW file and `thumbnail` the still of a video.
+fn decode_file(path: &Path, target: Option<(u32, u32)>, thumbnail: bool) -> Result<(DynamicImage, Orientation)> {
+    if files::is_video(path) {
+        return decode(&video_still(path, thumbnail)?);
+    }
+    if files::needs_ffmpeg(path) {
+        return decode(&ffmpeg_image(path)?);
+    }
+    let bytes = std::fs::read(path)?;
+    if files::is_raw(path) {
+        return decode_raw_preview(&bytes, target);
+    }
+    // TGA has no signature and ICO's is ambiguous, so the content is not
+    // always enough to tell the format; the extension settles it.
+    let mut reader = ImageReader::new(Cursor::new(&bytes[..])).with_guessed_format()?;
+    if reader.format().is_none() {
+        reader.set_format(image::ImageFormat::from_path(path)?);
+    }
+    let mut decoder = reader.into_decoder()?;
+    let orientation = decoder.orientation()?;
+    Ok((DynamicImage::from_decoder(decoder)?, orientation))
 }
 
 /// The transform that turns pixels stored with an EXIF orientation upright.
@@ -79,28 +98,51 @@ fn transform_for(orientation: Orientation) -> Transform {
 /// player starts is the picture playback begins on.
 fn video_still(path: &Path, thumbnail: bool) -> Result<Vec<u8>> {
     let seeks: &[&str] = if thumbnail { &["1", "0"] } else { &["0"] };
-    for seek in seeks {
-        let output = Command::new("ffmpeg")
-            .args(["-v", "error", "-ss", seek, "-i"])
-            .arg(path)
-            .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "bmp", "-"])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|error| format!("cannot run ffmpeg for a video still: {error}"))?;
-        // Nothing comes out when the video is shorter than the seek.
-        if !output.stdout.is_empty() {
-            return Ok(output.stdout);
+    // One frame needs no decoding threads, and a quick look at the start
+    // of the file is enough to find the video stream in nearly every
+    // file; the thorough look is the fallback.
+    let quick = ["-threads", "1", "-probesize", "32k", "-analyzeduration", "0"];
+    for options in [&quick[..], &[]] {
+        for seek in seeks {
+            let output = Command::new("ffmpeg")
+                .args(["-v", "error"])
+                .args(options)
+                .args(["-ss", seek, "-i"])
+                .arg(path)
+                .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "bmp", "-"])
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .map_err(|error| format!("cannot run ffmpeg for a video still: {error}"))?;
+            // Nothing comes out when the video is shorter than the seek.
+            if !output.stdout.is_empty() {
+                return Ok(output.stdout);
+            }
         }
     }
     Err("ffmpeg could not read a frame from this video".into())
 }
 
+/// An image in a format ffmpeg decodes and the built-in decoders do not,
+/// as a BMP. Vector images are rasterised at their own size.
+fn ffmpeg_image(path: &Path) -> Result<Vec<u8>> {
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-threads", "1", "-i"])
+        .arg(path)
+        .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "bmp", "-"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|error| format!("cannot run ffmpeg to decode this image: {error}"))?;
+    if output.stdout.is_empty() {
+        return Err("ffmpeg could not decode this image (is a decoder for it built in?)".into());
+    }
+    Ok(output.stdout)
+}
+
 /// The image at full resolution, upright, with any transparency intact.
 pub fn open(path: &Path) -> Result<DynamicImage> {
-    let bytes = std::fs::read(path)?;
-    let (mut image, orientation) =
-        if files::is_raw(path) { decode_raw_preview(&bytes, None)? } else { decode(&bytes)? };
+    let (mut image, orientation) = decode_file(path, None, false)?;
     image.apply_orientation(orientation);
     Ok(image)
 }
