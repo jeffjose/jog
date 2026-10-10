@@ -114,6 +114,8 @@ struct Video {
     /// last one that did land took.
     seek_asked: Option<Instant>,
     seek_took: Option<Duration>,
+    /// When the user last seeked, stepped or paused, or a seek landed.
+    touched: Option<Instant>,
 }
 
 /// The last time the image layer was scaled afresh.
@@ -539,7 +541,7 @@ impl GridLayout {
         let usable = (height - Self::footer_height(window.1)).max(1);
         let columns = (width / 240).clamp(2, 6);
         let cell_w = (width / columns).max(1);
-        let cell_h = (cell_w * 3 / 4).min(usable);
+        let cell_h = (cell_w * 3 / 4).clamp(1, usable);
         let rows = (usable / cell_h).max(1);
         GridLayout {
             columns,
@@ -824,9 +826,12 @@ impl App {
     }
 
     fn update_monitor(&mut self) {
-        let Some(size) = self.window.as_ref().and_then(|w| w.current_monitor()).map(|m| m.size()) else {
-            return;
-        };
+        let Some(window) = &self.window else { return };
+        // With the screen off there may be no monitor, or a stand-in a
+        // pixel across; the window is then the guide to the size wanted.
+        let monitor = window.current_monitor().map_or(PhysicalSize::new(0, 0), |m| m.size());
+        let inner = window.inner_size();
+        let size = PhysicalSize::new(monitor.width.max(inner.width), monitor.height.max(inner.height));
         if size.width > 0 && size.height > 0 && self.monitor != (size.width, size.height) {
             self.monitor = (size.width, size.height);
             self.request();
@@ -957,6 +962,7 @@ impl App {
         if let Some(video) = &mut self.video {
             video.seeking = Some((Instant::now(), target));
             video.seek_asked.get_or_insert_with(Instant::now);
+            video.touched = Some(Instant::now());
         }
         self.redraw();
     }
@@ -996,6 +1002,9 @@ impl App {
                 *self.video_view_sent.borrow_mut() = None;
                 // A video may already be waiting for it.
                 self.sync_video();
+                // mpv signals only when an event joins an empty queue, and
+                // may have queued some before it had anyone to signal.
+                self.video_signal(Signal::Events);
             }
             Err(error) => {
                 // Without a player, videos would only be entries that cannot
@@ -1031,7 +1040,7 @@ impl App {
             player.play(&self.files[id], from);
             // Until the player reports for itself, this is where it is.
             let seeking = from.map(|seconds| (started, seconds));
-            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None });
+            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, touched: None });
             self.perf.video_lines = None;
             self.apply_video_view();
         }
@@ -1061,7 +1070,12 @@ impl App {
         // again once its queue has been emptied.
         let events = if let Signal::Events = signal { player.events() } else { Vec::new() };
         let Some(video) = &mut self.video else { return };
+        let mut at_end = false;
         for event in events {
+            if event == PlayerEvent::AtEnd {
+                at_end = true;
+                continue;
+            }
             // The still stays up until the player has a frame to show.
             let showing = event == PlayerEvent::Showing;
             if showing && !video.showing {
@@ -1074,6 +1088,7 @@ impl App {
                 // Every seek ends with the player announcing frames again.
                 if let Some(asked) = video.seek_asked.take() {
                     video.seek_took = Some(asked.elapsed());
+                    video.touched = Some(Instant::now());
                 }
             }
             video.showing = showing;
@@ -1088,8 +1103,26 @@ impl App {
             self.scene_key = None;
             player.render(&mut self.scene, width, height);
         }
+        // A video that played to its end makes way for the next file. One
+        // taken to its end by hand, by seeking or stepping there, stays; and
+        // the event may be left over from the file before this one.
+        let by_hand = video.seek_asked.is_some() || video.touched.is_some_and(|at| at.elapsed() < SEEK_SETTLE);
         if video.showing {
             self.redraw();
+        }
+        if at_end && !by_hand && player.flag("eof-reached") == Some(true) {
+            self.play_next();
+        }
+    }
+
+    /// Goes on to the next file after a video, unless that is the
+    /// slideshow's job, something is open that the user is in the middle
+    /// of, or it was the last file.
+    fn play_next(&mut self) {
+        let open = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || self.search.is_some();
+        let occupied = open || self.drag.is_some();
+        if self.options.autoplay && self.slide_at.is_none() && !occupied && self.pos + 1 < self.list.len() {
+            self.step(true);
         }
     }
 
@@ -1134,6 +1167,7 @@ impl App {
 
     fn video_action(&mut self, action: VideoAction) {
         let (Some(player), Some(video)) = (&self.player, &mut self.video) else { return };
+        video.touched = Some(Instant::now());
         match action {
             VideoAction::File(forward) => return self.step(forward),
             VideoAction::Pause => player.command(&[b"cycle", b"pause"]),
@@ -3360,7 +3394,11 @@ impl ApplicationHandler<Event> for App {
             Event::Player(player) => self.player_ready(player, event_loop),
             Event::Preview(signal) => self.preview_signal(signal),
             // Without it the seek bar still works, just without pictures.
-            Event::PreviewPlayer(preview) => self.preview = preview.ok(),
+            Event::PreviewPlayer(preview) => {
+                self.preview = preview.ok();
+                // As for the player: empty the queue so that mpv signals.
+                self.preview_signal(Signal::Events);
+            }
             Event::Meta(id, meta) => {
                 if self.meta_asked == Some(id) {
                     self.meta = Some((id, meta));

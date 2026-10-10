@@ -39,6 +39,8 @@ Slideshow and actions:
   -D, --slideshow-delay SEC  advance automatically
       --on-last-slide WHAT   resume (default), hold or quit
       --cycle-once           same as --on-last-slide quit
+      --no-autoplay          stay on a video when it ends, instead of
+                             playing the next file (config: autoplay = false)
   -A, --action CMD           shell command for Enter / 0; %f is the path,
                              %n the file name
       --action1..9 CMD       shell commands for keys 1 to 9
@@ -117,6 +119,8 @@ pub struct Options {
     pub antialias: bool,
     pub slideshow_delay: Option<f64>,
     pub on_last_slide: LastSlide,
+    /// Whether the next file comes up when a video ends.
+    pub autoplay: bool,
     pub actions: [Option<String>; 10],
     pub draw_info: bool,
     pub draw_exif: bool,
@@ -176,7 +180,7 @@ fn is_switch(name: &str) -> bool {
     let switches = [
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
-        "cycle-once", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
+        "cycle-once", "autoplay", "no-autoplay", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
         "debug", "resume", "no-resume",
     ];
     switches.contains(&name)
@@ -206,6 +210,7 @@ fn parse_with(
         antialias: true,
         slideshow_delay: None,
         on_last_slide: LastSlide::Resume,
+        autoplay: true,
         actions: Default::default(),
         draw_info: false,
         draw_exif: false,
@@ -317,6 +322,8 @@ fn apply(
             }
         }
         "cycle-once" => options.on_last_slide = LastSlide::Quit,
+        "autoplay" => options.autoplay = true,
+        "no-autoplay" => options.autoplay = false,
         // feh's name for it; here the file name is part of the info overlay.
         "draw-filename" | "draw-info" => options.draw_info = true,
         "draw-exif" => options.draw_exif = true,
@@ -373,6 +380,7 @@ fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>
             // Only the switches that default to on have an "off" spelling.
             toml::Value::Boolean(false) => match key.as_str() {
                 "auto-zoom" => ("no-auto-zoom", None),
+                "autoplay" => ("no-autoplay", None),
                 "fullscreen" => ("windowed", None),
                 "resume" => ("no-resume", None),
                 other if is_switch(other) => continue,
@@ -510,6 +518,8 @@ mod tests {
         assert!(!parse_args(&["--no-resume"]).unwrap().resume);
         assert!(!parse_config("resume = false", &[]).unwrap().resume);
         assert!(parse_config("resume = false", &["--resume"]).unwrap().resume);
+        assert!(parse_args(&[]).unwrap().autoplay);
+        assert!(!parse_args(&["--no-autoplay"]).unwrap().autoplay);
     }
 
     #[test]

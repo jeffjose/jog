@@ -374,6 +374,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Up  Down", "Volume"),
                 ("Ctrl+Left  Ctrl+Right", "Previous / next file"),
                 (",  .  <  >  n  p", "Previous / next file"),
+                ("At the end", "The next file plays"),
             ],
         ),
         (

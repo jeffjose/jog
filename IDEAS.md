@@ -24,7 +24,6 @@ here exists in the code.
 - Chapter marks and bookmarks on the seek bar; scene-change ticks
 - Storyboard view: a grid of frames across one video
 - Brightness, contrast, saturation; deinterlace; crop
-- Play the next file automatically when a video ends
 - GPU rendering as an option for files too heavy for CPU decoding
 
 ## Reviewing

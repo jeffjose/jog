@@ -21,6 +21,7 @@ const EVENT_NONE: c_int = 0;
 const EVENT_START_FILE: c_int = 6;
 const EVENT_END_FILE: c_int = 7;
 const EVENT_PLAYBACK_RESTART: c_int = 21;
+const EVENT_PROPERTY_CHANGE: c_int = 22;
 const RENDER_PARAM_END: c_int = 0;
 const RENDER_PARAM_API_TYPE: c_int = 1;
 const RENDER_PARAM_SW_SIZE: c_int = 17;
@@ -46,6 +47,14 @@ struct RawEvent {
     data: *mut c_void,
 }
 
+/// What a property-change event carries.
+#[repr(C)]
+struct RawProperty {
+    name: *const c_char,
+    format: c_int,
+    data: *mut c_void,
+}
+
 /// The libmpv functions jog calls.
 struct Api {
     create: unsafe extern "C" fn() -> Handle,
@@ -56,6 +65,7 @@ struct Api {
     get_property: unsafe extern "C" fn(Handle, *const c_char, c_int, *mut c_void) -> c_int,
     get_property_string: unsafe extern "C" fn(Handle, *const c_char) -> *mut c_char,
     free: unsafe extern "C" fn(*mut c_void),
+    observe_property: unsafe extern "C" fn(Handle, u64, *const c_char, c_int) -> c_int,
     command: unsafe extern "C" fn(Handle, *mut *const c_char) -> c_int,
     command_async: unsafe extern "C" fn(Handle, u64, *mut *const c_char) -> c_int,
     wait_event: unsafe extern "C" fn(Handle, c_double) -> *mut RawEvent,
@@ -84,6 +94,7 @@ impl Api {
             get_property: symbol!("get_property"),
             get_property_string: symbol!("get_property_string"),
             free: symbol!("free"),
+            observe_property: symbol!("observe_property"),
             command: symbol!("command"),
             command_async: symbol!("command_async"),
             wait_event: symbol!("wait_event"),
@@ -122,6 +133,8 @@ pub enum PlayerEvent {
     /// Frames of the current file can now be rendered.
     Showing,
     Ended,
+    /// Playback ran into the end of the file, where it holds the last frame.
+    AtEnd,
 }
 
 type Wake = Box<dyn Fn(Signal) + Send + Sync>;
@@ -230,6 +243,12 @@ impl Player {
             let context = &*wake as *const Wake as *mut c_void;
             (api.set_wakeup_callback)(handle, Some(on_events), context);
             (api.render_context_set_update_callback)(render, Some(on_frame), context);
+            // The only property watched, so any change event is about it.
+            // Asked for after the callbacks are in place: mpv queues an
+            // event straight away, and only signals when its queue was empty.
+            if matches!(role, Role::Playback { .. }) {
+                (api.observe_property)(handle, 0, c"eof-reached".as_ptr(), FORMAT_FLAG);
+            }
             Ok(Player { api, handle, render, _wake: wake, _library: library })
         }
     }
@@ -314,9 +333,20 @@ impl Player {
         let mut events = Vec::new();
         loop {
             // SAFETY: mpv returns a valid event that lives until the next call.
-            let id = unsafe { (*(self.api.wait_event)(self.handle, 0.0)).event_id };
-            match id {
+            let event = unsafe { &*(self.api.wait_event)(self.handle, 0.0) };
+            match event.event_id {
                 EVENT_NONE => return events,
+                EVENT_PROPERTY_CHANGE => {
+                    // SAFETY: for this event the data is a property record,
+                    // whose own data is a flag when its format says so.
+                    let reached = unsafe {
+                        let property = &*(event.data as *const RawProperty);
+                        property.format == FORMAT_FLAG && !property.data.is_null() && *(property.data as *const c_int) != 0
+                    };
+                    if reached {
+                        events.push(PlayerEvent::AtEnd);
+                    }
+                }
                 EVENT_START_FILE => events.push(PlayerEvent::Started),
                 EVENT_PLAYBACK_RESTART => events.push(PlayerEvent::Showing),
                 EVENT_END_FILE => events.push(PlayerEvent::Ended),
