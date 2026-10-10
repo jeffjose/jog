@@ -26,7 +26,7 @@ use crate::options::{LastSlide, Options};
 use crate::positions::Positions;
 use crate::render;
 use crate::rng::Rng;
-use crate::search::Query;
+use crate::search::{Facts, Query};
 use crate::ui::{Canvas, Text};
 use crate::view::{Layout, View, Zoom};
 
@@ -293,11 +293,14 @@ struct Prompt {
 }
 
 /// How a search is brought to a close.
+#[derive(Clone, Copy, PartialEq)]
 enum SearchEnd {
     /// Go to the match in view, among all the files.
     Jump,
     /// Carry on with only the matches.
     Keep,
+    /// Carry on with every file, dropping a search kept earlier.
+    All,
     /// Go back to how things were.
     Cancel,
 }
@@ -309,6 +312,12 @@ struct Search {
     base: Vec<usize>,
     /// Whether nothing matches what is typed. The list then stays as it was.
     no_match: bool,
+    /// Which part has the keyboard: 0 for the text, then the buttons in
+    /// the order `search_buttons` gives them.
+    focus: usize,
+    /// Where the buttons were last drawn, for clicks: left, top, width
+    /// and height.
+    drawn: Vec<(SearchEnd, [i32; 4])>,
     /// The list, its kept search and the files in view when the box opened.
     prior_list: Vec<usize>,
     prior_filter: Option<(String, Vec<usize>)>,
@@ -327,6 +336,8 @@ pub struct App {
     /// A search that was kept: what was typed and every file, in order.
     /// `list` then holds only the matches.
     filter: Option<(String, Vec<usize>)>,
+    /// File sizes looked up for searches such as `>10mb`.
+    sizes: HashMap<usize, Option<u64>>,
     /// Where videos were left, read the first time one is played.
     positions: Option<Positions>,
     confirm: Option<Confirm>,
@@ -600,6 +611,7 @@ impl App {
             prompt: None,
             search: None,
             filter: None,
+            sizes: HashMap::new(),
             positions: None,
             confirm: None,
             proxy,
@@ -2002,10 +2014,14 @@ impl App {
 
     fn start_search(&mut self) {
         let base = self.filter.as_ref().map_or_else(|| self.list.clone(), |(_, all)| all.clone());
+        // A kept search comes back as it was typed, ready to be changed.
+        let text: Vec<char> = self.filter.as_ref().map(|(typed, _)| typed.chars().collect()).unwrap_or_default();
         self.search = Some(Search {
-            field: TextField::default(),
+            field: TextField { cursor: text.len(), text },
             base,
             no_match: false,
+            focus: 0,
+            drawn: Vec::new(),
             prior_list: self.list.clone(),
             prior_filter: self.filter.take(),
             prior_viewed: self.id(),
@@ -2023,11 +2039,17 @@ impl App {
     fn search_changed(&mut self) {
         let Some(search) = &mut self.search else { return };
         let query = Query::parse(&search.field.string());
+        let wants_size = query.wants_size();
         let scored: Vec<(usize, i32)> = (search.base.iter())
             .filter_map(|&id| {
                 let path = &self.files[id];
                 let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
-                Some((id, query.score(&name)?))
+                let size = match wants_size {
+                    true => *self.sizes.entry(id).or_insert_with(|| std::fs::metadata(path).ok().map(|meta| meta.len())),
+                    false => None,
+                };
+                let facts = Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), size };
+                Some((id, query.score(&facts)?))
             })
             .collect();
         search.no_match = scored.is_empty();
@@ -2048,12 +2070,39 @@ impl App {
         self.set_list(list, viewed, best);
     }
 
+    /// The buttons beside the search text, in order: carry on with only the
+    /// matches, when the text narrows the list, and go back to every file,
+    /// when a search was kept before.
+    fn search_buttons(&self) -> Vec<(SearchEnd, String)> {
+        let Some(search) = &self.search else { return Vec::new() };
+        let mut buttons = Vec::new();
+        if !search.no_match && !Query::parse(&search.field.string()).is_empty() {
+            buttons.push((SearchEnd::Keep, format!("Keep {} \u{2192}", self.list.len())));
+        }
+        if search.prior_filter.is_some() {
+            buttons.push((SearchEnd::All, format!("Show all {}", search.base.len())));
+        }
+        buttons
+    }
+
     fn search_key(&mut self, key: Key<&str>) {
+        let buttons = self.search_buttons();
         let Some(search) = &mut self.search else { return };
+        search.focus = search.focus.min(buttons.len());
+        let at_end = search.field.cursor == search.field.text.len();
         match key {
             Key::Named(NamedKey::Escape) => self.finish_search(SearchEnd::Cancel),
-            Key::Named(NamedKey::Enter) => self.finish_search(SearchEnd::Jump),
+            Key::Named(NamedKey::Enter) => {
+                let end = search.focus.checked_sub(1).map_or(SearchEnd::Jump, |button| buttons[button].0);
+                self.finish_search(end);
+            }
             Key::Named(NamedKey::Tab) => self.finish_search(SearchEnd::Keep),
+            // Right from the end of the text goes on to the buttons, and
+            // left comes back.
+            Key::Named(NamedKey::ArrowRight) if at_end || search.focus > 0 => {
+                search.focus = (search.focus + 1).min(buttons.len());
+            }
+            Key::Named(NamedKey::ArrowLeft) if search.focus > 0 => search.focus -= 1,
             // Up and down walk the matches while the box stays open.
             Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp) => {
                 let down = key == Key::Named(NamedKey::ArrowDown);
@@ -2066,6 +2115,8 @@ impl App {
                 }
             }
             key => {
+                // Typing goes to the text wherever the keyboard was.
+                search.focus = 0;
                 if search.field.key(key, self.modifiers) {
                     self.search_changed();
                 }
@@ -2093,10 +2144,13 @@ impl App {
                 self.filter = Some((typed, search.base));
                 self.toast(format!("Showing {} of {} (Esc for all)", self.list.len(), self.total()));
             }
-            SearchEnd::Jump | SearchEnd::Keep => {
+            SearchEnd::Jump | SearchEnd::Keep | SearchEnd::All => {
                 // Go to the match, among all the files again.
                 let (viewed, focus) = (at(&search.base, viewed), at(&search.base, focus));
                 self.set_list(search.base, viewed, focus);
+                if end == SearchEnd::All {
+                    self.toast("Showing all files");
+                }
             }
             SearchEnd::Cancel => {
                 let (viewed, focus) = (at(&search.prior_list, search.prior_viewed), at(&search.prior_list, search.prior_focus));
@@ -2514,6 +2568,13 @@ impl App {
             // A click picks a match the way Enter does: in the grid, the
             // one clicked on.
             if button == MouseButton::Left && pressed {
+                let on = |[left, top, width, height]: [i32; 4]| {
+                    (left..left + width).contains(&(x as i32)) && (top..top + height).contains(&(y as i32))
+                };
+                let drawn = self.search.as_ref().map(|search| search.drawn.clone()).unwrap_or_default();
+                if let Some((end, _)) = drawn.into_iter().find(|(_, place)| on(*place)) {
+                    return self.finish_search(end);
+                }
                 if self.grid.is_some() {
                     self.point_cursor();
                 }
@@ -2989,14 +3050,18 @@ impl App {
         // Above the filmstrip or, in the grid, above the line under it.
         let box_bottom = if viewing { bottom } else { height - GridLayout::footer_height(height as u32) };
         if let Some(prompt) = &self.prompt {
-            draw_prompt(canvas, &mut text, "Rename:   ", &prompt.field, "", px, box_bottom);
+            draw_prompt(canvas, &mut text, "Rename:   ", &prompt.field, "", &[], 0, px, box_bottom);
         }
-        if let Some(search) = &self.search {
+        let buttons = self.search_buttons();
+        if let Some(search) = &mut self.search {
             let note = match search.no_match {
                 true => "no match".to_string(),
                 false => format!("{} of {}", self.list.len(), search.base.len()),
             };
-            draw_prompt(canvas, &mut text, "Search:   ", &search.field, &note, px, box_bottom);
+            let labels: Vec<String> = buttons.iter().map(|(_, label)| label.clone()).collect();
+            let focus = search.focus.min(buttons.len());
+            let drawn = draw_prompt(canvas, &mut text, "Search:   ", &search.field, &note, &labels, focus, px, box_bottom);
+            search.drawn = buttons.iter().map(|(end, _)| *end).zip(drawn).collect();
         }
         if let Some(confirm) = &self.confirm {
             draw_confirm(canvas, &mut text, confirm, px);
@@ -3322,24 +3387,55 @@ fn draw_confirm(canvas: &mut Canvas, text: &mut Text, confirm: &Confirm, px: u32
 /// Draws the rename box, centred with its bottom edge at `bottom`.
 /// `label` names what is being typed and `note`, at the right, says
 /// something about it, such as how many files match.
-fn draw_prompt(canvas: &mut Canvas, text: &mut Text, label: &str, field: &TextField, note: &str, px: u32, bottom: i32) {
+/// Draws a box to type in, with any buttons in a row to its right, and
+/// returns where each button went. `focus` is 0 while the text has the
+/// keyboard, otherwise the button that has it, counting from 1.
+#[allow(clippy::too_many_arguments)]
+fn draw_prompt(
+    canvas: &mut Canvas,
+    text: &mut Text,
+    label: &str,
+    field: &TextField,
+    note: &str,
+    buttons: &[String],
+    focus: usize,
+    px: u32,
+    bottom: i32,
+) -> Vec<[i32; 4]> {
     let typed = field.string();
     let before_cursor: String = field.text[..field.cursor].iter().collect();
     let pad = px as i32;
+    let gap = pad / 2;
     let line_height = Text::line_height(px);
     let (label_width, note_width) = (text.width(label, px), text.width(note, px));
     let content = label_width + text.width(&typed, px) + note_width;
-    let width = (content + 5 * pad).max(px as i32 * 30).min(canvas.width);
+    let widths: Vec<i32> = buttons.iter().map(|button| text.width(button, px) + 2 * pad).collect();
+    let beside: i32 = widths.iter().map(|width| width + gap).sum();
+    let width = (content + 5 * pad).max(px as i32 * 30).min(canvas.width - beside);
     let height = line_height + 2 * pad;
-    let (left, top) = ((canvas.width - width) / 2, bottom - height);
+    let (left, top) = ((canvas.width - width - beside) / 2, bottom - height);
 
     canvas.fill(left, top, width, height, MENU_COLOR);
     canvas.outline(left, top, width, height, 1, MENU_EDGE_COLOR);
     text.draw(canvas, left + pad, top + pad, px, DIM_TEXT_COLOR, label);
     text.draw(canvas, left + pad + label_width, top + pad, px, TEXT_COLOR, &typed);
     text.draw(canvas, left + width - pad - note_width, top + pad, px, DIM_TEXT_COLOR, note);
-    let cursor = left + pad + label_width + text.width(&before_cursor, px);
-    canvas.fill(cursor, top + pad, (px as i32 / 10).max(2), line_height, TEXT_COLOR);
+    if focus == 0 {
+        let cursor = left + pad + label_width + text.width(&before_cursor, px);
+        canvas.fill(cursor, top + pad, (px as i32 / 10).max(2), line_height, TEXT_COLOR);
+    }
+
+    let mut x = left + width + gap;
+    let mut drawn = Vec::new();
+    for (at, (button, button_width)) in buttons.iter().zip(widths).enumerate() {
+        let focused = focus == at + 1;
+        canvas.fill(x, top, button_width, height, if focused { HIGHLIGHT_COLOR } else { MENU_COLOR });
+        canvas.outline(x, top, button_width, height, 1, if focused { TEXT_COLOR } else { MENU_EDGE_COLOR });
+        text.draw(canvas, x + pad, top + pad, px, TEXT_COLOR, button);
+        drawn.push([x, top, button_width, height]);
+        x += button_width + gap;
+    }
+    drawn
 }
 
 /// Draws the list of shortcuts as a panel in the middle of the window.

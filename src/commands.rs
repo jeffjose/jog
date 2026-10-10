@@ -314,6 +314,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("{  }", "Previous / next directory"),
                 ("Wheel", "Next / previous image"),
                 ("/", "Search: Enter goes, Tab keeps matches"),
+                ("", "is:video  is:marked  >10mb  ^start  !without"),
                 ("Esc", "Clear a kept search, else quit"),
             ],
         ),

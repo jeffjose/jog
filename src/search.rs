@@ -12,6 +12,42 @@ enum Term {
     Prefix(String),
     /// `!text`: the name does not contain this.
     Without(String),
+    /// `is:video` and the like.
+    Is(Kind),
+    /// `>10mb` or `<1gb`: larger than, or smaller than, this many bytes.
+    Size { larger: bool, bytes: u64 },
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Video,
+    Image,
+    Gif,
+    Marked,
+}
+
+/// What a query is matched against.
+pub struct Facts<'a> {
+    pub name: &'a str,
+    pub video: bool,
+    pub marked: bool,
+    /// Size in bytes; only looked up when `Query::wants_size` says so.
+    pub size: Option<u64>,
+}
+
+/// A size as typed: a number, then `b`, `kb`, `mb` or `gb` (or nothing,
+/// for bytes).
+fn parse_size(text: &str) -> Option<u64> {
+    let digits = text.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let unit: f64 = match &text[digits.len()..] {
+        "" | "b" => 1.0,
+        "k" | "kb" => 1024.0,
+        "m" | "mb" => 1024.0 * 1024.0,
+        "g" | "gb" => 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    let number: f64 = digits.parse().ok().filter(|number| *number >= 0.0)?;
+    Some((number * unit) as u64)
 }
 
 impl Query {
@@ -21,6 +57,20 @@ impl Query {
             .split_whitespace()
             .filter_map(|word| {
                 let lower = word.to_lowercase();
+                // One of these still being typed narrows nothing yet.
+                if let Some(kind) = lower.strip_prefix("is:") {
+                    return Some(Term::Is(match kind {
+                        "video" => Kind::Video,
+                        "image" => Kind::Image,
+                        "gif" => Kind::Gif,
+                        "marked" => Kind::Marked,
+                        _ => return None,
+                    }));
+                }
+                if let Some(size) = lower.strip_prefix(['>', '<']) {
+                    let bytes = parse_size(size)?;
+                    return Some(Term::Size { larger: lower.starts_with('>'), bytes });
+                }
                 let (kind, rest) = match lower.chars().next() {
                     Some(mark @ ('^' | '!')) => (mark, lower[1..].to_string()),
                     _ => (' ', lower),
@@ -40,16 +90,34 @@ impl Query {
         self.terms.is_empty()
     }
 
-    /// How well a name matches, higher being better, or `None` if it does
+    /// Whether any term compares sizes, which means looking each file up.
+    pub fn wants_size(&self) -> bool {
+        self.terms.iter().any(|term| matches!(term, Term::Size { .. }))
+    }
+
+    /// How well a file matches, higher being better, or `None` if it does
     /// not match at all.
-    pub fn score(&self, name: &str) -> Option<i32> {
-        let name = name.to_lowercase();
+    pub fn score(&self, file: &Facts) -> Option<i32> {
+        let name = file.name.to_lowercase();
         let mut total = 0;
         for term in &self.terms {
             total += match term {
                 Term::Fuzzy(letters) => fuzzy(letters, &name)?,
                 Term::Prefix(start) => name.starts_with(start.as_str()).then_some(200)?,
                 Term::Without(part) => (!name.contains(part.as_str())).then_some(0)?,
+                Term::Is(kind) => {
+                    let is = match kind {
+                        Kind::Video => file.video,
+                        Kind::Image => !file.video,
+                        Kind::Gif => name.ends_with(".gif"),
+                        Kind::Marked => file.marked,
+                    };
+                    is.then_some(0)?
+                }
+                Term::Size { larger, bytes } => {
+                    let size = file.size?;
+                    (if *larger { size > *bytes } else { size < *bytes }).then_some(0)?
+                }
             };
         }
         Some(total)
@@ -93,8 +161,9 @@ mod tests {
 
     fn matches<'a>(query: &str, names: &[&'a str]) -> Vec<&'a str> {
         let query = Query::parse(query);
+        let facts = |name: &'a str| Facts { name, video: name.ends_with(".mp4"), marked: name == "bark.jpg", size: Some(name.len() as u64 * 1024) };
         let mut scored: Vec<(i32, &str)> =
-            names.iter().filter_map(|name| Some((query.score(name)?, *name))).collect();
+            names.iter().filter_map(|name| Some((query.score(&facts(name))?, *name))).collect();
         scored.sort_by_key(|(score, _)| -score);
         scored.into_iter().map(|(_, name)| name).collect()
     }
@@ -117,7 +186,24 @@ mod tests {
     }
 
     #[test]
+    fn kinds_and_sizes() {
+        assert_eq!(matches("is:video", NAMES), ["berserker-bloodmoon.mp4"]);
+        assert_eq!(matches("is:image foo", NAMES).len(), 3);
+        assert_eq!(matches("is:marked", NAMES), ["bark.jpg"]);
+        // Each name stands for a file of as many kilobytes as it has letters.
+        assert_eq!(matches(">20kb", NAMES), ["berserker-bloodmoon.mp4"]);
+        assert_eq!(matches("<9KB", NAMES), ["bark.jpg"]);
+        assert_eq!(matches(">0.02mb is:video", NAMES), ["berserker-bloodmoon.mp4"]);
+        assert!(matches(">1gb", NAMES).is_empty());
+        assert_eq!(parse_size("1.5gb"), Some(1_610_612_736));
+        assert_eq!(parse_size("10"), Some(10));
+        assert_eq!(parse_size("10xb"), None);
+    }
+
+    #[test]
     fn an_unfinished_query_matches_everything() {
+        assert!(Query::parse("is:vid").is_empty());
+        assert!(Query::parse(">").is_empty());
         assert!(Query::parse("  ").is_empty());
         assert!(Query::parse("^").is_empty());
         assert_eq!(matches("", NAMES).len(), NAMES.len());

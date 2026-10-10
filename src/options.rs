@@ -76,6 +76,10 @@ Keys:
   /                          search: type to narrow the list, then Enter to go to
                              the match, Tab to keep only the matches, Esc to cancel
                              (^foo starts with, !foo without; Esc later clears)
+                             Right moves on to the buttons: Keep the matches,
+                             or Show all once a search has been kept.
+                             Also is:video is:image is:gif is:marked, and
+                             sizes such as >10mb or <1gb (b, kb, mb, gb)
   Ctrl+arrows, Alt+arrows    scroll, by a page   Z  small images: fit screen / actual size
   ( / )                      rotate              _ |           flip, mirror
   [ / ]                      slower / faster     \\             normal speed
