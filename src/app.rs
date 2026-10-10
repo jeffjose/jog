@@ -42,6 +42,8 @@ const DEFAULT_SLIDE_DELAY: f64 = 3.0;
 const VIDEO_END_POLL: Duration = Duration::from_millis(200);
 /// Seconds that `<` and `>` move through a video.
 const SEEK_STEP: f64 = 5.0;
+/// How long to wait on the preview player before asking it again.
+const PREVIEW_TIMEOUT: Duration = Duration::from_millis(400);
 /// Seconds that Page Up and Page Down move through a video.
 const SEEK_JUMP: f64 = 60.0;
 /// How long after a seek the player's reported position cannot be trusted.
@@ -198,6 +200,11 @@ pub struct App {
     preview_frame: Option<Frame>,
     /// Where along the seek bar the pointer is, from 0 to 1, while over it.
     hover: Option<f64>,
+    /// The time the preview should show, the time last asked of its
+    /// player, and since when that request has been outstanding.
+    preview_want: Option<f64>,
+    preview_sent: Option<f64>,
+    preview_busy: Option<Instant>,
     /// How many times in a row a seek key has repeated from being held.
     held: u32,
     toast: Option<(String, Instant)>,
@@ -427,6 +434,9 @@ impl App {
             preview_id: None,
             preview_frame: None,
             hover: None,
+            preview_want: None,
+            preview_sent: None,
+            preview_busy: None,
             held: 0,
             toast: None,
             time_until: None,
@@ -669,16 +679,32 @@ impl App {
 
     /// Asks the preview player for the frame at a point along the video.
     fn request_preview(&mut self, fraction: f64) {
-        let (Some(preview), Some(video), Some((_, length))) = (&self.preview, &self.video, self.video_time()) else {
+        let Some((_, length)) = self.video_time() else { return };
+        self.preview_want = Some(fraction * length);
+        self.pump_preview();
+    }
+
+    /// Sends the preview player the latest spot asked for, unless it is
+    /// still fetching the one before. Pointer movement asks far faster than
+    /// frames can be fetched; this way the requests in between are skipped.
+    fn pump_preview(&mut self) {
+        let (Some(preview), Some(video), Some(want)) = (&self.preview, &self.video, self.preview_want) else {
             return;
         };
+        // A request that never produced a frame must not block the rest.
+        let busy = self.preview_busy.is_some_and(|since| since.elapsed() < PREVIEW_TIMEOUT);
+        if busy || self.preview_sent == Some(want) {
+            return;
+        }
         if self.preview_id != Some(video.id) {
             preview.open(&self.files[video.id]);
             self.preview_id = Some(video.id);
             self.preview_frame = None;
         }
         // The nearest keyframe is close enough, and much quicker to reach.
-        preview.command(&[b"seek", (fraction * length).to_string().as_bytes(), b"absolute+keyframes"]);
+        preview.command_later(&[b"seek", want.to_string().as_bytes(), b"absolute+keyframes"]);
+        self.preview_sent = Some(want);
+        self.preview_busy = Some(Instant::now());
     }
 
     fn preview_signal(&mut self, signal: Signal) {
@@ -696,16 +722,21 @@ impl App {
         (frame.width, frame.height) = (width, height);
         frame.pixels.resize(width as usize * height as usize, 0);
         preview.render(&mut frame.pixels, width, height);
+        self.preview_busy = None;
+        self.pump_preview();
         if self.hover.is_some() {
             self.redraw();
         }
     }
 
-    /// Jumps to a point along the video, from 0 to 1.
-    fn seek_to(&mut self, fraction: f64) {
+    /// Jumps to a point along the video, from 0 to 1: to that exact frame,
+    /// or to the nearest keyframe, which is quick enough to do repeatedly
+    /// while dragging.
+    fn seek_to(&mut self, fraction: f64, exact: bool) {
         let (Some(player), Some((_, length))) = (&self.player, self.video_time()) else { return };
         let target = fraction.clamp(0.0, 1.0) * length;
-        player.command(&[b"seek", target.to_string().as_bytes(), b"absolute+exact"]);
+        let how: &[u8] = if exact { b"absolute+exact" } else { b"absolute+keyframes" };
+        player.command_later(&[b"seek", target.to_string().as_bytes(), how]);
         if let Some(video) = &mut self.video {
             video.seeking = Some((Instant::now(), target));
         }
@@ -1879,7 +1910,7 @@ impl App {
                 let fraction = ((x - f64::from(bar.x)) / f64::from(bar.width)).clamp(0.0, 1.0);
                 self.hover = Some(fraction);
                 self.request_preview(fraction);
-                self.seek_to(fraction);
+                self.seek_to(fraction, false);
             }
             // Over a video the bottom of the window belongs to the seek bar,
             // so the filmstrip does not also open there; `t` still pins it.
@@ -1935,7 +1966,7 @@ impl App {
             }
             (MouseButton::Left, true) if self.hover.is_some() => {
                 // Click to jump there; keep the button down to scrub.
-                self.seek_to(self.hover.unwrap_or(0.0));
+                self.seek_to(self.hover.unwrap_or(0.0), true);
                 self.drag = Some(Drag::Scrub);
             }
             (MouseButton::Left, true) => {
@@ -2171,36 +2202,32 @@ impl App {
                 top_left.push(format!("{} / {}", clock(position), clock(length)));
             }
         }
-        // The seek bar: a rounded track lifted off the bottom edge, always in
-        // the same place. It is slim during playback. Under the pointer, or
-        // after a seek, a frame step or a pause, it thickens and gains a
-        // handle and the times at either end.
+        // The seek bar: a rounded track lifted off the bottom edge, with a
+        // handle and the times at either end. It is out of the way during
+        // playback, and appears while the pointer is at the bottom of the
+        // window and for a moment after a seek, a frame step or a pause.
         let mut time = Vec::new();
         let mut time_bottom = bottom;
         // Text placed by an anchor: ending at it, centred on it, or starting at it.
         let mut labels: Vec<(i32, i32, Ordering, String)> = Vec::new();
-        if let Some((position, length)) = self.video_time().filter(|_| viewing) {
+        let bar_wanted = viewing && (self.hover.is_some() || self.time_until.is_some());
+        if let Some((position, length)) = self.video_time().filter(|_| bar_wanted) {
             let bar = self.seek_bar();
             let unit = bar.unit;
             let line = Text::line_height(px);
-            let active = self.hover.is_some() || self.time_until.is_some();
-            let thickness = if active { unit * 2 / 3 } else { (unit / 3).max(4) };
+            let thickness = unit * 2 / 3;
             let top = bar.middle - thickness / 2;
-            if active {
-                // Darken the picture behind it, fading in from above.
-                for band in 0..6 {
-                    canvas.shade(0, bar.middle - unit * 4 + band * unit, width, unit, (230 - 22 * band) as u32);
-                }
+            // Darken the picture behind it, fading in from above.
+            for band in 0..6 {
+                canvas.shade(0, bar.middle - unit * 4 + band * unit, width, unit, (230 - 22 * band) as u32);
             }
             let done = (f64::from(bar.width) * position / length) as i32;
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 72, bar.width);
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 256, done.max(thickness / 2));
-            if active {
-                let handle = unit * 5 / 4;
-                canvas.pill(bar.x + done - handle / 2, bar.middle - handle / 2, handle, handle, TEXT_COLOR, 256, handle);
-                labels.push((bar.x - unit, bar.middle - line / 2, Ordering::Less, clock(position)));
-                labels.push((bar.x + bar.width + unit, bar.middle - line / 2, Ordering::Greater, clock(length)));
-            }
+            let handle = unit * 5 / 4;
+            canvas.pill(bar.x + done - handle / 2, bar.middle - handle / 2, handle, handle, TEXT_COLOR, 256, handle);
+            labels.push((bar.x - unit, bar.middle - line / 2, Ordering::Less, clock(position)));
+            labels.push((bar.x + bar.width + unit, bar.middle - line / 2, Ordering::Greater, clock(length)));
             time_bottom = bar.middle - unit * 4;
 
             if let Some(fraction) = self.hover {

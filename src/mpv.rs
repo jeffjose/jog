@@ -55,6 +55,7 @@ struct Api {
     set_property_string: unsafe extern "C" fn(Handle, *const c_char, *const c_char) -> c_int,
     get_property: unsafe extern "C" fn(Handle, *const c_char, c_int, *mut c_void) -> c_int,
     command: unsafe extern "C" fn(Handle, *mut *const c_char) -> c_int,
+    command_async: unsafe extern "C" fn(Handle, u64, *mut *const c_char) -> c_int,
     wait_event: unsafe extern "C" fn(Handle, c_double) -> *mut RawEvent,
     set_wakeup_callback: unsafe extern "C" fn(Handle, Option<Callback>, *mut c_void),
     render_context_create: unsafe extern "C" fn(*mut RenderContext, Handle, *mut RenderParam) -> c_int,
@@ -80,6 +81,7 @@ impl Api {
             set_property_string: symbol!("set_property_string"),
             get_property: symbol!("get_property"),
             command: symbol!("command"),
+            command_async: symbol!("command_async"),
             wait_event: symbol!("wait_event"),
             set_wakeup_callback: symbol!("set_wakeup_callback"),
             render_context_create: symbol!("render_context_create"),
@@ -199,6 +201,8 @@ impl Player {
                 ("hr-seek", "no"),
                 ("vd-lavc-fast", "yes"),
                 ("vd-lavc-skiploopfilter", "all"),
+                // Leave the cores to the video that is actually playing.
+                ("vd-lavc-threads", "2"),
             ];
             let extra: &[(&str, &str)] = match role {
                 Role::Playback { silent: false } => &[],
@@ -239,15 +243,25 @@ impl Player {
         unsafe { (self.api.command)(self.handle, pointers.as_mut_ptr()) };
     }
 
+    /// Queues a command without waiting for the player to get to it, which
+    /// can take a while when it is busy seeking or decoding.
+    pub fn command_later(&self, arguments: &[&[u8]]) {
+        let owned: Vec<CString> = arguments.iter().map(c_string).collect();
+        let mut pointers: Vec<*const c_char> = owned.iter().map(|argument| argument.as_ptr()).collect();
+        pointers.push(ptr::null());
+        // SAFETY: as in `command`; mpv copies the strings before returning.
+        unsafe { (self.api.command_async)(self.handle, 0, pointers.as_mut_ptr()) };
+    }
+
     /// Opens a file in place of whatever was open, without changing whether
-    /// the player is paused.
+    /// the player is paused or waiting for it to load.
     pub fn open(&self, path: &Path) {
-        self.command(&[b"loadfile", path.as_os_str().as_bytes()]);
+        self.command_later(&[b"loadfile", path.as_os_str().as_bytes()]);
     }
 
     /// Starts playing a file, replacing whatever was playing.
     pub fn play(&self, path: &Path) {
-        self.open(path);
+        self.command(&[b"loadfile", path.as_os_str().as_bytes()]);
         self.set("pause", "no");
     }
 
