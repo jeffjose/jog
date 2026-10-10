@@ -41,6 +41,8 @@ Slideshow and actions:
   -A, --action CMD           shell command for Enter / 0; %f is the path,
                              %n the file name
       --action1..9 CMD       shell commands for keys 1 to 9
+  -o, --output-dir DIR       folder that v copies and m moves images into
+      --print-marked         print the marked files on exit
 
 Overlays:
   -d, --draw-filename        show the file name
@@ -61,10 +63,14 @@ Keys:
   [ / ]                      rotate              _ |           flip, mirror
   f fullscreen  t filmstrip  d filename  i info  e EXIF  a actions  o pointer
   g                          grid view           ?             list of shortcuts
-  m or right click           menu                h             slideshow
-  r reload  s save copy  L save file list  w size window to image
+  Tab or right click         menu                h             slideshow
+  x                          mark / unmark       c / C         copy file name / full path
+  v / m                      copy / move marked images (or the current one) to -o DIR
+  u                          undo copy, move, rename or convert
+  r F2                       rename              F5            reload
+  s save copy  L save file list (marked ones if any)  w size window to image
   Delete                     remove from list    Ctrl+Delete   move to trash
-  Enter, 0-9                 run action          q x Esc       quit
+  Enter, 0-9                 run action          q Esc         quit
 
 Mouse: drag to pan, middle-drag to zoom, wheel for next/previous,
 Ctrl+wheel to zoom, bottom edge for the filmstrip.";
@@ -96,6 +102,8 @@ pub struct Options {
     pub draw_exif: bool,
     pub draw_actions: bool,
     pub filmstrip: bool,
+    pub output_dir: Option<PathBuf>,
+    pub print_marked: bool,
 }
 
 pub enum Parsed {
@@ -125,6 +133,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
         'A' => "action",
         'd' => "draw-filename",
         't' => "filmstrip",
+        'o' => "output-dir",
         'q' => "quiet",
         'h' => "help",
         'v' => "version",
@@ -135,6 +144,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
 fn takes_value(name: &str) -> bool {
     let valued = [
         "geometry", "image-bg", "zoom", "sort", "start-at", "filelist", "slideshow-delay", "on-last-slide",
+        "output-dir",
     ];
     valued.contains(&name) || name.starts_with("action")
 }
@@ -160,6 +170,8 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Parsed, String>
         draw_exif: false,
         draw_actions: false,
         filmstrip: false,
+        output_dir: None,
+        print_marked: false,
     };
     let mut fullscreen = None;
     let mut only_paths = false;
@@ -243,6 +255,8 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Parsed, String>
                 "draw-exif" => options.draw_exif = true,
                 "draw-actions" => options.draw_actions = true,
                 "filmstrip" => options.filmstrip = true,
+                "output-dir" => options.output_dir = Some(value()?.into()),
+                "print-marked" => options.print_marked = true,
                 "action" => options.actions[0] = Some(value()?),
                 other => {
                     let slot = other.strip_prefix("action").and_then(|n| n.parse::<usize>().ok());
@@ -318,6 +332,10 @@ mod tests {
         assert_eq!(options.slideshow_delay, Some(2.5));
         assert_eq!(options.listing.sort, Some(Sort::Mtime));
         assert_eq!(options.paths, [PathBuf::from("a.jpg"), PathBuf::from("dir")]);
+
+        let options = parse_args(&["-o", "/keep", "--print-marked"]).unwrap();
+        assert_eq!(options.output_dir, Some(PathBuf::from("/keep")));
+        assert!(options.print_marked);
     }
 
     #[test]

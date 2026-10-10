@@ -41,6 +41,8 @@ struct Slot {
 
 #[derive(Default)]
 struct State {
+    /// Path of each file id. Renaming a file changes its entry.
+    files: Vec<PathBuf>,
     request: Request,
     transforms: HashMap<usize, Transform>,
     fitted: HashMap<usize, Slot>,
@@ -116,7 +118,6 @@ impl State {
 }
 
 struct Shared {
-    files: Arc<[PathBuf]>,
     background: u32,
     state: Mutex<State>,
     wake: Condvar,
@@ -131,8 +132,9 @@ pub struct Loader {
 impl Loader {
     /// `on_loaded` is called from a worker thread for each job that finishes
     /// (or fails) and is still wanted.
-    pub fn new(files: Arc<[PathBuf]>, background: u32, on_loaded: impl Fn(Job) + Send + Sync + 'static) -> Self {
-        let shared = Arc::new(Shared { files, background, state: Mutex::default(), wake: Condvar::new() });
+    pub fn new(files: Vec<PathBuf>, background: u32, on_loaded: impl Fn(Job) + Send + Sync + 'static) -> Self {
+        let state = Mutex::new(State { files, ..State::default() });
+        let shared = Arc::new(Shared { background, state, wake: Condvar::new() });
         let on_loaded = Arc::new(on_loaded);
         let debug = std::env::var_os("JOG_DEBUG").is_some();
         let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_WORKERS);
@@ -166,6 +168,11 @@ impl Loader {
     pub fn set_transform(&self, id: usize, transform: Transform) {
         self.shared.state.lock().unwrap().transforms.insert(id, transform);
         self.shared.wake.notify_all();
+    }
+
+    /// Records that a file now lives at `path`. What was decoded stays valid.
+    pub fn set_path(&self, id: usize, path: PathBuf) {
+        self.shared.state.lock().unwrap().files[id] = path;
     }
 
     /// Forgets everything decoded for `id`, so it is read from disk again.
@@ -211,11 +218,11 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
         };
         let (id, spec) = state.spec(job, shared.background);
         state.busy.insert(job);
+        let path = state.files[id].clone();
         drop(state);
 
-        let path = &shared.files[id];
         let started = Instant::now();
-        let result = decode::load(path, spec);
+        let result = decode::load(&path, spec);
         if debug {
             let kind = match job {
                 Job::Fitted(_) => "fit",

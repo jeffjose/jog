@@ -10,7 +10,7 @@ use memchr::memmem;
 use crate::files;
 use crate::frame::{fit_size, Frame, Transform};
 
-type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
+pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 
 /// How a file should be turned into a frame.
 #[derive(Clone, Copy, PartialEq)]
@@ -31,6 +31,15 @@ pub fn load(path: &Path, spec: Spec) -> Result<Frame> {
         decode(&bytes)?
     };
     finish(image, orientation, spec)
+}
+
+/// The image at full resolution, upright, with any transparency intact.
+pub fn open(path: &Path) -> Result<DynamicImage> {
+    let bytes = std::fs::read(path)?;
+    let (mut image, orientation) =
+        if files::is_raw(path) { decode_raw_preview(&bytes, None)? } else { decode(&bytes)? };
+    image.apply_orientation(orientation);
+    Ok(image)
 }
 
 fn decode(bytes: &[u8]) -> Result<(DynamicImage, Orientation)> {
@@ -158,7 +167,7 @@ fn finish(image: DynamicImage, orientation: Orientation, spec: Spec) -> Result<F
 }
 
 /// Converts to 8-bit RGB, compositing any transparency over `background`.
-fn flatten(image: DynamicImage, background: u32) -> RgbImage {
+pub fn flatten(image: DynamicImage, background: u32) -> RgbImage {
     if !image.color().has_alpha() {
         return image.into_rgb8();
     }

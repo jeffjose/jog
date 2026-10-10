@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,14 +8,16 @@ use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::commands::{self, Command, MenuItem};
+use crate::convert::{self, Format};
 use crate::frame::{fit_size, Frame, Transform};
 use crate::loader::{Job, Loader, Request};
 use crate::meta::{self, Meta};
+use crate::ops;
 use crate::options::{LastSlide, Options};
 use crate::render;
 use crate::rng::Rng;
@@ -40,11 +42,46 @@ const MENU_COLOR: u32 = 0x1E1E1E;
 const MENU_EDGE_COLOR: u32 = 0x555555;
 const HIGHLIGHT_COLOR: u32 = 0x2D5B9A;
 const PLACEHOLDER_COLOR: u32 = 0x2A2A2A;
+const MARK_COLOR: u32 = 0xFFB020;
 const GRID_COLOR: u32 = 0x101010;
+
+/// What background threads send to the event loop.
+pub enum Event {
+    Loaded(Job),
+    Converted { created: Vec<PathBuf>, failed: usize, format: Format },
+}
+
+/// A file operation that `u` can take back.
+enum Undo {
+    /// Files written by a copy or a conversion.
+    Created(Vec<PathBuf>),
+    Moved(Vec<Moved>),
+    Renamed { id: usize, from: PathBuf, to: PathBuf },
+}
+
+/// A file moved out of the list: where it sat and where it went.
+struct Moved {
+    id: usize,
+    pos: usize,
+    from: PathBuf,
+    to: PathBuf,
+}
+
+/// The rename box: the file being renamed and the name as typed so far.
+struct Prompt {
+    id: usize,
+    text: Vec<char>,
+    cursor: usize,
+}
 
 pub struct App {
     options: Options,
-    files: Arc<[PathBuf]>,
+    /// Path of each file id.
+    files: Vec<PathBuf>,
+    marks: HashSet<usize>,
+    undo: Vec<Undo>,
+    prompt: Option<Prompt>,
+    proxy: EventLoopProxy<Event>,
     /// File ids in viewing order. Removing an image drops it from here.
     list: Vec<usize>,
     pos: usize,
@@ -260,9 +297,13 @@ fn ui_px(window_height: u32) -> u32 {
 }
 
 impl App {
-    pub fn new(options: Options, files: Arc<[PathBuf]>, start: usize, loader: Loader) -> Self {
+    pub fn new(options: Options, files: Vec<PathBuf>, start: usize, loader: Loader, proxy: EventLoopProxy<Event>) -> Self {
         let slide_delay = Duration::from_secs_f64(options.slideshow_delay.unwrap_or(DEFAULT_SLIDE_DELAY));
         App {
+            marks: HashSet::new(),
+            undo: Vec::new(),
+            prompt: None,
+            proxy,
             list: (0..files.len()).collect(),
             pos: start,
             forward: true,
@@ -314,8 +355,36 @@ impl App {
     }
 
     fn name(&self) -> String {
-        let path = self.path();
+        self.name_of(self.id())
+    }
+
+    fn name_of(&self, id: usize) -> String {
+        let path = &self.files[id];
         path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned()
+    }
+
+    /// List position that commands act on: the grid cursor when the grid is
+    /// up, otherwise the image being viewed.
+    fn focus(&self) -> usize {
+        self.grid.as_ref().map_or(self.pos, |grid| grid.cursor)
+    }
+
+    /// Files a file command applies to: the marked ones in list order, or
+    /// the focused one when nothing is marked.
+    fn targets(&self) -> Vec<usize> {
+        if self.marks.is_empty() {
+            return vec![self.list[self.focus()]];
+        }
+        self.list.iter().copied().filter(|id| self.marks.contains(id)).collect()
+    }
+
+    /// Prints the marked files, for `--print-marked`.
+    pub fn print_marked(&self) {
+        if self.options.print_marked {
+            for id in self.list.iter().filter(|id| self.marks.contains(id)) {
+                println!("{}", self.files[*id].display());
+            }
+        }
     }
 
     fn window_size(&self) -> (u32, u32) {
@@ -495,6 +564,7 @@ impl App {
     fn remove_current(&mut self, event_loop: &ActiveEventLoop) {
         let id = self.list.remove(self.pos);
         self.transforms.remove(&id);
+        self.marks.remove(&id);
         if self.list.is_empty() {
             event_loop.exit();
             return;
@@ -701,14 +771,28 @@ impl App {
             }
             SaveFilelist => {
                 let name = format!("jog_{}_filelist", std::process::id());
-                let lines: String =
-                    self.list.iter().map(|&id| format!("{}\n", self.files[id].display())).collect();
+                // The marked files if there are any, otherwise the whole list.
+                let ids = if self.marks.is_empty() { self.list.clone() } else { self.targets() };
+                let lines: String = ids.iter().map(|&id| format!("{}\n", self.files[id].display())).collect();
                 match std::fs::write(&name, lines) {
                     Ok(()) => self.toast(format!("Saved {name}")),
                     Err(error) => self.toast(format!("Could not save {name}: {error}")),
                 }
             }
             Action(slot) => self.run_action(slot),
+            Mark => self.toggle_mark(),
+            ClearMarks => {
+                let count = self.marks.len();
+                self.marks.clear();
+                self.toast(format!("Cleared {count} marks"));
+            }
+            CopyName => self.copy_text(false),
+            CopyPath => self.copy_text(true),
+            CopyTo => self.send(false, event_loop),
+            MoveTo => self.send(true, event_loop),
+            Undo => self.undo(),
+            Rename => self.start_rename(),
+            Convert(format) => self.convert(format),
             Quit => event_loop.exit(),
         }
         self.redraw();
@@ -752,6 +836,271 @@ impl App {
             ToggleExif => self.show_exif,
             ToggleSlideshow => self.slide_at.is_some(),
             _ => false,
+        }
+    }
+
+    // ---- Marks and file operations --------------------------------------
+
+    fn toggle_mark(&mut self) {
+        let id = self.list[self.focus()];
+        if self.marks.remove(&id) {
+            println!("[unmark] {}", self.name_of(id));
+        } else {
+            self.marks.insert(id);
+            println!("[mark] {}", self.name_of(id));
+        }
+        self.redraw();
+    }
+
+    /// Copies file names, or full paths, to the clipboard and the terminal.
+    fn copy_text(&mut self, full_path: bool) {
+        let lines: Vec<String> = self
+            .targets()
+            .into_iter()
+            .map(|id| match std::path::absolute(&self.files[id]) {
+                Ok(path) if full_path => path.to_string_lossy().into_owned(),
+                _ => self.name_of(id),
+            })
+            .collect();
+        for line in &lines {
+            println!("[copy] {line}");
+        }
+        let what = match lines.as_slice() {
+            [only] => only.clone(),
+            many => format!("{} {}", many.len(), if full_path { "paths" } else { "names" }),
+        };
+        // A scripted test run must not replace the user's clipboard.
+        if self.snapshot.is_some() || ops::set_clipboard(&lines.join("\n")) {
+            self.toast(format!("Copied {what}"));
+        } else {
+            self.toast("No clipboard tool found (xclip, xsel or wl-copy); printed to the terminal");
+        }
+    }
+
+    /// Copies or moves the target files into the `-o` folder. Files whose
+    /// name is already taken there are left alone.
+    fn send(&mut self, moving: bool, event_loop: &ActiveEventLoop) {
+        let Some(dir) = self.options.output_dir.clone() else {
+            self.toast("No destination folder: start jog with -o DIR");
+            return;
+        };
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            self.toast(format!("Cannot use {}: {error}", dir.display()));
+            return;
+        }
+
+        let (mut sent, mut skipped, mut failed) = (Vec::new(), 0, 0);
+        for id in self.targets() {
+            let from = self.files[id].clone();
+            let Some(name) = from.file_name() else { continue };
+            let to = dir.join(name);
+            if to.exists() {
+                skipped += 1;
+                continue;
+            }
+            let result = if moving { ops::move_file(&from, &to) } else { ops::copy_file(&from, &to) };
+            match result {
+                Ok(()) => {
+                    println!("[{}] {} -> {}", if moving { "move" } else { "copy to" }, from.display(), to.display());
+                    let pos = self.list.iter().position(|&other| other == id).unwrap_or(0);
+                    sent.push(Moved { id, pos, from, to });
+                }
+                Err(error) => {
+                    eprintln!("jog: {}: {error}", from.display());
+                    failed += 1;
+                }
+            }
+        }
+
+        let mut summary = format!("{} {} to {}", if moving { "Moved" } else { "Copied" }, sent.len(), dir.display());
+        if skipped > 0 {
+            summary.push_str(&format!(", {skipped} already there"));
+        }
+        if failed > 0 {
+            summary.push_str(&format!(", {failed} failed"));
+        }
+        self.toast(summary);
+        if sent.is_empty() {
+            return;
+        }
+        if moving {
+            self.drop_from_list(&sent, event_loop);
+            self.undo.push(Undo::Moved(sent));
+        } else {
+            self.undo.push(Undo::Created(sent.into_iter().map(|copy| copy.to).collect()));
+        }
+    }
+
+    /// Takes moved files out of the list, keeping the view and the grid
+    /// cursor on the images they were on where those are still there.
+    fn drop_from_list(&mut self, moved: &[Moved], event_loop: &ActiveEventLoop) {
+        let gone = |id: &usize| moved.iter().any(|m| m.id == *id);
+        // Where a list position ends up once the moved files are gone.
+        let shifted = |pos: usize| pos - moved.iter().filter(|m| m.pos < pos).count();
+        let (pos, cursor) = (shifted(self.pos), self.grid.as_ref().map(|grid| shifted(grid.cursor)));
+
+        self.list.retain(|id| !gone(id));
+        self.marks.retain(|id| !gone(id));
+        if self.list.is_empty() {
+            event_loop.exit();
+            return;
+        }
+        let last = self.list.len() - 1;
+        self.pos = pos.min(last);
+        if let (Some(grid), Some(cursor)) = (&mut self.grid, cursor) {
+            grid.cursor = cursor.min(last);
+        }
+        self.error = None;
+        self.reset_view();
+        self.request();
+        self.refresh();
+    }
+
+    fn undo(&mut self) {
+        match self.undo.pop() {
+            None => self.toast("Nothing to undo"),
+            Some(Undo::Created(paths)) => {
+                let removed = paths.iter().filter(|path| std::fs::remove_file(path).is_ok()).count();
+                for path in &paths {
+                    println!("[undo] removed {}", path.display());
+                }
+                self.toast(format!("Undone: removed {removed} new files"));
+            }
+            Some(Undo::Moved(moved)) => {
+                let viewing = self.id();
+                let mut restored = 0;
+                // In their original order, so each lands where it was.
+                for item in &moved {
+                    if ops::move_file(&item.to, &item.from).is_ok() {
+                        println!("[undo] {} -> {}", item.to.display(), item.from.display());
+                        self.list.insert(item.pos.min(self.list.len()), item.id);
+                        restored += 1;
+                    } else {
+                        eprintln!("jog: cannot move {} back", item.to.display());
+                    }
+                }
+                self.pos = self.list.iter().position(|&id| id == viewing).unwrap_or(self.pos);
+                self.toast(format!("Undone: moved {restored} of {} back", moved.len()));
+                self.request();
+                self.refresh();
+            }
+            Some(Undo::Renamed { id, from, to }) => {
+                if ops::move_file(&to, &from).is_ok() {
+                    println!("[undo] {} -> {}", to.display(), from.display());
+                    self.set_path(id, from);
+                    self.toast(format!("Undone: renamed back to {}", self.name_of(id)));
+                    self.refresh();
+                } else {
+                    self.toast("Could not undo the rename");
+                }
+            }
+        }
+    }
+
+    fn set_path(&mut self, id: usize, path: PathBuf) {
+        self.loader.set_path(id, path.clone());
+        self.files[id] = path;
+    }
+
+    /// Converts the target files on another thread; `Event::Converted`
+    /// reports back.
+    fn convert(&mut self, format: Format) {
+        let paths: Vec<PathBuf> = self.targets().into_iter().map(|id| self.files[id].clone()).collect();
+        self.toast(format!("Converting {} to {}...", paths.len(), format.name()));
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let (mut created, mut failed) = (Vec::new(), 0);
+            for path in paths {
+                match convert::convert(&path, format) {
+                    Ok(to) => {
+                        println!("[convert] {} -> {}", path.display(), to.display());
+                        created.push(to);
+                    }
+                    Err(error) => {
+                        eprintln!("jog: cannot convert {}: {error}", path.display());
+                        failed += 1;
+                    }
+                }
+            }
+            let _ = proxy.send_event(Event::Converted { created, failed, format });
+        });
+    }
+
+    fn converted(&mut self, created: Vec<PathBuf>, failed: usize, format: Format) {
+        let mut summary = format!("Converted {} to {}", created.len(), format.name());
+        if failed > 0 {
+            summary.push_str(&format!(", {failed} failed (see the terminal)"));
+        }
+        self.toast(summary);
+        if !created.is_empty() {
+            self.undo.push(Undo::Created(created));
+        }
+    }
+
+    // ---- Rename --------------------------------------------------------
+
+    fn start_rename(&mut self) {
+        let id = self.list[self.focus()];
+        let text: Vec<char> = self.name_of(id).chars().collect();
+        // Start typing before the extension.
+        let cursor = text.iter().rposition(|c| *c == '.').filter(|at| *at > 0).unwrap_or(text.len());
+        self.prompt = Some(Prompt { id, text, cursor });
+        self.menu = None;
+        self.redraw();
+    }
+
+    fn prompt_key(&mut self, key: Key<&str>) {
+        let Some(prompt) = &mut self.prompt else { return };
+        let typing = !self.modifiers.control_key() && !self.modifiers.alt_key();
+        match key {
+            Key::Named(NamedKey::Escape) => self.prompt = None,
+            Key::Named(NamedKey::Enter) => self.finish_rename(),
+            Key::Named(NamedKey::Backspace) if prompt.cursor > 0 => {
+                prompt.cursor -= 1;
+                prompt.text.remove(prompt.cursor);
+            }
+            Key::Named(NamedKey::Delete) if prompt.cursor < prompt.text.len() => {
+                prompt.text.remove(prompt.cursor);
+            }
+            Key::Named(NamedKey::ArrowLeft) => prompt.cursor = prompt.cursor.saturating_sub(1),
+            Key::Named(NamedKey::ArrowRight) => prompt.cursor = (prompt.cursor + 1).min(prompt.text.len()),
+            Key::Named(NamedKey::Home) => prompt.cursor = 0,
+            Key::Named(NamedKey::End) => prompt.cursor = prompt.text.len(),
+            Key::Named(NamedKey::Space) | Key::Character(_) if typing => {
+                let typed = if let Key::Character(text) = key { text } else { " " };
+                for c in typed.chars() {
+                    prompt.text.insert(prompt.cursor, c);
+                    prompt.cursor += 1;
+                }
+            }
+            _ => {}
+        }
+        self.redraw();
+    }
+
+    fn finish_rename(&mut self) {
+        let Some(prompt) = self.prompt.take() else { return };
+        let typed: String = prompt.text.iter().collect();
+        let name = typed.trim();
+        let from = self.files[prompt.id].clone();
+        let old_name = self.name_of(prompt.id);
+        if name == old_name {
+            return;
+        }
+        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+            self.toast("Not a usable file name");
+            return;
+        }
+        let to = from.with_file_name(name);
+        match ops::move_file(&from, &to) {
+            Ok(()) => {
+                println!("[rename] {old_name} -> {name}");
+                self.set_path(prompt.id, to.clone());
+                self.undo.push(Undo::Renamed { id: prompt.id, from, to });
+                self.toast(format!("Renamed to {name}"));
+                self.refresh();
+            }
+            Err(error) => self.toast(format!("Cannot rename to {name}: {error}")),
         }
     }
 
@@ -805,7 +1154,7 @@ impl App {
             Key::Named(NamedKey::ArrowDown) => step(menu, true),
             Key::Named(NamedKey::ArrowUp) => step(menu, false),
             Key::Named(NamedKey::Enter) => self.activate_menu(event_loop),
-            Key::Named(NamedKey::Escape) | Key::Character("m") => self.menu = None,
+            Key::Named(NamedKey::Escape | NamedKey::Tab) => self.menu = None,
             _ => {}
         }
         self.redraw();
@@ -923,9 +1272,19 @@ impl App {
             Some(Command::First) => self.move_cursor(i64::MIN),
             Some(Command::Last) => self.move_cursor(i64::MAX),
             Some(Command::Action(0)) => self.open_from_grid(),
-            Some(command @ (Command::ToggleGrid | Command::ToggleHelp | Command::ToggleFullscreen | Command::Quit)) => {
-                self.execute(command, event_loop)
-            }
+            Some(
+                command @ (Command::ToggleGrid
+                | Command::ToggleHelp
+                | Command::ToggleFullscreen
+                | Command::Mark
+                | Command::CopyName
+                | Command::CopyPath
+                | Command::CopyTo
+                | Command::MoveTo
+                | Command::Undo
+                | Command::Rename
+                | Command::Quit),
+            ) => self.execute(command, event_loop),
             _ => {}
         }
     }
@@ -937,6 +1296,9 @@ impl App {
             // Any key dismisses the list of shortcuts.
             self.help = false;
             return self.redraw();
+        }
+        if self.prompt.is_some() {
+            return self.prompt_key(key);
         }
         if self.menu.is_some() {
             return self.menu_key(key, event_loop);
@@ -1077,8 +1439,38 @@ impl App {
         }
         snapshot.at = Some(Instant::now() + snapshot.wait);
         self.mouse = snapshot.pointer;
-        for key in snapshot.keys.clone().chars() {
-            self.key_pressed(Key::Character(&key.to_string()), false, false, event_loop);
+        // Plain characters are typed; `{Enter}`, `{Tab}`, `{F2}` and so on
+        // press the named key.
+        let keys = snapshot.keys.clone();
+        let mut rest = keys.as_str();
+        while let Some(c) = rest.chars().next() {
+            let named = rest.strip_prefix('{').and_then(|inner| inner.split_once('}'));
+            let key = match named {
+                Some((name, after)) => {
+                    rest = after;
+                    match name {
+                        "Enter" => Key::Named(NamedKey::Enter),
+                        "Escape" => Key::Named(NamedKey::Escape),
+                        "Tab" => Key::Named(NamedKey::Tab),
+                        "Backspace" => Key::Named(NamedKey::Backspace),
+                        "Delete" => Key::Named(NamedKey::Delete),
+                        "Left" => Key::Named(NamedKey::ArrowLeft),
+                        "Right" => Key::Named(NamedKey::ArrowRight),
+                        "Up" => Key::Named(NamedKey::ArrowUp),
+                        "Down" => Key::Named(NamedKey::ArrowDown),
+                        "Space" => Key::Named(NamedKey::Space),
+                        "F2" => Key::Named(NamedKey::F2),
+                        "F5" => Key::Named(NamedKey::F5),
+                        _ => continue,
+                    }
+                }
+                None => {
+                    let (typed, after) = rest.split_at(c.len_utf8());
+                    rest = after;
+                    Key::Character(typed)
+                }
+            };
+            self.key_pressed(key, false, false, event_loop);
         }
         self.mouse_moved(self.mouse.0, self.mouse.1);
     }
@@ -1164,7 +1556,16 @@ impl App {
         }
         let bottom = strip.map_or(height, |s| s.top) - margin;
 
+        let marked = viewing && self.marks.contains(&self.id());
+        if marked {
+            // A bar along the top edge flags a marked image.
+            canvas.fill(0, 0, width, (px as i32 / 3).max(4), MARK_COLOR);
+        }
         let mut top_left = Vec::new();
+        if viewing && !self.marks.is_empty() {
+            let count = format!("{} marked", self.marks.len());
+            top_left.push(if marked { format!("MARKED   ({count})") } else { count });
+        }
         if viewing && self.show_filename {
             top_left.push(format!("{}   [{}/{}]", self.name(), self.pos + 1, self.list.len()));
         }
@@ -1189,7 +1590,7 @@ impl App {
 
         let blocks = [&top_left, &exif, &actions, &toast, &error, &footer];
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty());
-        if nothing_to_write && self.menu.is_none() && !self.help {
+        if nothing_to_write && self.menu.is_none() && self.prompt.is_none() && !self.help {
             return;
         }
         let mut text = self.text.take().unwrap_or_else(Text::load);
@@ -1201,6 +1602,9 @@ impl App {
         text_block(canvas, &mut text, &error, px, |w, h| ((width - w) / 2, (height - h) / 2));
         if let Some(menu) = &self.menu {
             self.draw_menu(canvas, &mut text, menu);
+        }
+        if let Some(prompt) = &self.prompt {
+            draw_prompt(canvas, &mut text, prompt, px, bottom);
         }
         if self.help {
             draw_help(canvas, &mut text, px);
@@ -1226,6 +1630,9 @@ impl App {
                     canvas.image(&thumb, left + (cell_w - w) / 2, top + (cell_h - h) / 2, w, h);
                 }
                 None => canvas.fill(left, top, cell_w, cell_h, PLACEHOLDER_COLOR),
+            }
+            if self.marks.contains(&self.list[pos]) {
+                canvas.fill(left, top, layout.pad * 2, layout.pad * 2, MARK_COLOR);
             }
             // The cursor is boxed brightly, the image being viewed quietly.
             if pos == grid.cursor || pos == self.pos {
@@ -1290,6 +1697,9 @@ impl App {
                 }
                 None => canvas.fill(left, top, strip.cell_w, strip.cell_h, PLACEHOLDER_COLOR),
             }
+            if self.marks.contains(&self.list[pos as usize]) {
+                canvas.fill(left, top, strip.pad, strip.pad, MARK_COLOR);
+            }
             if offset == 0 {
                 let edge = (strip.pad / 3).max(2);
                 canvas.outline(left - edge, top - edge, strip.cell_w + 2 * edge, strip.cell_h + 2 * edge, edge, TEXT_COLOR);
@@ -1339,6 +1749,26 @@ fn text_block(canvas: &mut Canvas, text: &mut Text, lines: &[String], px: u32, p
     for (index, line) in lines.iter().enumerate() {
         text.draw(canvas, x + pad, y + pad + index as i32 * line_height, px, TEXT_COLOR, line);
     }
+}
+
+/// Draws the rename box, centred with its bottom edge at `bottom`.
+fn draw_prompt(canvas: &mut Canvas, text: &mut Text, prompt: &Prompt, px: u32, bottom: i32) {
+    const LABEL: &str = "Rename:   ";
+    let typed: String = prompt.text.iter().collect();
+    let before_cursor: String = prompt.text[..prompt.cursor].iter().collect();
+    let pad = px as i32;
+    let line_height = Text::line_height(px);
+    let label_width = text.width(LABEL, px);
+    let width = (label_width + text.width(&typed, px) + 3 * pad).max(px as i32 * 30).min(canvas.width);
+    let height = line_height + 2 * pad;
+    let (left, top) = ((canvas.width - width) / 2, bottom - height);
+
+    canvas.fill(left, top, width, height, MENU_COLOR);
+    canvas.outline(left, top, width, height, 1, MENU_EDGE_COLOR);
+    text.draw(canvas, left + pad, top + pad, px, DIM_TEXT_COLOR, LABEL);
+    text.draw(canvas, left + pad + label_width, top + pad, px, TEXT_COLOR, &typed);
+    let cursor = left + pad + label_width + text.width(&before_cursor, px);
+    canvas.fill(cursor, top + pad, (px as i32 / 10).max(2), line_height, TEXT_COLOR);
 }
 
 /// Draws the list of shortcuts as a panel in the middle of the window.
@@ -1404,7 +1834,7 @@ fn expand_action(template: &str, path: &Path) -> String {
     command
 }
 
-impl ApplicationHandler<Job> for App {
+impl ApplicationHandler<Event> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -1440,15 +1870,16 @@ impl ApplicationHandler<Job> for App {
         self.refresh();
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, job: Job) {
-        match job {
-            Job::Fitted(id) if id == self.id() => {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
+        match event {
+            Event::Loaded(Job::Fitted(id)) if id == self.id() => {
                 self.refresh();
                 self.start_snapshot(event_loop);
             }
-            Job::Full(id) if id == self.id() => self.redraw(),
-            Job::Thumb(_) if self.strip_visible() || self.grid.is_some() => self.redraw(),
-            _ => {}
+            Event::Loaded(Job::Full(id)) if id == self.id() => self.redraw(),
+            Event::Loaded(Job::Thumb(_)) if self.strip_visible() || self.grid.is_some() => self.redraw(),
+            Event::Loaded(_) => {}
+            Event::Converted { created, failed, format } => self.converted(created, failed, format),
         }
     }
 
