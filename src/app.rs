@@ -88,6 +88,19 @@ struct Video {
     seeking: Option<(Instant, f64)>,
 }
 
+/// Something to do to the video on view.
+enum VideoAction {
+    Pause,
+    /// Seconds to move by.
+    Seek(f64),
+    /// One frame forward or back.
+    Frame(bool),
+    /// Percentage points to change the volume by.
+    Volume(i32),
+    /// The next or previous file.
+    File(bool),
+}
+
 /// A clickable button and the command it runs.
 struct Button {
     x: i32,
@@ -163,6 +176,8 @@ pub struct App {
     player_asked: bool,
     video: Option<Video>,
     toast: Option<(String, Instant)>,
+    /// While set, the video's time and a larger progress bar are shown.
+    time_until: Option<Instant>,
     meta: Option<(usize, Meta)>,
     text: Option<Text>,
 
@@ -382,6 +397,7 @@ impl App {
             player_asked: false,
             video: None,
             toast: None,
+            time_until: None,
             meta: None,
             text: None,
             modifiers: ModifiersState::empty(),
@@ -663,48 +679,74 @@ impl App {
 
     /// Handles the keys that mean something else while a video plays.
     /// Returns whether the key was one of them.
-    fn video_key(&mut self, key: Key<&str>) -> bool {
-        let (Some(player), Some(video)) = (&self.player, &mut self.video) else { return false };
-        if self.modifiers.control_key() || self.modifiers.alt_key() {
+    fn video_key(&mut self, key: Key<&str>, repeat: bool) -> bool {
+        let modifiers = self.modifiers;
+        if self.player.is_none() || modifiers.alt_key() {
             return false;
         }
-        let mut seek = |seconds: f64| {
-            player.command(&[b"seek", seconds.to_string().as_bytes(), b"relative+exact"]);
-            let length = player.number("duration").unwrap_or(0.0);
-            // mpv has not moved yet when asked straight after a seek, so
-            // quick presses build on where the last one was heading.
-            let from = match video.seeking {
-                Some((at, target)) if at.elapsed() < SEEK_SETTLE => target,
-                _ => player.number("time-pos").unwrap_or(0.0),
-            };
-            let target = (from + seconds).clamp(0.0, length);
-            video.seeking = Some((Instant::now(), target));
-            format!("{} / {}", clock(target), clock(length))
-        };
-        let volume = |change: &[u8]| {
-            player.command(&[b"add", b"volume", change]);
-            format!("Volume {:.0}%", player.number("volume").unwrap_or(0.0))
-        };
-        let message = match key {
-            Key::Named(NamedKey::Space) => {
-                player.command(&[b"cycle", b"pause"]);
-                if player.flag("pause") == Some(true) { "Paused".to_string() } else { "Playing".to_string() }
+        let arrow = |forward: bool| {
+            if modifiers.control_key() {
+                VideoAction::File(forward)
+            } else if modifiers.shift_key() {
+                VideoAction::Frame(forward)
+            } else {
+                VideoAction::Seek(if forward { SEEK_STEP } else { -SEEK_STEP })
             }
-            Key::Character(">" | ".") => seek(SEEK_STEP),
-            Key::Character("<" | ",") => seek(-SEEK_STEP),
-            Key::Named(NamedKey::ArrowUp) | Key::Character("+" | "=") => volume(b"5"),
-            Key::Named(NamedKey::ArrowDown) | Key::Character("-") => volume(b"-5"),
+        };
+        let action = match key {
+            // Holding space down should not flicker between the two.
+            Key::Named(NamedKey::Space) if repeat => return true,
+            Key::Named(NamedKey::Space) => VideoAction::Pause,
+            Key::Named(NamedKey::ArrowRight) => arrow(true),
+            Key::Named(NamedKey::ArrowLeft) => arrow(false),
+            Key::Named(NamedKey::ArrowUp) | Key::Character("+" | "=") => VideoAction::Volume(5),
+            Key::Named(NamedKey::ArrowDown) | Key::Character("-") => VideoAction::Volume(-5),
             _ => return false,
         };
-        self.toast(message);
+        self.video_action(action);
         true
     }
 
-    /// How far through the video playback is, from 0 to 1.
-    fn video_progress(&self) -> Option<f64> {
-        let player = self.player.as_ref().filter(|_| self.video.is_some())?;
+    fn video_action(&mut self, action: VideoAction) {
+        let (Some(player), Some(video)) = (&self.player, &mut self.video) else { return };
+        match action {
+            VideoAction::File(forward) => return self.step(forward),
+            VideoAction::Pause => player.command(&[b"cycle", b"pause"]),
+            VideoAction::Seek(seconds) => {
+                player.command(&[b"seek", seconds.to_string().as_bytes(), b"relative+exact"]);
+                // mpv has not moved yet when asked straight after a seek, so
+                // quick presses build on where the last one was heading.
+                let from = match video.seeking {
+                    Some((at, target)) if at.elapsed() < SEEK_SETTLE => target,
+                    _ => player.number("time-pos").unwrap_or(0.0),
+                };
+                let length = player.number("duration").unwrap_or(0.0);
+                video.seeking = Some((Instant::now(), (from + seconds).clamp(0.0, length)));
+            }
+            // Both leave the video paused on the frame they land on.
+            VideoAction::Frame(true) => player.command(&[b"frame-step"]),
+            VideoAction::Frame(false) => player.command(&[b"frame-back-step"]),
+            VideoAction::Volume(change) => {
+                player.command(&[b"add", b"volume", change.to_string().as_bytes()]);
+                let volume = player.number("volume").unwrap_or(0.0);
+                return self.toast(format!("Volume {volume:.0}%"));
+            }
+        }
+        // Bring up the time and the larger progress bar for a moment.
+        self.time_until = Some(Instant::now() + TOAST);
+        self.redraw();
+    }
+
+    /// Where playback is and how long the video is, in seconds.
+    fn video_time(&self) -> Option<(f64, f64)> {
+        let (player, video) = (self.player.as_ref()?, self.video.as_ref()?);
         let length = player.number("duration").filter(|length| *length > 0.0)?;
-        Some((player.number("time-pos")? / length).clamp(0.0, 1.0))
+        // Straight after a seek mpv still reports where it was.
+        let position = match video.seeking {
+            Some((at, target)) if at.elapsed() < SEEK_SETTLE => target,
+            _ => player.number("time-pos")?,
+        };
+        Some((position.clamp(0.0, length), length))
     }
 
     fn reset_view(&mut self) {
@@ -990,16 +1032,13 @@ impl App {
             Rename => self.start_rename(),
             Delete => self.ask_delete(),
             Convert(format) => self.convert(format),
-            // The menu's way to the keys that `video_key` handles.
-            PlayPause | SeekForward | SeekBack | VolumeUp | VolumeDown => {
-                self.video_key(match command {
-                    PlayPause => Key::Named(NamedKey::Space),
-                    SeekForward => Key::Character(">"),
-                    SeekBack => Key::Character("<"),
-                    VolumeUp => Key::Named(NamedKey::ArrowUp),
-                    _ => Key::Named(NamedKey::ArrowDown),
-                });
-            }
+            PlayPause => self.video_action(VideoAction::Pause),
+            SeekForward => self.video_action(VideoAction::Seek(SEEK_STEP)),
+            SeekBack => self.video_action(VideoAction::Seek(-SEEK_STEP)),
+            FrameForward => self.video_action(VideoAction::Frame(true)),
+            FrameBack => self.video_action(VideoAction::Frame(false)),
+            VolumeUp => self.video_action(VideoAction::Volume(5)),
+            VolumeDown => self.video_action(VideoAction::Volume(-5)),
             Quit => event_loop.exit(),
         }
         self.redraw();
@@ -1634,7 +1673,7 @@ impl App {
         if self.grid.is_some() {
             return self.grid_key(key, event_loop);
         }
-        if self.video.is_some() && self.video_key(key.clone()) {
+        if self.video.is_some() && self.video_key(key.clone(), repeat) {
             return;
         }
         if let Some(command) = commands::for_key(key, self.modifiers, numpad) {
@@ -1794,6 +1833,13 @@ impl App {
             let key = match named {
                 Some((name, after)) => {
                     rest = after;
+                    // `{Shift+Right}` and `{Ctrl+Right}` hold a modifier.
+                    let (held, name) = match name.split_once('+') {
+                        Some(("Shift", name)) => (ModifiersState::SHIFT, name),
+                        Some(("Ctrl", name)) => (ModifiersState::CONTROL, name),
+                        _ => (ModifiersState::empty(), name),
+                    };
+                    self.modifiers = held;
                     match name {
                         "Enter" => Key::Named(NamedKey::Enter),
                         "Escape" => Key::Named(NamedKey::Escape),
@@ -1817,6 +1863,7 @@ impl App {
                 }
             };
             self.key_pressed(key, false, false, event_loop);
+            self.modifiers = ModifiersState::empty();
         }
         self.mouse_moved(self.mouse.0, self.mouse.1);
     }
@@ -1928,17 +1975,27 @@ impl App {
         if viewing && self.show_info {
             top_left.push(format!("{}   [{}/{}]", self.name(), self.pos + 1, self.list.len()));
             top_left.push(self.info_line());
-            if let (Some(player), Some(_)) = (&self.player, &self.video) {
-                let time = |property| clock(player.number(property).unwrap_or(0.0));
-                top_left.push(format!("{} / {}", time("time-pos"), time("duration")));
+            if let Some((position, length)) = self.video_time() {
+                top_left.push(format!("{} / {}", clock(position), clock(length)));
             }
         }
-        if let Some(progress) = self.video_progress().filter(|_| viewing) {
-            // A line along the bottom edge shows how far playback has got.
-            let thickness = (px as i32 / 4).max(3);
-            let done = (f64::from(width) * progress) as i32;
-            canvas.shade(0, height - thickness, width, thickness, 100);
-            canvas.fill(0, height - thickness, done, thickness, TEXT_COLOR);
+        // A bar along the bottom shows how far playback has got. After a
+        // seek, a frame step or a pause it grows and the time appears above
+        // it in large figures.
+        let mut time = Vec::new();
+        if let Some((position, length)) = self.video_time().filter(|_| viewing) {
+            let prominent = self.time_until.is_some();
+            let thickness = if prominent { px as i32 } else { (px as i32 / 2).max(5) };
+            let base = strip.map_or(height, |s| s.top);
+            let done = (f64::from(width) * position / length) as i32;
+            canvas.shade(0, base - thickness, width, thickness, 90);
+            canvas.fill(0, base - thickness, done, thickness, TEXT_COLOR);
+            if prominent {
+                // To the hundredth while paused, where single frames matter.
+                let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
+                let now = if paused { clock_precise(position) } else { clock(position) };
+                time.push(format!("{now} / {}", clock(length)));
+            }
         }
         let exif = if viewing && self.show_exif { self.current_meta().exif.clone() } else { Vec::new() };
         let footer: Vec<String> = self.grid_footer().into_iter().collect();
@@ -1956,7 +2013,7 @@ impl App {
             _ => Vec::new(),
         };
 
-        let blocks = [&top_left, &exif, &actions, &toast, &error, &footer];
+        let blocks = [&top_left, &exif, &actions, &toast, &error, &footer, &time];
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty());
         if nothing_to_write && self.menu.is_none() && self.prompt.is_none() && self.confirm.is_none() && !self.help {
             return;
@@ -1967,6 +2024,8 @@ impl App {
         text_block(canvas, &mut text, &exif, px, |_, h| (margin, bottom - h));
         text_block(canvas, &mut text, &actions, px, |w, h| (width - margin - w, bottom - h));
         text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w, margin));
+        // Twice the usual size, centred just above the progress bar.
+        text_block(canvas, &mut text, &time, px * 2, |w, h| ((width - w) / 2, bottom - px as i32 - h));
         text_block(canvas, &mut text, &error, px, |w, h| ((width - w) / 2, (height - h) / 2));
         if let Some(menu) = &self.menu {
             self.draw_menu(canvas, &mut text, menu);
@@ -2262,6 +2321,12 @@ fn clock(seconds: f64) -> String {
     }
 }
 
+/// A playback time to the hundredth of a second, as `m:ss.cc`.
+fn clock_precise(seconds: f64) -> String {
+    let hundredths = (seconds.max(0.0).fract() * 100.0) as u64;
+    format!("{}.{hundredths:02}", clock(seconds))
+}
+
 /// Fills in an action template: `%f` is the path and `%n` the file name,
 /// both quoted for the shell, and `%%` a literal percent sign.
 fn expand_action(template: &str, path: &Path) -> String {
@@ -2386,13 +2451,18 @@ impl ApplicationHandler<Event> for App {
                 self.advance_slideshow(event_loop);
             }
         }
+        if self.time_until.is_some_and(|until| until <= now) {
+            self.time_until = None;
+            self.redraw();
+        }
         let snapshot_at = self.snapshot.as_ref().and_then(|snapshot| snapshot.at);
         if snapshot_at.is_some_and(|at| at <= now) {
             return self.finish_snapshot(event_loop);
         }
 
         let toast_until = self.toast.as_ref().map(|(_, until)| *until);
-        let next = [self.settle_at, toast_until, self.slide_at, snapshot_at].into_iter().flatten().min();
+        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at];
+        let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 }

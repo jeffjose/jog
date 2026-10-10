@@ -64,6 +64,8 @@ pub enum Command {
     SeekBack,
     VolumeUp,
     VolumeDown,
+    FrameForward,
+    FrameBack,
     Quit,
 }
 
@@ -185,13 +187,15 @@ const fn video_item(label: &'static str, keys: &'static str, command: Command) -
 pub const MENU: &[Option<MenuItem>] = &[
     image_item("Next", ">", Command::Next),
     image_item("Previous", "<", Command::Previous),
-    video_item("Next", "Right", Command::Next),
-    video_item("Previous", "Left", Command::Previous),
+    video_item("Next", "Ctrl+Right", Command::Next),
+    video_item("Previous", "Ctrl+Left", Command::Previous),
     item("Random", "z", Command::Random),
     None,
     video_item("Play / pause", "Space", Command::PlayPause),
-    video_item("Forward 5 seconds", ">", Command::SeekForward),
-    video_item("Back 5 seconds", "<", Command::SeekBack),
+    video_item("Forward 5 seconds", "Right", Command::SeekForward),
+    video_item("Back 5 seconds", "Left", Command::SeekBack),
+    video_item("Next frame", "Shift+Right", Command::FrameForward),
+    video_item("Previous frame", "Shift+Left", Command::FrameBack),
     video_item("Volume up", "Up", Command::VolumeUp),
     video_item("Volume down", "Down", Command::VolumeDown),
     image_item("Zoom in", "+", Command::ZoomIn),
@@ -346,9 +350,11 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             "While a video plays",
             &[
                 ("Space", "Play / pause"),
-                ("<  >", "Seek back / forward 5 seconds"),
+                ("Left  Right", "Seek back / forward 5 seconds"),
+                ("Shift+Left  Shift+Right", "Previous / next frame"),
                 ("Up  Down", "Volume"),
-                ("Left  Right  n  p", "Previous / next file"),
+                ("Ctrl+Left  Ctrl+Right", "Previous / next file"),
+                (",  .  <  >  n  p", "Previous / next file"),
             ],
         ),
         (
