@@ -444,6 +444,8 @@ pub struct App {
     /// Which picture of an animated image is up, and when the next is due.
     picture: usize,
     picture_due: Option<Instant>,
+    /// When to draw again to see whether a font being loaded has come.
+    font_due: Option<Instant>,
     /// The image layer as last rendered, reused when only overlays change.
     scene: Vec<u32>,
     scene_key: Option<SceneKey>,
@@ -729,6 +731,7 @@ impl App {
             settle_at: None,
             picture: 0,
             picture_due: None,
+            font_due: None,
             scene: Vec::new(),
             scene_key: None,
             show_info: options.draw_info,
@@ -3744,6 +3747,10 @@ impl App {
         if self.help {
             draw_help(canvas, &mut text, px);
         }
+        // Letters whose font is still loading show as boxes for now.
+        if text.waiting() {
+            self.font_due = Some(Instant::now() + Duration::from_millis(150));
+        }
         self.text = Some(text);
     }
 
@@ -4629,13 +4636,17 @@ impl ApplicationHandler<Event> for App {
         if self.picture_due.is_some_and(|due| due <= now) {
             self.next_picture(now);
         }
+        if self.font_due.is_some_and(|due| due <= now) {
+            self.font_due = None;
+            self.redraw();
+        }
         let snapshot_at = self.snapshot.as_ref().and_then(|snapshot| snapshot.at);
         if snapshot_at.is_some_and(|at| at <= now) {
             return self.finish_snapshot(event_loop);
         }
 
         let toast_until = self.toast.as_ref().map(|(_, until)| *until);
-        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due];
+        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.font_due];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

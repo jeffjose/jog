@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::mpsc;
 
 use fast_image_resize as fir;
 
@@ -232,6 +233,14 @@ const FONT_PATHS: &[&str] = &[
 /// this is only created once something needs to draw text.
 pub struct Text {
     font: Option<fontdue::Font>,
+    /// Fonts for the letters the main one lacks, Korean say, each found
+    /// through fontconfig the first time such a letter comes up. A font
+    /// for a large script takes a while to load, so that happens on
+    /// another thread; until it is in, the letter is drawn as a box.
+    others: Vec<fontdue::Font>,
+    loading: Option<mpsc::Receiver<Option<fontdue::Font>>>,
+    /// Letters a font has been looked for, so each is only asked about once.
+    sought: HashSet<char>,
     glyphs: HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>,
 }
 
@@ -244,16 +253,54 @@ impl Text {
         if font.is_none() {
             eprintln!("jog: no usable font found, text will not be drawn (set JOG_FONT to a .ttf file)");
         }
-        Text { font, glyphs: HashMap::new() }
+        Text { font, others: Vec::new(), loading: None, sought: HashSet::new(), glyphs: HashMap::new() }
     }
 
     pub fn line_height(px: u32) -> i32 {
         (px * 4 / 3) as i32
     }
 
+    /// Whether a font is still on its way, after which text drawn in the
+    /// meantime will want drawing again.
+    pub fn waiting(&self) -> bool {
+        self.loading.is_some()
+    }
+
+    /// Which font has letter `c`: 0 for the main one, otherwise one of the
+    /// others, counted from 1. Looks for a font that has it if none does.
+    fn font_with(&mut self, c: char) -> usize {
+        let has = |font: &fontdue::Font| font.lookup_glyph_index(c) != 0;
+        if self.font.as_ref().is_none_or(has) || c.is_control() {
+            return 0;
+        }
+        if let Some(Ok(found)) = self.loading.as_ref().map(mpsc::Receiver::try_recv) {
+            self.loading = None;
+            self.others.extend(found);
+            // What was drawn as boxes can now be drawn properly.
+            self.glyphs.clear();
+        }
+        if let Some(at) = self.others.iter().position(has) {
+            return at + 1;
+        }
+        if self.loading.is_none() && self.sought.insert(c) {
+            let (sender, receiver) = mpsc::channel();
+            self.loading = Some(receiver);
+            std::thread::spawn(move || drop(sender.send(font_for(c))));
+        }
+        0
+    }
+
+    fn font(&self, which: usize) -> Option<&fontdue::Font> {
+        if which == 0 { self.font.as_ref() } else { self.others.get(which - 1) }
+    }
+
     pub fn width(&mut self, text: &str, px: u32) -> i32 {
-        let Some(font) = &self.font else { return 0 };
-        text.chars().map(|c| font.metrics(c, px as f32).advance_width).sum::<f32>().ceil() as i32
+        let mut width = 0.0;
+        for c in text.chars() {
+            let which = self.font_with(c);
+            width += self.font(which).map_or(0.0, |font| font.metrics(c, px as f32).advance_width);
+        }
+        width.ceil() as i32
     }
 
     /// Draws one line of text whose line box has its top-left at `(x, y)`.
@@ -266,8 +313,13 @@ impl Text {
 
         let mut pen = x as f32;
         for c in text.chars() {
-            let (metrics, coverage) =
-                self.glyphs.entry((c, px)).or_insert_with(|| font.rasterize(c, px as f32));
+            if !self.glyphs.contains_key(&(c, px)) {
+                let which = self.font_with(c);
+                let Some(font) = self.font(which) else { continue };
+                let glyph = font.rasterize(c, px as f32);
+                self.glyphs.insert((c, px), glyph);
+            }
+            let (metrics, coverage) = &self.glyphs[&(c, px)];
             let left = pen.round() as i32 + metrics.xmin;
             let top = baseline - metrics.ymin - metrics.height as i32;
             for (row, line) in coverage.chunks_exact(metrics.width.max(1)).enumerate() {
@@ -280,6 +332,18 @@ impl Text {
             pen += metrics.advance_width;
         }
     }
+}
+
+/// A font that has letter `c`, as fontconfig picks one. The file may hold
+/// several fonts, in which case fontconfig says which.
+fn font_for(c: char) -> Option<fontdue::Font> {
+    let pattern = format!("sans:charset={:x}", c as u32);
+    let output = Command::new("fc-match").args(["-f", "%{file}\n%{index}", &pattern]).output().ok()?;
+    let answer = String::from_utf8(output.stdout).ok()?;
+    let (file, index) = answer.split_once('\n')?;
+    let settings = fontdue::FontSettings { collection_index: index.trim().parse().unwrap_or(0), ..Default::default() };
+    let font = fontdue::Font::from_bytes(std::fs::read(file).ok()?, settings).ok()?;
+    (font.lookup_glyph_index(c) != 0).then_some(font)
 }
 
 fn font_files() -> impl Iterator<Item = PathBuf> {
