@@ -67,6 +67,14 @@ struct Moved {
     to: PathBuf,
 }
 
+/// The delete confirmation: the question, the highlighted answer (No to
+/// begin with) and the files it is about.
+struct Confirm {
+    question: String,
+    yes: bool,
+    ids: Vec<usize>,
+}
+
 /// The rename box: the file being renamed and the name as typed so far.
 struct Prompt {
     id: usize,
@@ -81,6 +89,7 @@ pub struct App {
     marks: HashSet<usize>,
     undo: Vec<Undo>,
     prompt: Option<Prompt>,
+    confirm: Option<Confirm>,
     proxy: EventLoopProxy<Event>,
     /// File ids in viewing order. Removing an image drops it from here.
     list: Vec<usize>,
@@ -104,7 +113,6 @@ pub struct App {
     scene: Vec<u32>,
     scene_key: Option<SceneKey>,
 
-    show_filename: bool,
     show_info: bool,
     show_exif: bool,
     show_actions: bool,
@@ -303,6 +311,7 @@ impl App {
             marks: HashSet::new(),
             undo: Vec::new(),
             prompt: None,
+            confirm: None,
             proxy,
             list: (0..files.len()).collect(),
             pos: start,
@@ -318,7 +327,6 @@ impl App {
             settle_at: None,
             scene: Vec::new(),
             scene_key: None,
-            show_filename: options.draw_filename,
             show_info: options.draw_info,
             show_exif: options.draw_exif,
             show_actions: options.draw_actions,
@@ -698,7 +706,7 @@ impl App {
             ZoomFill => self.set_zoom(Zoom::Fill),
             ToggleEnlarge => {
                 self.view.enlarge = !self.view.enlarge;
-                self.toast(if self.view.enlarge { "Enlarging small images" } else { "Small images at actual size" });
+                self.toast(if self.view.enlarge { "Small images fit the screen" } else { "Small images at actual size" });
                 self.view_changed();
             }
             ToggleKeepView => {
@@ -730,7 +738,6 @@ impl App {
                 self.request();
                 self.redraw();
             }
-            ToggleFilename => self.show_filename = !self.show_filename,
             ToggleInfo => self.show_info = !self.show_info,
             ToggleExif => self.show_exif = !self.show_exif,
             ToggleActions => self.show_actions = !self.show_actions,
@@ -792,6 +799,7 @@ impl App {
             MoveTo => self.send(true, event_loop),
             Undo => self.undo(),
             Rename => self.start_rename(),
+            Delete => self.ask_delete(),
             Convert(format) => self.convert(format),
             Quit => event_loop.exit(),
         }
@@ -831,7 +839,6 @@ impl App {
             ToggleEnlarge => self.view.enlarge,
             ToggleFullscreen => self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
             ToggleFilmstrip => self.strip_pinned,
-            ToggleFilename => self.show_filename,
             ToggleInfo => self.show_info,
             ToggleExif => self.show_exif,
             ToggleSlideshow => self.slide_at.is_some(),
@@ -924,19 +931,21 @@ impl App {
             return;
         }
         if moving {
-            self.drop_from_list(&sent, event_loop);
+            let removed: Vec<(usize, usize)> = sent.iter().map(|moved| (moved.id, moved.pos)).collect();
+            self.drop_from_list(&removed, event_loop);
             self.undo.push(Undo::Moved(sent));
         } else {
             self.undo.push(Undo::Created(sent.into_iter().map(|copy| copy.to).collect()));
         }
     }
 
-    /// Takes moved files out of the list, keeping the view and the grid
-    /// cursor on the images they were on where those are still there.
-    fn drop_from_list(&mut self, moved: &[Moved], event_loop: &ActiveEventLoop) {
-        let gone = |id: &usize| moved.iter().any(|m| m.id == *id);
-        // Where a list position ends up once the moved files are gone.
-        let shifted = |pos: usize| pos - moved.iter().filter(|m| m.pos < pos).count();
+    /// Takes files that are gone out of the list, given as `(id, position)`.
+    /// The view and the grid cursor stay on the images they were on where
+    /// those are still there.
+    fn drop_from_list(&mut self, removed: &[(usize, usize)], event_loop: &ActiveEventLoop) {
+        let gone = |id: &usize| removed.iter().any(|(gone_id, _)| gone_id == id);
+        // Where a list position ends up once the removed files are gone.
+        let shifted = |pos: usize| pos - removed.iter().filter(|(_, at)| *at < pos).count();
         let (pos, cursor) = (shifted(self.pos), self.grid.as_ref().map(|grid| shifted(grid.cursor)));
 
         self.list.retain(|id| !gone(id));
@@ -954,6 +963,62 @@ impl App {
         self.reset_view();
         self.request();
         self.refresh();
+    }
+
+    /// Asks before deleting the target files for good.
+    fn ask_delete(&mut self) {
+        let ids = self.targets();
+        let question = match ids.as_slice() {
+            [only] => format!("Delete {}?", self.name_of(*only)),
+            many => format!("Delete {} marked images?", many.len()),
+        };
+        self.menu = None;
+        self.confirm = Some(Confirm { question, yes: false, ids });
+        self.redraw();
+    }
+
+    fn confirm_key(&mut self, key: Key<&str>, event_loop: &ActiveEventLoop) {
+        let Some(confirm) = &mut self.confirm else { return };
+        match key {
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::Tab) => confirm.yes = !confirm.yes,
+            Key::Character("y" | "Y") => confirm.yes = true,
+            Key::Character("n" | "N") | Key::Named(NamedKey::Escape) => self.confirm = None,
+            Key::Named(NamedKey::Enter) => {}
+            _ => return,
+        }
+        // Enter takes the highlighted answer; y is a yes in one press.
+        if matches!(key, Key::Named(NamedKey::Enter) | Key::Character("y" | "Y")) {
+            if let Some(Confirm { yes: true, ids, .. }) = self.confirm.take() {
+                self.delete(&ids, event_loop);
+            }
+        }
+        self.redraw();
+    }
+
+    /// Deletes files from disk. This cannot be undone.
+    fn delete(&mut self, ids: &[usize], event_loop: &ActiveEventLoop) {
+        let (mut removed, mut failed) = (Vec::new(), 0);
+        for &id in ids {
+            let Some(pos) = self.list.iter().position(|&other| other == id) else { continue };
+            match std::fs::remove_file(&self.files[id]) {
+                Ok(()) => {
+                    println!("[delete] {}", self.files[id].display());
+                    removed.push((id, pos));
+                }
+                Err(error) => {
+                    eprintln!("jog: cannot delete {}: {error}", self.files[id].display());
+                    failed += 1;
+                }
+            }
+        }
+        let mut summary = format!("Deleted {}", removed.len());
+        if failed > 0 {
+            summary.push_str(&format!(", {failed} failed"));
+        }
+        self.toast(summary);
+        if !removed.is_empty() {
+            self.drop_from_list(&removed, event_loop);
+        }
     }
 
     fn undo(&mut self) {
@@ -1283,6 +1348,7 @@ impl App {
                 | Command::MoveTo
                 | Command::Undo
                 | Command::Rename
+                | Command::Delete
                 | Command::Quit),
             ) => self.execute(command, event_loop),
             _ => {}
@@ -1296,6 +1362,9 @@ impl App {
             // Any key dismisses the list of shortcuts.
             self.help = false;
             return self.redraw();
+        }
+        if self.confirm.is_some() {
+            return self.confirm_key(key, event_loop);
         }
         if self.prompt.is_some() {
             return self.prompt_key(key);
@@ -1566,10 +1635,8 @@ impl App {
             let count = format!("{} marked", self.marks.len());
             top_left.push(if marked { format!("MARKED   ({count})") } else { count });
         }
-        if viewing && self.show_filename {
-            top_left.push(format!("{}   [{}/{}]", self.name(), self.pos + 1, self.list.len()));
-        }
         if viewing && self.show_info {
+            top_left.push(format!("{}   [{}/{}]", self.name(), self.pos + 1, self.list.len()));
             top_left.push(self.info_line());
         }
         let exif = if viewing && self.show_exif { self.current_meta().exif.clone() } else { Vec::new() };
@@ -1590,7 +1657,7 @@ impl App {
 
         let blocks = [&top_left, &exif, &actions, &toast, &error, &footer];
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty());
-        if nothing_to_write && self.menu.is_none() && self.prompt.is_none() && !self.help {
+        if nothing_to_write && self.menu.is_none() && self.prompt.is_none() && self.confirm.is_none() && !self.help {
             return;
         }
         let mut text = self.text.take().unwrap_or_else(Text::load);
@@ -1605,6 +1672,9 @@ impl App {
         }
         if let Some(prompt) = &self.prompt {
             draw_prompt(canvas, &mut text, prompt, px, bottom);
+        }
+        if let Some(confirm) = &self.confirm {
+            draw_confirm(canvas, &mut text, confirm, px);
         }
         if self.help {
             draw_help(canvas, &mut text, px);
@@ -1748,6 +1818,34 @@ fn text_block(canvas: &mut Canvas, text: &mut Text, lines: &[String], px: u32, p
     canvas.shade(x, y, width, height, 80);
     for (index, line) in lines.iter().enumerate() {
         text.draw(canvas, x + pad, y + pad + index as i32 * line_height, px, TEXT_COLOR, line);
+    }
+}
+
+/// Draws the delete confirmation in the middle of the window: the question
+/// above a No and a Yes button, one of them highlighted.
+fn draw_confirm(canvas: &mut Canvas, text: &mut Text, confirm: &Confirm, px: u32) {
+    let pad = px as i32;
+    let line_height = Text::line_height(px);
+    let button_width = px as i32 * 6;
+    let button_height = line_height + pad;
+    let buttons_width = 2 * button_width + pad;
+    let width = (text.width(&confirm.question, px).max(buttons_width) + 2 * pad).min(canvas.width);
+    let height = line_height + button_height + 3 * pad;
+    let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
+
+    canvas.fill(left, top, width, height, MENU_COLOR);
+    canvas.outline(left, top, width, height, 1, MENU_EDGE_COLOR);
+    text.draw(canvas, left + pad, top + pad, px, TEXT_COLOR, &confirm.question);
+
+    let buttons_left = left + (width - buttons_width) / 2;
+    let buttons_top = top + 2 * pad + line_height;
+    for (index, (label, selected)) in [("No", !confirm.yes), ("Yes", confirm.yes)].into_iter().enumerate() {
+        let button_left = buttons_left + index as i32 * (button_width + pad);
+        let fill = if selected { HIGHLIGHT_COLOR } else { MENU_COLOR };
+        canvas.fill(button_left, buttons_top, button_width, button_height, fill);
+        canvas.outline(button_left, buttons_top, button_width, button_height, 1, MENU_EDGE_COLOR);
+        let label_left = button_left + (button_width - text.width(label, px)) / 2;
+        text.draw(canvas, label_left, buttons_top + pad / 2, px, TEXT_COLOR, label);
     }
 }
 

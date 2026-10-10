@@ -45,11 +45,17 @@ Slideshow and actions:
       --print-marked         print the marked files on exit
 
 Overlays:
-  -d, --draw-filename        show the file name
-      --draw-info            show size and zoom
+  -d, --draw-info            show name, position, dimensions, zoom and size
       --draw-exif            show EXIF data
       --draw-actions         show the defined actions
   -t, --filmstrip            keep the filmstrip open
+
+Config file:
+  ~/.config/jog/config.toml sets defaults, using the long option names:
+      output-dir = \"~/Pictures/picks\"
+      draw-info = true
+      auto-zoom = false
+  Options on the command line override it.
 
   -h, --help                 show this help
   -v, --version              show the version
@@ -59,9 +65,10 @@ Keys:
   Home / End                 first / last        PgDn / PgUp   jump 5%
   z                          random image        { / }         previous / next directory
   + Up / - Down              zoom in / out       * / !         100%, fit, fill
-  Ctrl+arrows, Alt+arrows    scroll, by a page   Z  enlarge small images
+  Ctrl+arrows, Alt+arrows    scroll, by a page   Z  small images: fit screen / actual size
   [ / ]                      rotate              _ |           flip, mirror
-  f fullscreen  t filmstrip  d filename  i info  e EXIF  a actions  o pointer
+  f fullscreen  t filmstrip  i info  e EXIF  a actions  o pointer
+  d                          delete (asks first; marked images, or the current one)
   g                          grid view           ?             list of shortcuts
   Tab or right click         menu                h             slideshow
   x                          mark / unmark       c / C         copy file name / full path
@@ -97,7 +104,6 @@ pub struct Options {
     pub slideshow_delay: Option<f64>,
     pub on_last_slide: LastSlide,
     pub actions: [Option<String>; 10],
-    pub draw_filename: bool,
     pub draw_info: bool,
     pub draw_exif: bool,
     pub draw_actions: bool,
@@ -131,7 +137,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
         'f' => "filelist",
         'D' => "slideshow-delay",
         'A' => "action",
-        'd' => "draw-filename",
+        'd' => "draw-info",
         't' => "filmstrip",
         'o' => "output-dir",
         'q' => "quiet",
@@ -149,7 +155,25 @@ fn takes_value(name: &str) -> bool {
     valued.contains(&name) || name.starts_with("action")
 }
 
-pub fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Parsed, String> {
+fn is_switch(name: &str) -> bool {
+    let switches = [
+        "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
+        "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
+        "cycle-once", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
+    ];
+    switches.contains(&name)
+}
+
+/// Builds the options from the config file, then the command line, which
+/// wins where both set something.
+pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Parsed, String> {
+    parse_with(args, read_config()?)
+}
+
+fn parse_with(
+    mut args: impl Iterator<Item = OsString>,
+    config: Option<(PathBuf, String)>,
+) -> Result<Parsed, String> {
     let mut options = Options {
         paths: Vec::new(),
         listing: Listing::default(),
@@ -165,7 +189,6 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Parsed, String>
         slideshow_delay: None,
         on_last_slide: LastSlide::Resume,
         actions: Default::default(),
-        draw_filename: false,
         draw_info: false,
         draw_exif: false,
         draw_actions: false,
@@ -174,6 +197,9 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Parsed, String>
         print_marked: false,
     };
     let mut fullscreen = None;
+    if let Some((path, text)) = config {
+        apply_config(&text, &mut options, &mut fullscreen).map_err(|error| format!("{}: {error}", path.display()))?;
+    }
     let mut only_paths = false;
 
     while let Some(arg) = args.next() {
@@ -217,60 +243,141 @@ pub fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Parsed, String>
             match name.as_str() {
                 "help" => return Ok(Parsed::Help),
                 "version" => return Ok(Parsed::Version),
-                "fullscreen" => fullscreen = Some(true),
-                "windowed" => fullscreen = Some(false),
-                "geometry" => options.geometry = Some(parse_geometry(&value()?)?),
-                "borderless" => options.borderless = true,
-                "image-bg" => options.background = parse_color(&value()?)?,
-                "hide-pointer" => options.hide_pointer = true,
-                // Fitting large images and natural sorting are always on.
-                "scale-down" | "version-sort" | "quiet" => {}
-                "auto-zoom" => options.auto_zoom = true,
-                "no-auto-zoom" => options.auto_zoom = false,
-                "zoom" => options.zoom = parse_zoom(&value()?)?,
-                "keep-zoom-vp" => options.keep_view = true,
-                "force-aliasing" => options.antialias = false,
-                "recursive" => options.listing.recursive = true,
-                "sort" => options.listing.sort = Some(parse_sort(&value()?)?),
-                "reverse" => options.listing.reverse = true,
-                "randomize" => options.listing.randomize = true,
-                "start-at" => options.listing.start_at = Some(value()?.into()),
-                "filelist" => options.listing.filelist = Some(value()?.into()),
-                "slideshow-delay" => {
-                    let text = value()?;
-                    let seconds: f64 = text.parse().map_err(|_| format!("invalid delay '{text}'"))?;
-                    options.slideshow_delay = (seconds > 0.0).then_some(seconds);
-                }
-                "on-last-slide" => {
-                    options.on_last_slide = match value()?.as_str() {
-                        "resume" => LastSlide::Resume,
-                        "hold" => LastSlide::Hold,
-                        "quit" => LastSlide::Quit,
-                        other => return Err(format!("invalid --on-last-slide '{other}'")),
-                    }
-                }
-                "cycle-once" => options.on_last_slide = LastSlide::Quit,
-                "draw-filename" => options.draw_filename = true,
-                "draw-info" => options.draw_info = true,
-                "draw-exif" => options.draw_exif = true,
-                "draw-actions" => options.draw_actions = true,
-                "filmstrip" => options.filmstrip = true,
-                "output-dir" => options.output_dir = Some(value()?.into()),
-                "print-marked" => options.print_marked = true,
-                "action" => options.actions[0] = Some(value()?),
-                other => {
-                    let slot = other.strip_prefix("action").and_then(|n| n.parse::<usize>().ok());
-                    match slot {
-                        Some(slot @ 1..=9) => options.actions[slot] = Some(value()?),
-                        _ => return Err(format!("unknown option --{other}")),
-                    }
-                }
+                name => apply(&mut options, &mut fullscreen, name, &mut value).map_err(|error| {
+                    // `apply` names options the way the config file spells them.
+                    error.replace("unknown option ", "unknown option --")
+                })?,
             }
         }
     }
 
     options.fullscreen = fullscreen.unwrap_or(options.geometry.is_none());
     Ok(Parsed::Run(Box::new(options)))
+}
+
+/// Applies one option by its long name, whether it came from the command
+/// line or the config file. `value` fetches the option's argument.
+fn apply(
+    options: &mut Options,
+    fullscreen: &mut Option<bool>,
+    name: &str,
+    value: &mut dyn FnMut() -> Result<String, String>,
+) -> Result<(), String> {
+    match name {
+        "fullscreen" => *fullscreen = Some(true),
+        "windowed" => *fullscreen = Some(false),
+        "geometry" => options.geometry = Some(parse_geometry(&value()?)?),
+        "borderless" => options.borderless = true,
+        "image-bg" => options.background = parse_color(&value()?)?,
+        "hide-pointer" => options.hide_pointer = true,
+        // Fitting large images and natural sorting are always on.
+        "scale-down" | "version-sort" | "quiet" => {}
+        "auto-zoom" => options.auto_zoom = true,
+        "no-auto-zoom" => options.auto_zoom = false,
+        "zoom" => options.zoom = parse_zoom(&value()?)?,
+        "keep-zoom-vp" => options.keep_view = true,
+        "force-aliasing" => options.antialias = false,
+        "recursive" => options.listing.recursive = true,
+        "sort" => options.listing.sort = Some(parse_sort(&value()?)?),
+        "reverse" => options.listing.reverse = true,
+        "randomize" => options.listing.randomize = true,
+        "start-at" => options.listing.start_at = Some(value()?.into()),
+        "filelist" => options.listing.filelist = Some(value()?.into()),
+        "slideshow-delay" => {
+            let text = value()?;
+            let seconds: f64 = text.parse().map_err(|_| format!("invalid delay '{text}'"))?;
+            options.slideshow_delay = (seconds > 0.0).then_some(seconds);
+        }
+        "on-last-slide" => {
+            options.on_last_slide = match value()?.as_str() {
+                "resume" => LastSlide::Resume,
+                "hold" => LastSlide::Hold,
+                "quit" => LastSlide::Quit,
+                other => return Err(format!("invalid on-last-slide '{other}'")),
+            }
+        }
+        "cycle-once" => options.on_last_slide = LastSlide::Quit,
+        // feh's name for it; here the file name is part of the info overlay.
+        "draw-filename" | "draw-info" => options.draw_info = true,
+        "draw-exif" => options.draw_exif = true,
+        "draw-actions" => options.draw_actions = true,
+        "filmstrip" => options.filmstrip = true,
+        "output-dir" => options.output_dir = Some(expand_home(&value()?)),
+        "print-marked" => options.print_marked = true,
+        "action" => options.actions[0] = Some(value()?),
+        other => {
+            let slot = other.strip_prefix("action").and_then(|n| n.parse::<usize>().ok());
+            match slot {
+                Some(slot @ 1..=9) => options.actions[slot] = Some(value()?),
+                _ => return Err(format!("unknown option {other}")),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Where the config file lives: `$JOG_CONFIG`, or `jog/config.toml` under
+/// `$XDG_CONFIG_HOME` or `~/.config`.
+fn config_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("JOG_CONFIG") {
+        return Some(path.into());
+    }
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(".config")))?;
+    Some(base.join("jog/config.toml"))
+}
+
+/// The config file's path and contents, if there is one.
+fn read_config() -> Result<Option<(PathBuf, String)>, String> {
+    let Some(path) = config_path() else { return Ok(None) };
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some((path, text))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+    }
+}
+
+/// Applies a config file. Its keys are the long option names: switches take
+/// `true` or `false`, everything else a string or a number.
+fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>) -> Result<(), String> {
+    let table: toml::Table = text.parse().map_err(|error: toml::de::Error| error.to_string())?;
+    for (key, value) in &table {
+        let key = key.replace('_', "-");
+        let (name, argument) = match value {
+            toml::Value::Boolean(true) => (key.as_str(), None),
+            // Only the switches that default to on have an "off" spelling.
+            toml::Value::Boolean(false) => match key.as_str() {
+                "auto-zoom" => ("no-auto-zoom", None),
+                "fullscreen" => ("windowed", None),
+                other if is_switch(other) => continue,
+                _ => (key.as_str(), None),
+            },
+            toml::Value::String(text) => (key.as_str(), Some(text.clone())),
+            toml::Value::Integer(number) => (key.as_str(), Some(number.to_string())),
+            toml::Value::Float(number) => (key.as_str(), Some(number.to_string())),
+            _ => return Err(format!("{key}: expected a string, a number, true or false")),
+        };
+        if is_switch(name) && argument.is_some() {
+            return Err(format!("{key} is a switch: use true or false"));
+        }
+        if takes_value(name) && argument.is_none() {
+            return Err(format!("{key} needs a value"));
+        }
+        apply(options, fullscreen, name, &mut || Ok(argument.clone().unwrap_or_default()))?;
+    }
+    Ok(())
+}
+
+/// Expands a leading `~`, which the shell does not do for config values.
+fn expand_home(text: &str) -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match (text.strip_prefix('~'), home) {
+        (Some(""), Some(home)) => home,
+        (Some(rest), Some(home)) if rest.starts_with('/') => home.join(&rest[1..]),
+        _ => PathBuf::from(text),
+    }
 }
 
 fn parse_geometry(text: &str) -> Result<(u32, u32), String> {
@@ -318,10 +425,48 @@ mod tests {
     use super::*;
 
     fn parse_args(args: &[&str]) -> Result<Options, String> {
-        match parse(args.iter().map(OsString::from))? {
+        parse_config("", args)
+    }
+
+    fn parse_config(config: &str, args: &[&str]) -> Result<Options, String> {
+        let config = Some((PathBuf::from("config.toml"), config.to_string()));
+        match parse_with(args.iter().map(OsString::from), config)? {
             Parsed::Run(options) => Ok(*options),
             _ => Err("did not run".into()),
         }
+    }
+
+    #[test]
+    fn config_sets_defaults_and_the_command_line_overrides() {
+        let config = "output-dir = \"/picks\"\nauto_zoom = false\nfullscreen = false\nslideshow-delay = 4\ndraw-filename = true\nrecursive = false\naction1 = \"gimp %f\"\n";
+        let options = parse_config(config, &[]).unwrap();
+        assert_eq!(options.output_dir, Some(PathBuf::from("/picks")));
+        assert!(!options.auto_zoom && !options.fullscreen && options.draw_info && !options.listing.recursive);
+        assert_eq!(options.slideshow_delay, Some(4.0));
+        assert_eq!(options.actions[1].as_deref(), Some("gimp %f"));
+
+        let options = parse_config(config, &["-o", "/other", "-FZ"]).unwrap();
+        assert_eq!(options.output_dir, Some(PathBuf::from("/other")));
+        assert!(options.auto_zoom && options.fullscreen);
+    }
+
+    #[test]
+    fn config_mistakes_are_reported() {
+        let error = |config| parse_config(config, &[]).err().unwrap();
+        assert!(error("bogus = 1").contains("config.toml: unknown option bogus"));
+        assert!(error("output-dir = true").contains("needs a value"));
+        assert!(error("recursive = \"yes\"").contains("is a switch"));
+        assert!(error("sort = \"sideways\"").contains("invalid sort order"));
+        assert!(error("not toml at all").starts_with("config.toml: "));
+    }
+
+    #[test]
+    fn home_is_expanded_in_folders() {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(expand_home("~/picks"), home.join("picks"));
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("/abs/~/x"), PathBuf::from("/abs/~/x"));
+        assert_eq!(expand_home("~other/x"), PathBuf::from("~other/x"));
     }
 
     #[test]
