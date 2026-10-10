@@ -46,6 +46,8 @@ Slideshow and actions:
       --action1..9 CMD       shell commands for keys 1 to 9
   -o, --output-dir DIR       folder that v copies and m moves images into
       --print-marked         print the marked files on exit
+      --verbose              print each file as it comes up: its place in the
+                             list, dimensions, size and how long it took
       --debug                print decode and video start times (also JOG_DEBUG=1)
       --no-resume            start videos from the beginning, and do not
                              remember where they were left (--resume undoes it)
@@ -131,6 +133,7 @@ pub struct Options {
     pub output_dir: Option<PathBuf>,
     pub print_marked: bool,
     pub debug: bool,
+    pub verbose: bool,
     /// Whether videos pick up where they were left.
     pub resume: bool,
 }
@@ -183,7 +186,7 @@ fn is_switch(name: &str) -> bool {
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
         "cycle-once", "autoplay", "no-autoplay", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
-        "debug", "resume", "no-resume",
+        "debug", "verbose", "resume", "no-resume",
     ];
     switches.contains(&name)
 }
@@ -221,6 +224,7 @@ fn parse_with(
         output_dir: None,
         print_marked: false,
         debug: std::env::var_os("JOG_DEBUG").is_some(),
+        verbose: false,
         resume: true,
     };
     let mut fullscreen = None;
@@ -334,6 +338,7 @@ fn apply(
         "output-dir" => options.output_dir = Some(expand_home(&value()?)),
         "print-marked" => options.print_marked = true,
         "debug" => options.debug = true,
+        "verbose" => options.verbose = true,
         "resume" => options.resume = true,
         "no-resume" => options.resume = false,
         "action" => options.actions[0] = Some(value()?),
@@ -516,6 +521,7 @@ mod tests {
         assert_eq!(options.output_dir, Some(PathBuf::from("/keep")));
         assert!(options.print_marked);
         assert!(parse_args(&["--debug"]).unwrap().debug);
+        assert!(parse_args(&["--verbose"]).unwrap().verbose);
         assert!(parse_args(&[]).unwrap().resume);
         assert!(!parse_args(&["--no-resume"]).unwrap().resume);
         assert!(!parse_config("resume = false", &[]).unwrap().resume);

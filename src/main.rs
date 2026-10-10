@@ -41,10 +41,15 @@ fn main() -> ExitCode {
         }
     };
 
+    let started = std::time::Instant::now();
     let playlist = files::collect(&options.paths, &options.listing);
     if playlist.files.is_empty() {
         eprintln!("jog: no images to show\nTry 'jog --help' for the options.");
         return ExitCode::FAILURE;
+    }
+    if options.verbose {
+        let videos = playlist.files.iter().filter(|path| files::is_video(path)).count();
+        eprintln!("jog: {} files, {videos} of them videos, listed in {:.1?}", playlist.files.len(), started.elapsed());
     }
     let files = playlist.files;
 

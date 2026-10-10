@@ -1091,6 +1091,14 @@ impl App {
                 if self.options.debug {
                     eprintln!("jog: {took:>7.1?} video start {}", self.files[video.id].display());
                 }
+                if self.options.verbose {
+                    let codec = player.text("video-format").unwrap_or_default();
+                    let rate = player.number("container-fps").map(|rate| format!(" {rate:.2} fps")).unwrap_or_default();
+                    let length = player.number("duration").map(|length| format!(", {} long", clock(length)));
+                    let from = video.seeking.map(|(_, seconds)| format!(", resumed at {}", clock(seconds)));
+                    let (length, from) = (length.unwrap_or_default(), from.unwrap_or_default());
+                    eprintln!("jog:     playing in {}: {codec}{rate}{length}{from}", ms(took));
+                }
             } else if showing {
                 // Every seek ends with the player announcing frames again.
                 if let Some(asked) = video.seek_asked.take() {
@@ -2041,6 +2049,9 @@ impl App {
             // Keep only the matches. With nothing typed there is nothing to
             // keep, which makes this the way to drop a kept search too.
             SearchEnd::Keep if narrowed => {
+                if self.options.verbose {
+                    eprintln!("jog: search \"{typed}\" kept: {} of {} files", self.list.len(), search.base.len());
+                }
                 self.filter = Some((typed, search.base));
                 self.toast(format!("Showing {} of {} (Esc for all)", self.list.len(), self.total()));
             }
@@ -2066,6 +2077,9 @@ impl App {
         let at = |id: usize| all.iter().position(|&other| other == id).unwrap_or(0);
         let (viewed, focus) = (at(viewed), at(focus));
         self.set_list(all, viewed, focus);
+        if self.options.verbose {
+            eprintln!("jog: search cleared: all {} files", self.list.len());
+        }
         self.toast("Showing all files");
     }
 
@@ -2701,12 +2715,35 @@ impl App {
         }
         let up = self.grid.is_none() && self.shown.as_ref().is_some_and(|(id, _)| *id == self.id());
         if up && self.perf.shown_in.is_none() {
-            self.perf.shown_in = Some(now.duration_since(self.perf.arrived));
+            let took = now.duration_since(self.perf.arrived);
+            self.perf.shown_in = Some(took);
+            if self.options.verbose {
+                self.report_shown(took);
+            }
             // The overlay was drawn before these figures were known.
             if self.show_debug {
                 self.redraw();
             }
         }
+    }
+
+    /// For `--verbose`: a line about the file that has just come up.
+    fn report_shown(&self, took: Duration) {
+        let id = self.id();
+        let mut line = format!("jog: [{}/{}] {}", self.pos + 1, self.list.len(), self.files[id].display());
+        if let Some((width, height)) = self.native() {
+            line.push_str(&format!("  {width}x{height}"));
+        }
+        if let Some(size) = std::fs::metadata(&self.files[id]).ok().map(|meta| meta.len()) {
+            line.push_str(&format!("  {}", meta::human_size(size)));
+        }
+        line.push_str(&format!("  shown in {}", ms(took)));
+        // A frame decoded ahead of time cost nothing on arrival.
+        if let Some(made) = self.loader.stats(id).fitted {
+            let how = if made.how.is_empty() { String::new() } else { format!(", {}", made.how) };
+            line.push_str(&format!(" (read {}, fit {}{how})", ms(made.read), ms(made.fit)));
+        }
+        eprintln!("{line}");
     }
 
     /// The frame to draw from: the full-resolution one when it is loaded.
