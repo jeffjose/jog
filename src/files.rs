@@ -119,8 +119,16 @@ fn list_dir(dir: &Path, recursive: bool, files: &mut Vec<PathBuf>) {
     };
     let mut images = Vec::new();
     let mut subdirs = Vec::new();
-    for path in entries.flatten().map(|e| e.path()) {
-        if recursive && path.is_dir() {
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // The directory listing already says what each entry is, which
+        // saves asking the file system again for every file.
+        let is_dir = match entry.file_type() {
+            Ok(kind) if kind.is_symlink() => path.is_dir(),
+            Ok(kind) => kind.is_dir(),
+            Err(_) => path.is_dir(),
+        };
+        if recursive && is_dir {
             subdirs.push(path);
         } else if is_supported(&path) {
             images.push(path);

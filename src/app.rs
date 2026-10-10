@@ -68,6 +68,10 @@ pub enum Event {
     /// The same pair for the player that fetches seek-bar previews.
     Preview(Signal),
     PreviewPlayer(Result<Player, String>),
+    /// File details read on another thread, for the info and EXIF overlays.
+    Meta(usize, Meta),
+    /// The font, loaded on another thread while the first image decodes.
+    Font(Text),
 }
 
 /// A file operation that `u` can take back.
@@ -238,7 +242,14 @@ pub struct App {
     /// While set, the video's time and a larger progress bar are shown.
     time_until: Option<Instant>,
     meta: Option<(usize, Meta)>,
+    /// The file whose details were last asked for on another thread.
+    meta_asked: Option<usize>,
     text: Option<Text>,
+    /// What the player was last told about the view, so that it is only
+    /// told again when something changes.
+    video_view_sent: RefCell<Option<[String; 4]>>,
+    /// Scroll-wheel movement not yet turned into a step, in lines.
+    scrolled: f64,
 
     modifiers: ModifiersState,
     mouse: (f64, f64),
@@ -469,7 +480,10 @@ impl App {
             toast: None,
             time_until: None,
             meta: None,
+            meta_asked: None,
             text: None,
+            video_view_sent: RefCell::new(None),
+            scrolled: 0.0,
             modifiers: ModifiersState::empty(),
             mouse: (0.0, 0.0),
             drag: None,
@@ -802,16 +816,28 @@ impl App {
         }
     }
 
-    fn player_ready(&mut self, player: Result<Player, String>) {
+    fn player_ready(&mut self, player: Result<Player, String>, event_loop: &ActiveEventLoop) {
         match player {
             Ok(player) => {
                 self.player = Some(player);
+                *self.video_view_sent.borrow_mut() = None;
                 // A video may already be waiting for it.
                 self.sync_video();
             }
             Err(error) => {
-                eprintln!("jog: cannot play videos: {error}");
-                self.toast(format!("Cannot play videos: {error}"));
+                // Without a player, videos would only be entries that cannot
+                // be shown. Finding that out here, rather than before the
+                // window opens, keeps libmpv's loading time off the start.
+                let videos: Vec<(usize, usize)> = (self.list.iter().enumerate())
+                    .filter(|(_, id)| files::is_video(&self.files[**id]))
+                    .map(|(pos, id)| (*id, pos))
+                    .collect();
+                let count = videos.len();
+                eprintln!("jog: leaving out {count} videos; playing them needs libmpv (the libmpv1 or libmpv2 package): {error}");
+                self.toast(format!("Cannot play videos, leaving out {count}: {error}"));
+                if count > 0 {
+                    self.drop_from_list(&videos, event_loop);
+                }
             }
         }
     }
@@ -1048,10 +1074,6 @@ impl App {
             }
             _ => (0.0, (0.0, 0.0)),
         };
-        player.set("video-zoom", &zoom.to_string());
-        player.set("video-pan-x", &pan.0.to_string());
-        player.set("video-pan-y", &pan.1.to_string());
-
         let transform = self.transforms.get(&video.id).copied().unwrap_or_default();
         // Done with filters: mpv's own rotate option trips an assertion in
         // its software renderer. A transform mirrors first, then turns.
@@ -1064,7 +1086,17 @@ impl App {
         };
         let steps: Vec<&str> = mirror.into_iter().chain(turn).collect();
         let filter = if steps.is_empty() { String::new() } else { format!("lavfi=[{}]", steps.join(",")) };
-        player.set("vf", &filter);
+
+        // Each property set is a round trip to the player's core, and this
+        // runs on every pointer move of a pan, so only send what changed.
+        let values = [zoom.to_string(), pan.0.to_string(), pan.1.to_string(), filter];
+        let mut sent = self.video_view_sent.borrow_mut();
+        for (index, name) in ["video-zoom", "video-pan-x", "video-pan-y", "vf"].into_iter().enumerate() {
+            if sent.as_ref().is_none_or(|sent| sent[index] != values[index]) {
+                player.set(name, &values[index]);
+            }
+        }
+        *sent = Some(values);
     }
 
     fn set_zoom(&mut self, zoom: Zoom) {
@@ -1215,6 +1247,7 @@ impl App {
             Reload => {
                 self.loader.invalidate(self.id());
                 self.meta = None;
+                self.meta_asked = None;
                 self.request();
             }
             Remove => self.remove_current(event_loop),
@@ -2045,13 +2078,25 @@ impl App {
         if lines == 0.0 || self.menu.is_some() {
             return;
         }
-        if self.grid.is_some() {
-            let per_page = GridLayout::for_window(self.window_size()).per_page() as i64;
-            self.move_cursor(if lines < 0.0 { per_page } else { -per_page });
-        } else if self.modifiers.control_key() {
-            self.zoom_by(ZOOM_STEP.powf(lines), Some(self.mouse));
-        } else {
-            self.step(lines < 0.0);
+        if self.modifiers.control_key() && self.grid.is_none() {
+            self.scrolled = 0.0;
+            return self.zoom_by(ZOOM_STEP.powf(lines), Some(self.mouse));
+        }
+        // A touchpad reports many small movements per gesture; stepping on
+        // each would race through the list. Step once per whole line.
+        if (self.scrolled < 0.0) != (lines < 0.0) {
+            self.scrolled = 0.0;
+        }
+        self.scrolled += lines;
+        let steps = self.scrolled.trunc();
+        self.scrolled -= steps;
+        for _ in 0..steps.abs() as u32 {
+            if self.grid.is_some() {
+                let per_page = GridLayout::for_window(self.window_size()).per_page() as i64;
+                self.move_cursor(if steps < 0.0 { per_page } else { -per_page });
+            } else {
+                self.step(steps < 0.0);
+            }
         }
     }
 
@@ -2307,7 +2352,11 @@ impl App {
                 time.push(format!("{now} / {}", clock(length)));
             }
         }
-        let exif = if viewing && self.show_exif { self.current_meta().exif.clone() } else { Vec::new() };
+        let exif = if viewing && self.show_exif {
+            self.current_meta().map(|meta| meta.exif.clone()).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let footer: Vec<String> = self.grid_footer().into_iter().collect();
         let mut actions = Vec::new();
         if viewing && self.show_actions {
@@ -2445,7 +2494,7 @@ impl App {
 
     fn info_line(&mut self) -> String {
         let window = self.window_size();
-        let size = self.current_meta().size.map(meta::human_size);
+        let size = self.current_meta().and_then(|meta| meta.size).map(meta::human_size);
         let Some(native) = self.native() else { return size.unwrap_or_default() };
         let percent = self.view.scale(native, window) * 100.0;
         let mut line = format!("{} x {}   {percent:.0}%", native.0, native.1);
@@ -2455,12 +2504,20 @@ impl App {
         line
     }
 
-    fn current_meta(&mut self) -> &Meta {
+    /// Details of the current file, or `None` while they are being read.
+    /// Reading them means opening the file, which on a slow disk would
+    /// hold up drawing, so it happens on another thread.
+    fn current_meta(&mut self) -> Option<&Meta> {
         let id = self.id();
-        if self.meta.as_ref().is_none_or(|(meta_id, _)| *meta_id != id) {
-            self.meta = Some((id, meta::read(&self.files[id])));
+        if self.meta.as_ref().is_some_and(|(meta_id, _)| *meta_id == id) {
+            return self.meta.as_ref().map(|(_, meta)| meta);
         }
-        &self.meta.as_ref().expect("just set").1
+        if self.meta_asked != Some(id) {
+            self.meta_asked = Some(id);
+            let (path, proxy) = (self.files[id].clone(), self.proxy.clone());
+            std::thread::spawn(move || drop(proxy.send_event(Event::Meta(id, meta::read(&path)))));
+        }
+        None
     }
 
     fn draw_strip(&self, canvas: &mut Canvas, strip: Strip) {
@@ -2707,6 +2764,10 @@ impl ApplicationHandler<Event> for App {
         if self.files.iter().any(|file| files::is_video(file)) {
             self.warm_player();
         }
+        // Reading and parsing the font takes a noticeable moment; do it now
+        // rather than at the first key press that brings up some text.
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || drop(proxy.send_event(Event::Font(Text::load()))));
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
@@ -2726,10 +2787,21 @@ impl ApplicationHandler<Event> for App {
             Event::Loaded(_) => {}
             Event::Converted { created, failed, format } => self.converted(created, failed, format),
             Event::Video(signal) => self.video_signal(signal),
-            Event::Player(player) => self.player_ready(player),
+            Event::Player(player) => self.player_ready(player, event_loop),
             Event::Preview(signal) => self.preview_signal(signal),
             // Without it the seek bar still works, just without pictures.
             Event::PreviewPlayer(preview) => self.preview = preview.ok(),
+            Event::Meta(id, meta) => {
+                if self.meta_asked == Some(id) {
+                    self.meta = Some((id, meta));
+                    self.redraw();
+                }
+            }
+            Event::Font(text) => {
+                if self.text.is_none() {
+                    self.text = Some(text);
+                }
+            }
         }
     }
 

@@ -39,15 +39,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let mut playlist = files::collect(&options.paths, &options.listing);
-    // Without libmpv, videos would only be entries that cannot be shown.
-    let videos = playlist.files.iter().filter(|file| files::is_video(file)).count();
-    if videos > 0 && !mpv::available() {
-        let start = playlist.files.get(playlist.start).cloned();
-        playlist.files.retain(|file| !files::is_video(file));
-        playlist.start = start.and_then(|start| playlist.files.iter().position(|file| *file == start)).unwrap_or(0);
-        eprintln!("jog: leaving out {videos} videos; playing them needs libmpv (the libmpv1 or libmpv2 package)");
-    }
+    let playlist = files::collect(&options.paths, &options.listing);
     if playlist.files.is_empty() {
         eprintln!("jog: no images to show\nTry 'jog --help' for the options.");
         return ExitCode::FAILURE;

@@ -159,11 +159,6 @@ fn open_library() -> Option<Library> {
     names.filter_map(|name| unsafe { Library::new(name) }.ok()).next()
 }
 
-/// Whether videos can be played on this machine.
-pub fn available() -> bool {
-    open_library().is_some()
-}
-
 impl Player {
     /// Starts an idle player. `wake` is called from mpv's threads and must
     /// only pass the signal on.
