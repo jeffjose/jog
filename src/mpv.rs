@@ -254,9 +254,15 @@ impl Player {
         self.command_later(&[b"loadfile", path.as_os_str().as_bytes()]);
     }
 
-    /// Starts playing a file, replacing whatever was playing.
-    pub fn play(&self, path: &Path) {
-        self.command(&[b"loadfile", path.as_os_str().as_bytes()]);
+    /// Starts playing a file, replacing whatever was playing, from the
+    /// beginning or from a number of seconds in.
+    pub fn play(&self, path: &Path, from: Option<f64>) {
+        let start = from.map(|seconds| format!("start={seconds:.3}"));
+        let mut arguments: Vec<&[u8]> = vec![b"loadfile", path.as_os_str().as_bytes()];
+        if let Some(start) = &start {
+            arguments.extend([b"replace".as_slice(), start.as_bytes()]);
+        }
+        self.command(&arguments);
         self.set("pause", "no");
     }
 

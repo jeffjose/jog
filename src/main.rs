@@ -9,8 +9,10 @@ mod meta;
 mod mpv;
 mod ops;
 mod options;
+mod positions;
 mod render;
 mod rng;
+mod search;
 mod ui;
 mod view;
 
@@ -61,6 +63,7 @@ fn main() -> ExitCode {
 
     let mut app = App::new(options, files, playlist.start, loader, proxy);
     let result = event_loop.run_app(&mut app);
+    app.remember_position();
     app.print_marked();
     if let Err(error) = result {
         eprintln!("jog: {error}");

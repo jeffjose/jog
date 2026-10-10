@@ -45,6 +45,8 @@ Slideshow and actions:
   -o, --output-dir DIR       folder that v copies and m moves images into
       --print-marked         print the marked files on exit
       --debug                print decode and video start times (also JOG_DEBUG=1)
+      --no-resume            start videos from the beginning, and do not
+                             remember where they were left (--resume undoes it)
 
 Overlays:
   -d, --draw-info            show name, position, dimensions, zoom and size
@@ -66,7 +68,10 @@ Keys:
   > . n Right Space          next image          < , p Left Backspace  previous
   Home / End                 first / last        PgDn / PgUp   jump 5%
   z                          random image        { / }         previous / next directory
-  + Up / - Down              zoom in / out       * / !         100%, fit, fill
+  + Up / - Down              zoom in / out       * 0 !         100%, fit, fill
+  /                          search: type to narrow the list, then Enter to go to
+                             the match, Tab to keep only the matches, Esc to cancel
+                             (^foo starts with, !foo without; Esc later clears)
   Ctrl+arrows, Alt+arrows    scroll, by a page   Z  small images: fit screen / actual size
   [ / ]                      rotate              _ |           flip, mirror
   f fullscreen  t filmstrip  i info  e EXIF  a actions  o pointer
@@ -79,9 +84,10 @@ Keys:
   r F2                       rename              F5            reload
   s save copy  L save file list (marked ones if any)  w size window to image
   Delete                     remove from list    Ctrl+Delete   move to trash
-  Enter, 0-9                 run action          q Esc         quit
+  Enter, 1-9                 run action          q Esc         quit
 
-Videos (mp4, mkv, webm and so on; needs libmpv) play in place. While one is up:
+Videos (mp4, mkv, webm and so on; needs libmpv) play in place, picking up
+where they were left unless --no-resume is given. While one is up:
   Space                      play / pause        Left / Right  seek 5 seconds (faster held)
   PgUp / PgDn                seek 1 minute       pointer at the bottom: seek bar with previews
   Shift+Left / Shift+Right   step one frame      Up / Down     volume
@@ -119,6 +125,8 @@ pub struct Options {
     pub output_dir: Option<PathBuf>,
     pub print_marked: bool,
     pub debug: bool,
+    /// Whether videos pick up where they were left.
+    pub resume: bool,
 }
 
 pub enum Parsed {
@@ -169,7 +177,7 @@ fn is_switch(name: &str) -> bool {
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
         "cycle-once", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
-        "debug",
+        "debug", "resume", "no-resume",
     ];
     switches.contains(&name)
 }
@@ -206,6 +214,7 @@ fn parse_with(
         output_dir: None,
         print_marked: false,
         debug: std::env::var_os("JOG_DEBUG").is_some(),
+        resume: true,
     };
     let mut fullscreen = None;
     if let Some((path, text)) = config {
@@ -316,6 +325,8 @@ fn apply(
         "output-dir" => options.output_dir = Some(expand_home(&value()?)),
         "print-marked" => options.print_marked = true,
         "debug" => options.debug = true,
+        "resume" => options.resume = true,
+        "no-resume" => options.resume = false,
         "action" => options.actions[0] = Some(value()?),
         other => {
             let slot = other.strip_prefix("action").and_then(|n| n.parse::<usize>().ok());
@@ -363,6 +374,7 @@ fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>
             toml::Value::Boolean(false) => match key.as_str() {
                 "auto-zoom" => ("no-auto-zoom", None),
                 "fullscreen" => ("windowed", None),
+                "resume" => ("no-resume", None),
                 other if is_switch(other) => continue,
                 _ => (key.as_str(), None),
             },
@@ -494,6 +506,10 @@ mod tests {
         assert_eq!(options.output_dir, Some(PathBuf::from("/keep")));
         assert!(options.print_marked);
         assert!(parse_args(&["--debug"]).unwrap().debug);
+        assert!(parse_args(&[]).unwrap().resume);
+        assert!(!parse_args(&["--no-resume"]).unwrap().resume);
+        assert!(!parse_config("resume = false", &[]).unwrap().resume);
+        assert!(parse_config("resume = false", &["--resume"]).unwrap().resume);
     }
 
     #[test]
