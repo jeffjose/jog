@@ -71,7 +71,7 @@ Config file:
   -v, --version              show the version
 
 Keys:
-  > . n Right Space          next image          < , p Left Backspace  previous
+  > . n Right Space          next image          < , Left Backspace  previous
   Home / End                 first / last        PgDn / PgUp   jump 5%
   z                          random image        { / }         previous / next directory
   + Up / - Down              zoom in / out       * 0 !         100%, fit, fill
@@ -87,6 +87,7 @@ Keys:
   ( / )                      rotate              _ |           flip, mirror
   [ / ]                      slower / faster     \\             normal speed
   f fullscreen  t filmstrip  i info  e EXIF  a actions  o pointer
+  p                          file list down the side; click a name to go to it
   d                          delete (asks first; marked images, or the current one)
   g                          grid view           ?             list of shortcuts
   Tab or right click         menu                h             slideshow
@@ -105,7 +106,7 @@ where they were left unless --no-resume is given. While one is up:
   Space                      play / pause        Left / Right  seek 5 seconds (faster held)
   PgUp / PgDn                seek 1 minute       pointer at the bottom: seek bar with previews
   Shift+Left / Shift+Right   step one frame      Up / Down     volume
-  Ctrl+Left / Ctrl+Right, or , . < > n p         previous / next file
+  Ctrl+Left / Ctrl+Right, or , . < > n           previous / next file
 
 Mouse: drag to pan, middle-drag to zoom, wheel for next/previous,
 Ctrl+wheel to zoom, double click for fullscreen, bottom edge for the

@@ -346,6 +346,8 @@ pub struct App {
     sort: Option<Sort>,
     reversed: bool,
     shuffled: bool,
+    /// Whether the panel of file names is open.
+    show_list: bool,
     /// Set while the directories are watched; clearing it stops the thread
     /// that does the watching.
     watch: Option<Arc<AtomicBool>>,
@@ -629,6 +631,7 @@ impl App {
             sort: options.listing.sort.filter(|_| !options.listing.randomize),
             reversed: options.listing.reverse,
             shuffled: options.listing.randomize,
+            show_list: false,
             watch: None,
             sizes: HashMap::new(),
             positions: None,
@@ -1627,6 +1630,7 @@ impl App {
                 self.request();
             }
             ToggleWatch => self.set_watch(self.watch.is_none()),
+            ToggleList => self.show_list = !self.show_list,
             Remove => self.remove_current(event_loop),
             Trash => self.trash(event_loop),
             Save => {
@@ -1735,6 +1739,7 @@ impl App {
             ToggleInfo => self.show_info,
             ToggleDebug => self.show_debug,
             ToggleWatch => self.watch.is_some(),
+            ToggleList => self.show_list,
             SortBy(sort) => self.sort == Some(sort),
             ReverseOrder => self.reversed,
             ToggleVerbose => self.options.verbose,
@@ -2919,7 +2924,15 @@ impl App {
             (MouseButton::Left, true) => {
                 let (width, height) = self.window_size();
                 let strip = Strip::for_height(height);
-                if self.strip_visible() && y >= f64::from(strip.top) {
+                let panel = self.list_panel().filter(|panel| (x as i32) < panel.width && (y as i32) < panel.bottom);
+                if let Some(panel) = panel {
+                    // A click on a name goes to that file.
+                    let row = (y as i32 - panel.top).div_euclid(panel.row_height);
+                    if (0..panel.rows as i32).contains(&row) {
+                        let pos = panel.first + row as usize;
+                        self.go_to(pos, pos > self.pos);
+                    }
+                } else if self.strip_visible() && y >= f64::from(strip.top) {
                     let first_cell = f64::from(width as i32 / 2 - strip.cell_w / 2 - strip.pad / 2);
                     let offset = ((x - first_cell) / f64::from(strip.pitch())).floor() as i64;
                     let pos = self.pos as i64 + offset;
@@ -3328,14 +3341,20 @@ impl App {
 
         let blocks = [&top_left, &exif, &actions, &toast, &error, &footer, &time];
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty();
-        let boxes = self.menu.is_some() || self.prompt.is_some() || self.search.is_some() || self.confirm.is_some();
+        let panel = if viewing { self.list_panel() } else { None };
+        let boxes = self.menu.is_some() || self.prompt.is_some() || self.search.is_some() || self.confirm.is_some() || panel.is_some();
         if nothing_to_write && !boxes && !self.help {
             return;
         }
         let mut text = self.text.take().unwrap_or_else(Text::load);
         self.draw_grid_footer(canvas, &mut text, &footer, px);
-        text_block(canvas, &mut text, &top_left, px, |_, _| (margin, margin));
-        text_block(canvas, &mut text, &exif, px, |_, h| (margin, bottom - h));
+        // What sits on the left moves over to make room for the file list.
+        let left = margin + panel.as_ref().map_or(0, |panel| panel.width);
+        if let Some(panel) = &panel {
+            self.draw_list(canvas, &mut text, panel);
+        }
+        text_block(canvas, &mut text, &top_left, px, |_, _| (left, margin));
+        text_block(canvas, &mut text, &exif, px, |_, h| (left, bottom - h));
         text_block(canvas, &mut text, &actions, px, |w, h| (width - margin - w, bottom - h));
         text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w, margin));
         // Twice the usual size, centred just above the seek bar.
@@ -3615,6 +3634,49 @@ impl App {
         }
     }
 
+    /// Where the file list goes, when it is open: down the left side, above
+    /// the filmstrip, with the file on view kept in the middle.
+    fn list_panel(&self) -> Option<ListPanel> {
+        if !self.show_list || self.grid.is_some() {
+            return None;
+        }
+        let (width, height) = self.window_size();
+        let px = ui_px(height);
+        let bottom = if self.strip_visible() { Strip::for_height(height).top } else { height as i32 };
+        let row_height = Text::line_height(px) + px as i32 / 4;
+        // The first row's worth of space holds the heading.
+        let top = row_height + px as i32;
+        let rows = (((bottom - top) / row_height).max(1) as usize).min(self.list.len());
+        let first = self.pos.saturating_sub(rows / 2).min(self.list.len() - rows);
+        Some(ListPanel { width: (px as i32 * 24).min(width as i32 / 2), bottom, top, row_height, first, rows, px })
+    }
+
+    fn draw_list(&self, canvas: &mut Canvas, text: &mut Text, panel: &ListPanel) {
+        let px = panel.px;
+        let pad = px as i32 / 2;
+        canvas.shade(0, 0, panel.width, panel.bottom, 40);
+        let heading = match &self.filter {
+            Some((typed, all)) => format!("{} of {}: {typed}", self.list.len(), all.len()),
+            None => format!("{} files", self.list.len()),
+        };
+        let heading = clipped(text, &heading, panel.width - 3 * pad, px);
+        text.draw(canvas, pad * 2, pad, px, DIM_TEXT_COLOR, &heading);
+        for row in 0..panel.rows {
+            let pos = panel.first + row;
+            let id = self.list[pos];
+            let top = panel.top + row as i32 * panel.row_height;
+            if pos == self.pos {
+                canvas.fill(0, top, panel.width, panel.row_height, HIGHLIGHT_COLOR);
+            }
+            if self.marks.contains(&id) {
+                canvas.fill(pad / 2, top + panel.row_height / 4, pad / 2, panel.row_height / 2, MARK_COLOR);
+            }
+            let name = clipped(text, &self.name_of(id), panel.width - 3 * pad, px);
+            let line = top + (panel.row_height - Text::line_height(px)) / 2;
+            text.draw(canvas, pad * 2, line, px, TEXT_COLOR, &name);
+        }
+    }
+
     fn draw_menu(&self, canvas: &mut Canvas, text: &mut Text, menu: &Menu) {
         let px = menu.px;
         let pad = px as i32 / 2;
@@ -3644,6 +3706,33 @@ impl App {
         }
         if let Some(sub) = &menu.sub {
             self.draw_menu(canvas, text, sub);
+        }
+    }
+}
+
+/// The file list's place and what it shows: `rows` names from list
+/// position `first`, each `row_height` tall, starting `top` down.
+struct ListPanel {
+    width: i32,
+    bottom: i32,
+    top: i32,
+    row_height: i32,
+    first: usize,
+    rows: usize,
+    px: u32,
+}
+
+/// `line`, cut short with an ellipsis if it is wider than `width`.
+fn clipped(text: &mut Text, line: &str, width: i32, px: u32) -> String {
+    if text.width(line, px) <= width {
+        return line.to_string();
+    }
+    let mut kept: Vec<char> = line.chars().collect();
+    loop {
+        kept.pop();
+        let shorter: String = kept.iter().chain(&['\u{2026}']).collect();
+        if kept.is_empty() || text.width(&shorter, px) <= width {
+            return shorter;
         }
     }
 }

@@ -36,6 +36,8 @@ pub enum Command {
     Render,
     ToggleFullscreen,
     ToggleFilmstrip,
+    /// The panel of file names down the left side.
+    ToggleList,
     ToggleInfo,
     ToggleDebug,
     /// What `--verbose` and `--debug` print on the terminal.
@@ -134,7 +136,8 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
         },
         Key::Character(text) => match text {
             ">" | "." | "n" => Next,
-            "<" | "," | "p" => Previous,
+            "<" | "," => Previous,
+            "p" => ToggleList,
             "z" => Random,
             "}" => NextDir,
             "{" => PreviousDir,
@@ -281,6 +284,7 @@ const VIEW: &[Option<MenuItem>] = &[
     item("Fullscreen", "f", Command::ToggleFullscreen),
     item("Grid view", "g", Command::ToggleGrid),
     item("Filmstrip", "t", Command::ToggleFilmstrip),
+    item("File list", "p", Command::ToggleList),
     item("Slideshow", "h", Command::ToggleSlideshow),
     item("Watch for new files", "W", Command::ToggleWatch),
     None,
@@ -367,7 +371,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             "Navigation",
             &[
                 (">  .  n  Right  Space", "Next image"),
-                ("<  ,  p  Left  Backspace", "Previous image"),
+                ("<  ,  Left  Backspace", "Previous image"),
                 ("Home  End", "First / last image"),
                 ("PgDn  PgUp", "Jump 5% forward / back"),
                 ("z", "Random image (in the grid: shuffle)"),
@@ -411,6 +415,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             &[
                 ("g", "Grid view (arrows move, Enter opens)"),
                 ("t", "Filmstrip (or pointer at bottom edge)"),
+                ("p", "File list down the side (click to go)"),
                 ("f  Double click", "Fullscreen"),
                 ("Tab  Right click", "Menu"),
                 ("?", "This list"),
@@ -453,7 +458,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Up  Down", "Volume"),
                 ("]  [  \\", "Faster / slower / normal speed"),
                 ("Ctrl+Left  Ctrl+Right", "Previous / next file"),
-                (",  .  <  >  n  p", "Previous / next file"),
+                (",  .  <  >  n", "Previous / next file"),
                 ("At the end", "The next file plays"),
             ],
         ),

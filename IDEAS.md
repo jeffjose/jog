@@ -8,6 +8,9 @@ here exists in the code.
 - Match folder names too when listing with `-r`
 - Highlight the matched letters in the grid footer
 - Paste into the search and rename boxes
+- Search by dimensions (`w>3000`) and `is:animated` for animated WebP and
+  PNG; both need each file's header read
+- Go to a position by number; jump back to where a search or jump began
 
 ## Follow-ups to remembering video positions
 
@@ -20,7 +23,7 @@ here exists in the code.
 - Save or copy the current frame, named with its timestamp
 - In / out points, lossless clip export, loop between them
 - Technical details panel on `e`: codec, frame rate, live bitrate
-- Mute, playback speed, loop, audio and subtitle track switching
+- Mute, loop, audio and subtitle track switching
 - Chapter marks and bookmarks on the seek bar; scene-change ticks
 - Storyboard view: a grid of frames across one video
 - Brightness, contrast, saturation; deinterlace; crop
@@ -28,7 +31,7 @@ here exists in the code.
 
 ## Reviewing
 
-- Show only marked; jump to next / previous marked
+- Jump to next / previous marked
 - Star ratings or colour labels, with filtering
 - Remember marks per directory between runs
 - Name clashes in the output folder: skip identical files, number
