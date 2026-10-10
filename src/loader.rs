@@ -3,16 +3,22 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
-use crate::decode::{self, Spec};
+use crate::decode::{self, Source, Spec};
+use crate::files;
 use crate::frame::{Frame, Transform};
 
-const MAX_WORKERS: usize = 8;
+const MAX_WORKERS: usize = 16;
 /// Workers that never take thumbnail jobs, so a burst of thumbnails cannot
 /// delay the image the user is waiting for.
 const RESERVED_WORKERS: usize = 2;
+/// Memory for fitted frames beyond the ones on and around the screen, so
+/// that going back to an image rarely decodes it again.
+const FITTED_BUDGET: usize = 512 << 20;
+/// Memory for thumbnails. They are small, so this holds many hundreds.
+const THUMB_BUDGET: usize = 256 << 20;
 
 /// What the viewer currently needs decoded. File ids index the file list.
-#[derive(Default)]
+#[derive(Default, Clone, PartialEq, Eq)]
 pub struct Request {
     /// Images to fit to `target`, most urgent first. The first is on screen.
     pub wanted: Vec<usize>,
@@ -31,12 +37,37 @@ pub enum Job {
     Thumb(usize),
 }
 
+impl Job {
+    fn id(self) -> usize {
+        match self {
+            Job::Fitted(id) | Job::Full(id) | Job::Thumb(id) => id,
+        }
+    }
+}
+
 /// A decode result and the size and transform it was made for. Failures are
 /// kept too, so a broken file is not retried on every request.
 struct Slot {
     frame: Result<Arc<Frame>, String>,
     size: (u32, u32),
     transform: Transform,
+    /// When it was last asked for. The lowest goes first when room is needed.
+    used: u64,
+}
+
+impl Slot {
+    fn bytes(&self) -> usize {
+        self.frame.as_ref().map_or(0, |frame| frame.pixels.len() * 4)
+    }
+}
+
+/// How a job gets done: from the file, or from something already decoded.
+enum Work {
+    Decode(PathBuf),
+    /// Fit and turn an image that is decoded at full resolution.
+    FromSource(Arc<Source>),
+    /// Shrink a frame that is already fitted and turned.
+    FromFrame(Arc<Frame>),
 }
 
 #[derive(Default)]
@@ -48,7 +79,12 @@ struct State {
     fitted: HashMap<usize, Slot>,
     thumbs: HashMap<usize, Slot>,
     full: Option<(usize, Slot)>,
+    /// The decoded file behind the image on view, kept so that zooming in
+    /// or turning it needs no second decode.
+    source: Option<(usize, Arc<Source>)>,
     busy: HashSet<Job>,
+    /// Counts requests, to tell which slots were asked for most recently.
+    clock: u64,
 }
 
 impl State {
@@ -56,8 +92,11 @@ impl State {
         self.transforms.get(&id).copied().unwrap_or_default()
     }
 
-    fn is_current(&self, slot: Option<&Slot>, id: usize, size: (u32, u32)) -> bool {
-        slot.is_some_and(|s| s.frame.is_err() || (s.size == size && s.transform == self.transform(id)))
+    /// Whether a slot serves `id` at `size`. A thumbnail at least as large
+    /// as wanted will do: it is drawn shrunk to its cell anyway.
+    fn is_current(&self, slot: Option<&Slot>, id: usize, size: (u32, u32), at_least: bool) -> bool {
+        let fits = |s: &Slot| if at_least { s.size.0 >= size.0 && s.size.1 >= size.1 } else { s.size == size };
+        slot.is_some_and(|s| s.frame.is_err() || (fits(s) && s.transform == self.transform(id)))
     }
 
     fn needs(&self, job: Job) -> bool {
@@ -65,12 +104,18 @@ impl State {
             return false;
         }
         match job {
-            Job::Fitted(id) => !self.is_current(self.fitted.get(&id), id, self.request.target),
-            Job::Thumb(id) => !self.is_current(self.thumbs.get(&id), id, self.request.thumb_size),
+            Job::Fitted(id) => !self.is_current(self.fitted.get(&id), id, self.request.target, false),
+            Job::Thumb(id) => {
+                // A thumbnail of an image whose fitted frame is on its way
+                // waits for that frame, to be shrunk from it in no time.
+                let fitted_coming = self.request.wanted.contains(&id)
+                    && !self.is_current(self.fitted.get(&id), id, self.request.target, false);
+                !fitted_coming && !self.is_current(self.thumbs.get(&id), id, self.request.thumb_size, true)
+            }
             Job::Full(id) => {
                 let slot = self.full.as_ref().filter(|(full_id, _)| *full_id == id).map(|(_, s)| s);
                 let failed = self.fitted.get(&id).is_some_and(|s| s.frame.is_err());
-                !failed && !self.is_current(slot, id, (0, 0))
+                !failed && !self.is_current(slot, id, (0, 0), false)
             }
         }
     }
@@ -86,35 +131,75 @@ impl State {
         jobs.find(|&job| self.needs(job))
     }
 
-    fn spec(&self, job: Job, background: u32) -> (usize, Spec) {
-        let (id, target) = match job {
-            Job::Fitted(id) => (id, Some(self.request.target)),
-            Job::Thumb(id) => (id, Some(self.request.thumb_size)),
-            Job::Full(id) => (id, None),
-        };
-        let thumbnail = matches!(job, Job::Thumb(_));
-        (id, Spec { target, transform: self.transform(id), background, thumbnail })
+    fn source_for(&self, id: usize) -> Option<Arc<Source>> {
+        self.source.as_ref().filter(|(source_id, _)| *source_id == id).map(|(_, source)| source.clone())
     }
 
-    /// Stores a finished decode unless the user has moved on from it.
-    fn store(&mut self, job: Job, slot: Slot) -> bool {
-        let id = match job {
-            Job::Fitted(id) | Job::Full(id) | Job::Thumb(id) => id,
+    /// Decides what a job is for and the cheapest way to do it. The last
+    /// value says whether to keep the decoded file for later jobs on it.
+    fn plan(&self, job: Job, background: u32) -> (Spec, Work, bool) {
+        let id = job.id();
+        let target = match job {
+            Job::Fitted(_) => Some(self.request.target),
+            Job::Thumb(_) => Some(self.request.thumb_size),
+            Job::Full(_) => None,
         };
+        let transform = self.transform(id);
+        let spec = Spec { target, transform, background, thumbnail: matches!(job, Job::Thumb(_)) };
+
+        let fitted = self.fitted.get(&id).filter(|slot| slot.transform == transform);
+        let fitted = fitted.and_then(|slot| slot.frame.as_ref().ok()).cloned();
+        let work = match (job, fitted, self.source_for(id)) {
+            (Job::Thumb(_), Some(frame), _) => Work::FromFrame(frame),
+            (_, _, Some(source)) => Work::FromSource(source),
+            _ => Work::Decode(self.files[id].clone()),
+        };
+        // Keep the file behind the image on view, unless it is a video,
+        // whose still is all the frame there is, or a RAW file, whose
+        // preview is chosen for the size wanted.
+        let path = &self.files[id];
+        let on_view = self.request.wanted.first() == Some(&id) && !matches!(job, Job::Thumb(_));
+        let keep = on_view && !files::is_video(path) && !files::is_raw(path);
+        (spec, work, keep)
+    }
+
+    /// Stores a finished decode unless the user has turned the image since.
+    fn store(&mut self, job: Job, mut slot: Slot) -> bool {
+        let id = job.id();
         if slot.transform != self.transform(id) {
             return false;
         }
+        slot.used = self.clock;
         match job {
-            Job::Fitted(_) if self.request.wanted.contains(&id) => {
+            Job::Fitted(_) => {
                 self.fitted.insert(id, slot);
+                let protected = self.request.wanted.clone();
+                trim(&mut self.fitted, FITTED_BUDGET, &protected);
             }
-            Job::Thumb(_) if self.request.thumbs.contains(&id) => {
+            Job::Thumb(_) => {
                 self.thumbs.insert(id, slot);
+                let protected = self.request.thumbs.clone();
+                trim(&mut self.thumbs, THUMB_BUDGET, &protected);
             }
             Job::Full(_) if self.request.full == Some(id) => self.full = Some((id, slot)),
-            _ => return false,
+            Job::Full(_) => return false,
         }
         true
+    }
+}
+
+/// Drops the least recently wanted slots until the cache fits its budget.
+/// Slots for `protected` ids stay whatever the budget says.
+fn trim(cache: &mut HashMap<usize, Slot>, budget: usize, protected: &[usize]) {
+    let mut total: usize = cache.values().map(Slot::bytes).sum();
+    while total > budget {
+        let oldest = cache
+            .iter()
+            .filter(|(id, _)| !protected.contains(id))
+            .min_by_key(|(_, slot)| slot.used)
+            .map(|(id, _)| *id);
+        let Some(id) = oldest else { return };
+        total -= cache.remove(&id).map_or(0, |slot| slot.bytes());
     }
 }
 
@@ -156,13 +241,25 @@ impl Loader {
         Self { shared }
     }
 
-    /// Replaces what is wanted. Anything no longer wanted is evicted.
+    /// Replaces what is wanted. What was decoded stays cached, within a
+    /// memory budget, so coming back to an image is instant.
     pub fn request(&self, request: Request) {
         let mut state = self.shared.state.lock().unwrap();
-        state.fitted.retain(|id, _| request.wanted.contains(id));
-        state.thumbs.retain(|id, _| request.thumbs.contains(id));
+        state.clock += 1;
+        let clock = state.clock;
+        for id in request.wanted.iter().chain(&request.thumbs) {
+            if let Some(slot) = state.fitted.get_mut(id) {
+                slot.used = clock;
+            }
+            if let Some(slot) = state.thumbs.get_mut(id) {
+                slot.used = clock;
+            }
+        }
         if state.full.as_ref().is_some_and(|(id, _)| Some(*id) != request.full) {
             state.full = None;
+        }
+        if state.source.as_ref().is_some_and(|(id, _)| !request.wanted.contains(id)) {
+            state.source = None;
         }
         state.request = request;
         drop(state);
@@ -187,6 +284,9 @@ impl Loader {
         state.thumbs.remove(&id);
         if state.full.as_ref().is_some_and(|(full_id, _)| *full_id == id) {
             state.full = None;
+        }
+        if state.source.as_ref().is_some_and(|(source_id, _)| *source_id == id) {
+            state.source = None;
         }
         drop(state);
         self.shared.wake.notify_all();
@@ -221,20 +321,25 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
             state = shared.wake.wait(state).unwrap();
             continue;
         };
-        let (id, spec) = state.spec(job, shared.background);
+        let (spec, work, keep) = state.plan(job, shared.background);
         state.busy.insert(job);
-        let path = state.files[id].clone();
+        let path = state.files[job.id()].clone();
         drop(state);
 
         let started = Instant::now();
-        let result = decode::load(&path, spec);
+        let how = match &work {
+            Work::Decode(_) => "",
+            Work::FromSource(_) => " (from decoded)",
+            Work::FromFrame(_) => " (from frame)",
+        };
+        let (result, source) = perform(work, spec, keep);
         if debug {
             let kind = match job {
                 Job::Fitted(_) => "fit",
                 Job::Full(_) => "full",
                 Job::Thumb(_) => "thumb",
             };
-            eprintln!("jog: {:>7.1?} {kind:<5} {}", started.elapsed(), path.display());
+            eprintln!("jog: {:>7.1?} {kind:<5} {}{how}", started.elapsed(), path.display());
         }
         let frame = result.map(Arc::new).map_err(|error| {
             if matches!(job, Job::Fitted(_)) {
@@ -242,12 +347,37 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
             }
             error.to_string()
         });
-        let slot = Slot { frame, size: spec.target.unwrap_or_default(), transform: spec.transform };
+        let slot = Slot { frame, size: spec.target.unwrap_or_default(), transform: spec.transform, used: 0 };
 
         state = shared.state.lock().unwrap();
         state.busy.remove(&job);
+        if let Some(source) = source {
+            state.source = Some((job.id(), source));
+        }
         if state.store(job, slot) {
             on_loaded(job);
         }
+        // Thumbnails may have been waiting for this frame.
+        if matches!(job, Job::Fitted(_)) {
+            shared.wake.notify_all();
+        }
+    }
+}
+
+/// Does a job. Returns the frame and, when asked to keep it and it is
+/// larger than the frame wanted, the decoded file.
+fn perform(work: Work, spec: Spec, keep: bool) -> (decode::Result<Frame>, Option<Arc<Source>>) {
+    match work {
+        Work::Decode(path) => {
+            let source = match decode::read(&path, spec) {
+                Ok(source) => source,
+                Err(error) => return (Err(error), None),
+            };
+            let frame = decode::finish(&source, spec);
+            let larger = spec.target.is_none_or(|(w, h)| source.width() > w || source.height() > h);
+            (frame, (keep && larger).then(|| Arc::new(source)))
+        }
+        Work::FromSource(source) => (decode::finish(&source, spec), None),
+        Work::FromFrame(frame) => (decode::shrink(&frame, spec.target.unwrap_or_default()), None),
     }
 }

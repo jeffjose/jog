@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
@@ -181,6 +182,8 @@ pub struct App {
     pos: usize,
     forward: bool,
     loader: Loader,
+    /// What the loader was last told, so that it is only told of changes.
+    last_request: RefCell<Option<Request>>,
     transforms: HashMap<usize, Transform>,
     /// Size images are fitted to. Using the monitor rather than the window
     /// means resizing or leaving fullscreen never needs a fresh decode.
@@ -429,6 +432,7 @@ impl App {
             pos: start,
             forward: true,
             loader,
+            last_request: RefCell::new(None),
             transforms: HashMap::new(),
             monitor: (0, 0),
             shown: None,
@@ -559,9 +563,10 @@ impl App {
             }
         }
         // Thumbnails are sized for the monitor, like frames, so they survive
-        // window resizes.
+        // window resizes; and for the grid's cells, the larger of the two
+        // uses, so that the filmstrip and the grid share them.
         let mut thumbs = Vec::new();
-        let thumb_size;
+        let thumb_size = GridLayout::for_window(self.monitor).thumb_size();
         if let Some(grid) = &self.grid {
             // The page on show, then the pages either side of it.
             let per_page = GridLayout::for_window(self.window_size()).per_page() as i64;
@@ -570,27 +575,29 @@ impl App {
                 let positions = (page * per_page).max(0)..((page + 1) * per_page).min(len);
                 thumbs.extend(positions.map(|at| self.list[at as usize]));
             }
-            thumb_size = GridLayout::for_window(self.monitor).thumb_size();
-        } else {
-            if self.strip_used {
-                for distance in 0..=THUMB_RADIUS {
-                    for at in [pos + distance, pos - distance] {
-                        if (0..len).contains(&at) && !thumbs.contains(&self.list[at as usize]) {
-                            thumbs.push(self.list[at as usize]);
-                        }
+        } else if self.strip_used {
+            for distance in 0..=THUMB_RADIUS {
+                for at in [pos + distance, pos - distance] {
+                    if (0..len).contains(&at) && !thumbs.contains(&self.list[at as usize]) {
+                        thumbs.push(self.list[at as usize]);
                     }
                 }
             }
-            let strip = Strip::for_height(self.monitor.1);
-            thumb_size = (strip.cell_w as u32, strip.cell_h as u32);
         }
-        self.loader.request(Request {
+        let request = Request {
             wanted,
             target: self.monitor,
             full: self.needs_full().then(|| self.id()),
             thumbs,
             thumb_size,
-        });
+        };
+        // Panning and zooming call this on every pointer move; most of the
+        // time nothing has changed and the loader need not be woken.
+        if self.last_request.borrow().as_ref() == Some(&request) {
+            return;
+        }
+        self.loader.request(request.clone());
+        *self.last_request.borrow_mut() = Some(request);
     }
 
     /// Whether the view shows more detail than the fitted frame holds.

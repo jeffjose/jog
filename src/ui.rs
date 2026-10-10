@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 
+use fast_image_resize as fir;
+
 use crate::frame::Frame;
 
 /// Drawing primitives over a window buffer. Everything is clipped.
@@ -82,22 +84,37 @@ impl<'a> Canvas<'a> {
         self.fill(x + w - thickness, y, thickness, h, color);
     }
 
-    /// Draws `frame` scaled (crudely) to exactly fill a rectangle.
+    /// Draws `frame` scaled to exactly fill a rectangle: filtered when it
+    /// is shrunk, which thumbnails usually are, and by repeating pixels
+    /// when it is enlarged.
     pub fn image(&mut self, frame: &Frame, x: i32, y: i32, w: i32, h: i32) {
         if w <= 0 || h <= 0 {
             return;
         }
-        let (fw, fh) = (frame.width as i64, frame.height as i64);
+        let shrunk;
+        let (source, sw): (&[u32], usize) = match shrink(frame, w as u32, h as u32) {
+            Some(pixels) => {
+                shrunk = pixels;
+                (&shrunk, w as usize)
+            }
+            None => (&frame.pixels, frame.width as usize),
+        };
+        let sh = source.len() / sw.max(1);
+        let columns: Vec<usize> = (0..w).map(|dx| (i64::from(dx) * sw as i64 / i64::from(w)) as usize).collect();
+        let (x0, x1) = (x.max(0), (x + w).min(self.width));
+        if x0 >= x1 {
+            return;
+        }
         for dy in 0..h {
-            let (py, sy) = (y + dy, i64::from(dy) * fh / i64::from(h));
+            let py = y + dy;
             if py < 0 || py >= self.height {
                 continue;
             }
-            for dx in 0..w {
-                let (px, sx) = (x + dx, i64::from(dx) * fw / i64::from(w));
-                if px >= 0 && px < self.width {
-                    self.pixels[(py * self.width + px) as usize] = frame.pixels[(sy * fw + sx) as usize];
-                }
+            let sy = (i64::from(dy) * sh as i64 / i64::from(h)) as usize;
+            let row = &source[sy * sw..(sy + 1) * sw];
+            let out = &mut self.pixels[(py * self.width + x0) as usize..(py * self.width + x1) as usize];
+            for (pixel, &column) in out.iter_mut().zip(&columns[(x0 - x) as usize..]) {
+                *pixel = row[column];
             }
         }
     }
@@ -109,6 +126,23 @@ impl<'a> Canvas<'a> {
             *pixel = mix(*pixel, color, amount);
         }
     }
+}
+
+/// A filtered copy of `frame` at `w` x `h`, or `None` when it would not be
+/// smaller, or the resizer refuses the sizes.
+fn shrink(frame: &Frame, w: u32, h: u32) -> Option<Vec<u32>> {
+    if w >= frame.width && h >= frame.height {
+        return None;
+    }
+    let source = fir::images::ImageRef::new(frame.width, frame.height, bytemuck::cast_slice(&frame.pixels), fir::PixelType::U8x4).ok()?;
+    let mut pixels = vec![0u32; w as usize * h as usize];
+    let mut target = fir::images::Image::from_slice_u8(w, h, bytemuck::cast_slice_mut(&mut pixels), fir::PixelType::U8x4).ok()?;
+    let options = fir::ResizeOptions::new()
+        .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom))
+        // The fourth byte is padding, not alpha.
+        .use_alpha(false);
+    fir::Resizer::new().resize(&source, &mut target, &options).ok()?;
+    Some(pixels)
 }
 
 /// Blends `amount`/256 of `b` into `a`, two channels at a time.

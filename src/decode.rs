@@ -27,18 +27,50 @@ pub struct Spec {
     pub thumbnail: bool,
 }
 
-pub fn load(path: &Path, spec: Spec) -> Result<Frame> {
-    if files::is_video(path) {
-        let (image, orientation) = decode(&video_still(path, spec.thumbnail)?)?;
-        return finish(image, orientation, spec);
+/// A decoded file at full resolution, flattened to RGB but not yet turned
+/// the right way up. Frames of any size and rotation are made from it.
+pub struct Source {
+    pub image: RgbImage,
+    /// How the file says the pixels should be turned to be upright.
+    pub orientation: Transform,
+}
+
+impl Source {
+    pub fn width(&self) -> u32 {
+        self.image.width()
     }
-    let bytes = std::fs::read(path)?;
-    let (image, orientation) = if files::is_raw(path) {
-        decode_raw_preview(&bytes, spec.target)?
+
+    pub fn height(&self) -> u32 {
+        self.image.height()
+    }
+}
+
+/// Decodes a file. `spec` says what the result is for, which picks the
+/// still of a video and the preview of a RAW file.
+pub fn read(path: &Path, spec: Spec) -> Result<Source> {
+    let (image, orientation) = if files::is_video(path) {
+        decode(&video_still(path, spec.thumbnail)?)?
     } else {
-        decode(&bytes)?
+        let bytes = std::fs::read(path)?;
+        if files::is_raw(path) { decode_raw_preview(&bytes, spec.target)? } else { decode(&bytes)? }
     };
-    finish(image, orientation, spec)
+    Ok(Source { image: flatten(image, spec.background), orientation: transform_for(orientation) })
+}
+
+/// The transform that turns pixels stored with an EXIF orientation upright.
+fn transform_for(orientation: Orientation) -> Transform {
+    use Orientation::*;
+    match orientation {
+        NoTransforms => Transform::default(),
+        Rotate90 => Transform::CW,
+        Rotate180 => Transform::CW.then(Transform::CW),
+        Rotate270 => Transform::CCW,
+        FlipHorizontal => Transform::MIRROR,
+        FlipVertical => Transform::FLIP,
+        // A mirror after a turn is the opposite turn after a mirror.
+        Rotate90FlipH => Transform::MIRROR.then(Transform::CCW),
+        Rotate270FlipH => Transform::MIRROR.then(Transform::CW),
+    }
 }
 
 /// A still from a video, as an encoded image. A thumbnail is taken one
@@ -168,37 +200,53 @@ fn tiff_orientation(bytes: &[u8]) -> Option<Orientation> {
     None
 }
 
-fn finish(image: DynamicImage, orientation: Orientation, spec: Spec) -> Result<Frame> {
-    use Orientation::*;
-    let exif_swaps = matches!(orientation, Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH);
-
-    let (w, h) = (image.width(), image.height());
+/// Makes the frame `spec` asks for from a decoded file: shrunk to fit the
+/// target, then turned upright and the way the user wants it.
+pub fn finish(source: &Source, spec: Spec) -> Result<Frame> {
+    let (w, h) = source.image.dimensions();
+    let transform = source.orientation.then(spec.transform);
     let size = match spec.target {
         Some(target) => {
-            // Rotating is cheapest after shrinking, so scale into the pre-rotation box.
-            let swaps = exif_swaps ^ spec.transform.swaps_axes();
-            let bounds = if swaps { (target.1, target.0) } else { target };
+            // Turning is cheapest after shrinking, so scale into the pre-rotation box.
+            let bounds = if transform.swaps_axes() { (target.1, target.0) } else { target };
             fit_size((w, h), bounds, false)
         }
         None => (w, h),
     };
-
-    let mut rgb = flatten(image, spec.background);
-    if size != (w, h) {
-        rgb = resize(&rgb, size)?;
-    }
-    let mut oriented = DynamicImage::ImageRgb8(rgb);
-    oriented.apply_orientation(orientation);
-    let rgb = oriented.into_rgb8();
-
+    let resized;
+    let rgb = if size == (w, h) {
+        &source.image
+    } else {
+        resized = resize(&source.image, size)?;
+        &resized
+    };
     let pixels = rgb
         .as_raw()
         .chunks_exact(3)
         .map(|p| u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2]))
         .collect();
-    let native = if exif_swaps { (h, w) } else { (w, h) };
-    let frame = Frame { width: rgb.width(), height: rgb.height(), native, pixels };
-    Ok(if spec.transform.is_identity() { frame } else { frame.transformed(spec.transform) })
+    let frame = Frame { width: rgb.width(), height: rgb.height(), native: (w, h), pixels };
+    Ok(if transform.is_identity() { frame } else { frame.transformed(transform) })
+}
+
+/// A smaller copy of a frame fitting `bounds`, for a thumbnail made from a
+/// frame that is already decoded.
+pub fn shrink(frame: &Frame, bounds: (u32, u32)) -> Result<Frame> {
+    let (width, height) = fit_size((frame.width, frame.height), bounds, false);
+    if (width, height) == (frame.width, frame.height) {
+        return Ok(Frame { width, height, native: frame.native, pixels: frame.pixels.clone() });
+    }
+    let source =
+        fir::images::ImageRef::new(frame.width, frame.height, bytemuck::cast_slice(&frame.pixels), fir::PixelType::U8x4)?;
+    let mut pixels = vec![0u32; width as usize * height as usize];
+    let mut target =
+        fir::images::Image::from_slice_u8(width, height, bytemuck::cast_slice_mut(&mut pixels), fir::PixelType::U8x4)?;
+    let options = fir::ResizeOptions::new()
+        .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Lanczos3))
+        // The fourth byte is padding, not alpha.
+        .use_alpha(false);
+    fir::Resizer::new().resize(&source, &mut target, &options)?;
+    Ok(Frame { width, height, native: frame.native, pixels })
 }
 
 /// One RGBA pixel composited over an opaque colour.
@@ -280,7 +328,7 @@ mod tests {
         let raw = fake_raw(&[jpeg(400, 200)]);
         let (image, orientation) = decode_raw_preview(&raw, None).unwrap();
         assert_eq!(orientation, Orientation::Rotate90);
-        let frame = finish(image, orientation, spec(Some((100, 100)))).unwrap();
+        let frame = finish(&source(image, orientation, 0), spec(Some((100, 100)))).unwrap();
         assert_eq!((frame.width, frame.height, frame.native), (50, 100, (200, 400)));
 
         let at = |x: usize, y: usize| rgb(frame.pixels[y * 50 + x]);
@@ -304,7 +352,7 @@ mod tests {
     fn user_transform_is_applied_after_fitting() {
         let image = decode(&jpeg(400, 200)).unwrap().0;
         let spec = Spec { transform: Transform::CW, ..spec(Some((100, 100))) };
-        let frame = finish(image, Orientation::NoTransforms, spec).unwrap();
+        let frame = finish(&source(image, Orientation::NoTransforms, 0), spec).unwrap();
         assert_eq!((frame.width, frame.height, frame.native), (50, 100, (200, 400)));
     }
 
@@ -324,7 +372,33 @@ mod tests {
     #[test]
     fn transparency_is_composited_over_background() {
         let image = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 255, 255, 0])));
-        let frame = finish(image, Orientation::NoTransforms, Spec { background: 0x123456, ..spec(None) }).unwrap();
+        let frame = finish(&source(image, Orientation::NoTransforms, 0x123456), spec(None)).unwrap();
         assert!(frame.pixels.iter().all(|&p| p == 0x123456));
+    }
+
+    #[test]
+    fn exif_orientations_match_the_image_crate() {
+        // 3 x 2, every pixel different, so any wrong turn or mirror shows.
+        let image = RgbImage::from_fn(3, 2, |x, y| Rgb([x as u8, y as u8, 7]));
+        for exif in 1..=8 {
+            let orientation = Orientation::from_exif(exif).unwrap();
+            let mut expected = DynamicImage::ImageRgb8(image.clone());
+            expected.apply_orientation(orientation);
+            let expected: Vec<u32> = expected.into_rgb8().pixels().map(|p| u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2])).collect();
+            let got = finish(&source(DynamicImage::ImageRgb8(image.clone()), orientation, 0), spec(None)).unwrap();
+            assert_eq!(got.pixels, expected, "orientation {exif}");
+        }
+    }
+
+    #[test]
+    fn shrinking_a_frame_keeps_its_native_size() {
+        let frame = Frame { width: 400, height: 200, native: (4000, 2000), pixels: vec![0x808080; 80_000] };
+        let small = shrink(&frame, (100, 100)).unwrap();
+        assert_eq!((small.width, small.height, small.native), (100, 50, (4000, 2000)));
+        assert!(small.pixels.iter().all(|&p| p == 0x808080));
+    }
+
+    fn source(image: DynamicImage, orientation: Orientation, background: u32) -> Source {
+        Source { image: flatten(image, background), orientation: transform_for(orientation) }
     }
 }
