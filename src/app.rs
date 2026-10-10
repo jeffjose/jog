@@ -29,6 +29,7 @@ use crate::positions::Positions;
 use crate::render;
 use crate::rng::Rng;
 use crate::search::{Facts, Query};
+use crate::story::{self, Found, Stories};
 use crate::ui::{Canvas, Text};
 use crate::view::{Layout, View, Zoom};
 
@@ -55,6 +56,10 @@ const RESUME_MARGIN: f64 = 10.0;
 const PREVIEW_TIMEOUT: Duration = Duration::from_millis(400);
 /// How soon a second click must follow the first to make a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// How long each frame stays up when the grid runs through a video.
+const STORY_STEP: Duration = Duration::from_millis(500);
+/// How many videos' frames are kept at once.
+const STORIES_KEPT: usize = 8;
 /// How often the directories are listed again while watching.
 const WATCH_EVERY: Duration = Duration::from_secs(1);
 /// The playback speeds that `[` and `]` step through.
@@ -93,6 +98,8 @@ pub enum Event {
     Listed(Vec<PathBuf>),
     /// How long a video is, in seconds, for the file list.
     Duration(usize, Option<f64>),
+    /// A frame from along a video, or word about fetching them.
+    Story(Found),
 }
 
 /// A file operation that `u` can take back.
@@ -313,6 +320,8 @@ struct PaletteLayout {
     first: usize,
     rows: usize,
     px: u32,
+    /// Size of each of the frames shown above it for a video.
+    frame: (i32, i32),
 }
 
 /// The rename box: the file being renamed and the name as typed so far.
@@ -383,6 +392,19 @@ pub struct App {
     /// Asked for but not yet known ones are `None`.
     durations: HashMap<usize, Option<f64>>,
     prober: Option<mpsc::Sender<(usize, PathBuf)>>,
+    /// Frames from along videos, for looking through one without playing
+    /// it: those fetched so far for each of the last few videos looked at,
+    /// oldest first in `story_order`.
+    stories: Option<Stories>,
+    story_frames: HashMap<usize, Vec<Option<Arc<Frame>>>>,
+    story_order: VecDeque<usize>,
+    /// The video whose frames are being fetched.
+    story_asked: Option<usize>,
+    /// The video the grid is running through, which of its frames is up,
+    /// and when the next one is due.
+    story_shown: Option<usize>,
+    story_tick: usize,
+    story_due: Option<Instant>,
     /// Set while the directories are watched; clearing it stops the thread
     /// that does the watching.
     watch: Option<Arc<AtomicBool>>,
@@ -672,6 +694,13 @@ impl App {
             list_hover: None,
             durations: HashMap::new(),
             prober: None,
+            stories: None,
+            story_frames: HashMap::new(),
+            story_order: VecDeque::new(),
+            story_asked: None,
+            story_shown: None,
+            story_tick: 0,
+            story_due: None,
             watch: None,
             sizes: HashMap::new(),
             positions: None,
@@ -2823,12 +2852,16 @@ impl App {
         let px = ui_px(height);
         let line = Text::line_height(px);
         let (head, row_height) = (line + 2 * px as i32, line * 2);
-        let top = height as i32 / 8;
-        let fit = ((height as i32 * 3 / 4 - top - head) / row_height).clamp(1, 12) as usize;
+        // Above it there is room for a row of frames from the video picked
+        // out, as wide as the window allows.
+        let frame_width = (width as i32 * 9 / 10 / story::FRAMES as i32).min(px as i32 * 14);
+        let frame = (frame_width, frame_width * 9 / 16);
+        let top = height as i32 / 16 + frame.1 + px as i32;
+        let fit = ((height as i32 * 5 / 6 - top - head) / row_height).clamp(1, 12) as usize;
         let rows = fit.min(palette.matches.len());
         let first = (palette.selected + 1).saturating_sub(rows);
         let box_width = (px as i32 * 48).min(width as i32);
-        Some(PaletteLayout { left: (width as i32 - box_width) / 2, top, width: box_width, head, row_height, first, rows, px })
+        Some(PaletteLayout { left: (width as i32 - box_width) / 2, top, width: box_width, head, row_height, first, rows, px, frame })
     }
 
     /// The files whose matches the go-to box is showing.
@@ -2854,6 +2887,27 @@ impl App {
         let height = layout.head + layout.rows as i32 * layout.row_height + if layout.rows > 0 { pad / 2 } else { 0 };
         canvas.fill(layout.left, layout.top, layout.width, height, MENU_COLOR);
         canvas.outline(layout.left, layout.top, layout.width, height, 1, MENU_EDGE_COLOR);
+
+        // Above the box, for a video: frames from along it, side by side.
+        if let Some(frames) = self.story_subject().and_then(|id| self.story_frames.get(&id)) {
+            let gap = (pad / 4).max(2);
+            let (cell_w, cell_h) = layout.frame;
+            let strip_width = (cell_w + gap) * frames.len() as i32 + gap;
+            let (strip_left, strip_top) = ((canvas.width - strip_width) / 2, layout.top - cell_h - 2 * gap - pad / 2);
+            canvas.fill(strip_left, strip_top, strip_width, cell_h + 2 * gap, MENU_COLOR);
+            canvas.outline(strip_left, strip_top, strip_width, cell_h + 2 * gap, 1, MENU_EDGE_COLOR);
+            for (index, frame) in frames.iter().enumerate() {
+                let (cell_left, cell_top) = (strip_left + gap + index as i32 * (cell_w + gap), strip_top + gap);
+                match frame {
+                    Some(frame) => {
+                        let (w, h) = fit_size((frame.width, frame.height), (cell_w as u32, cell_h as u32), true);
+                        let (w, h) = (w as i32, h as i32);
+                        canvas.image(frame, cell_left + (cell_w - w) / 2, cell_top + (cell_h - h) / 2, w, h);
+                    }
+                    None => canvas.fill(cell_left, cell_top, cell_w, cell_h, PLACEHOLDER_COLOR),
+                }
+            }
+        }
 
         let label = "Go to:   ";
         let typed = palette.field.string();
@@ -3488,6 +3542,7 @@ impl App {
         let (width, height) = (canvas.width, canvas.height);
         let px = ui_px(height as u32);
         let margin = px as i32;
+        self.tend_story();
         // The grid replaces the image and everything describing it.
         let viewing = self.grid.is_none();
         let strip = (viewing && self.strip_visible()).then(|| Strip::for_height(height as u32));
@@ -3677,9 +3732,12 @@ impl App {
             let left = layout.left + column * layout.cell_w + layout.pad;
             let top = layout.top + row * layout.cell_h + layout.pad;
             let (cell_w, cell_h) = (layout.cell_w - 2 * layout.pad, layout.cell_h - 2 * layout.pad);
-            match self.loader.thumb(self.list[pos]) {
+            // A video under the cursor runs through frames from along it.
+            let story = if pos == grid.cursor { self.story_frame(self.list[pos]) } else { None };
+            match story.or_else(|| self.loader.thumb(self.list[pos])) {
                 Some(thumb) => {
-                    let (w, h) = fit_size((thumb.width, thumb.height), (cell_w as u32, cell_h as u32), false);
+                    let enlarge = pos == grid.cursor && thumb.width < cell_w as u32;
+                    let (w, h) = fit_size((thumb.width, thumb.height), (cell_w as u32, cell_h as u32), enlarge);
                     let (w, h) = (w as i32, h as i32);
                     canvas.image(&thumb, left + (cell_w - w) / 2, top + (cell_h - h) / 2, w, h);
                 }
@@ -3944,6 +4002,59 @@ impl App {
             sender
         });
         let _ = sender.send((id, self.files[id].clone()));
+    }
+
+    /// The video to look through without playing: the match picked out in
+    /// the go-to box, or the one under the grid's cursor.
+    fn story_subject(&self) -> Option<usize> {
+        let id = match (&self.palette, &self.grid) {
+            (Some(palette), _) => self.list[*palette.matches.get(palette.selected)?],
+            (None, Some(grid)) => self.list[grid.cursor],
+            (None, None) => return None,
+        };
+        files::is_video(&self.files[id]).then_some(id)
+    }
+
+    /// Sees to it that the frames of the video being looked through are on
+    /// their way, and in the grid that the next one is due. Called on each
+    /// redraw.
+    fn tend_story(&mut self) {
+        let subject = self.story_subject();
+        if subject != self.story_shown {
+            (self.story_shown, self.story_tick, self.story_due) = (subject, 0, None);
+        }
+        let Some(id) = subject else { return };
+        if !self.story_frames.contains_key(&id) {
+            // Frames are kept for the last few videos only.
+            self.story_order.push_back(id);
+            if self.story_order.len() > STORIES_KEPT {
+                let oldest = self.story_order.pop_front();
+                oldest.map(|oldest| self.story_frames.remove(&oldest));
+            }
+            self.story_frames.insert(id, vec![None; story::FRAMES]);
+        }
+        let frames = &self.story_frames[&id];
+        let missing: Vec<usize> = (0..story::FRAMES).filter(|index| frames[*index].is_none()).collect();
+        if !missing.is_empty() && self.story_asked != Some(id) {
+            self.story_asked = Some(id);
+            let proxy = self.proxy.clone();
+            let stories = self.stories.get_or_insert_with(|| Stories::new(move |found| proxy.send_event(Event::Story(found)).is_ok()));
+            stories.want(id, self.files[id].clone(), missing);
+        }
+        // The grid runs through them; the go-to box lays them side by side.
+        let several = self.story_frames[&id].iter().flatten().count() > 1;
+        if self.palette.is_none() && several && self.story_due.is_none() {
+            self.story_due = Some(Instant::now() + STORY_STEP);
+        }
+    }
+
+    /// The frame of video `id` that the grid shows in its place just now.
+    fn story_frame(&self, id: usize) -> Option<Arc<Frame>> {
+        if self.story_shown != Some(id) || self.palette.is_some() {
+            return None;
+        }
+        let fetched: Vec<&Arc<Frame>> = self.story_frames.get(&id)?.iter().flatten().collect();
+        (!fetched.is_empty()).then(|| fetched[self.story_tick % fetched.len()].clone())
     }
 
     /// The list position of the file-list row at a window position.
@@ -4306,6 +4417,20 @@ impl ApplicationHandler<Event> for App {
                 self.durations.insert(id, seconds);
                 self.redraw();
             }
+            Event::Story(Found::Length(id, seconds)) => drop(self.durations.insert(id, seconds)),
+            Event::Story(Found::Frame(id, index, frame)) => {
+                if let Some(frames) = self.story_frames.get_mut(&id) {
+                    frames[index] = Some(Arc::new(frame));
+                }
+                if self.story_subject() == Some(id) {
+                    self.redraw();
+                }
+            }
+            Event::Story(Found::Done(id)) => {
+                if self.story_asked == Some(id) {
+                    self.story_asked = None;
+                }
+            }
             Event::Meta(id, meta) => {
                 if self.meta_asked == Some(id) {
                     self.meta = Some((id, meta));
@@ -4379,13 +4504,19 @@ impl ApplicationHandler<Event> for App {
         if self.picture_due.is_some_and(|due| due <= now) {
             self.next_picture(now);
         }
+        if self.story_due.is_some_and(|due| due <= now) {
+            // The redraw sets when the frame after this one is due.
+            self.story_tick += 1;
+            self.story_due = None;
+            self.redraw();
+        }
         let snapshot_at = self.snapshot.as_ref().and_then(|snapshot| snapshot.at);
         if snapshot_at.is_some_and(|at| at <= now) {
             return self.finish_snapshot(event_loop);
         }
 
         let toast_until = self.toast.as_ref().map(|(_, until)| *until);
-        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due];
+        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.story_due];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

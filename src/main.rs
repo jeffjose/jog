@@ -13,6 +13,7 @@ mod positions;
 mod render;
 mod rng;
 mod search;
+mod story;
 mod ui;
 mod view;
 
