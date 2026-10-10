@@ -158,18 +158,28 @@ fn name_of(path: &Path) -> String {
 }
 
 fn sort_files(files: &mut [PathBuf], sort: Sort) {
-    let by_filename = |a: &PathBuf, b: &PathBuf| natural_cmp(&name_of(a), &name_of(b));
+    let mut order: Vec<usize> = (0..files.len()).collect();
+    sort_ids(&mut order, files, sort);
+    let sorted: Vec<PathBuf> = order.into_iter().map(|at| std::mem::take(&mut files[at])).collect();
+    files.iter_mut().zip(sorted).for_each(|(slot, file)| *slot = file);
+}
+
+/// Puts file ids in order, `files` being the path of each id.
+pub fn sort_ids(ids: &mut [usize], files: &[PathBuf], sort: Sort) {
+    let path = |id: &usize| files[*id].as_path();
+    let by_filename = |a: &usize, b: &usize| natural_cmp(&name_of(path(a)), &name_of(path(b)));
     match sort {
-        Sort::Name => files.sort_by(|a, b| natural_cmp(&a.to_string_lossy(), &b.to_string_lossy())),
-        Sort::Filename => files.sort_by(by_filename),
-        Sort::Dirname => files.sort_by(|a, b| {
-            let dirs = (a.parent().unwrap_or(a), b.parent().unwrap_or(b));
+        Sort::Name => ids.sort_by(|a, b| natural_cmp(&path(a).to_string_lossy(), &path(b).to_string_lossy())),
+        Sort::Filename => ids.sort_by(by_filename),
+        Sort::Dirname => ids.sort_by(|a, b| {
+            let (a_path, b_path) = (path(a), path(b));
+            let dirs = (a_path.parent().unwrap_or(a_path), b_path.parent().unwrap_or(b_path));
             natural_cmp(&dirs.0.to_string_lossy(), &dirs.1.to_string_lossy()).then_with(|| by_filename(a, b))
         }),
-        Sort::Mtime => files.sort_by_cached_key(|f| {
-            std::cmp::Reverse(std::fs::metadata(f).and_then(|m| m.modified()).ok())
+        Sort::Mtime => ids.sort_by_cached_key(|item| {
+            std::cmp::Reverse(std::fs::metadata(path(item)).and_then(|m| m.modified()).ok())
         }),
-        Sort::Size => files.sort_by_cached_key(|f| std::fs::metadata(f).map_or(0, |m| m.len())),
+        Sort::Size => ids.sort_by_cached_key(|item| std::fs::metadata(path(item)).map_or(0, |m| m.len())),
     }
 }
 

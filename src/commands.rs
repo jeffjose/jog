@@ -1,6 +1,7 @@
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 use crate::convert::Format;
+use crate::files::Sort;
 
 /// Everything the viewer can be told to do, from a key, the mouse or the menu.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -78,6 +79,12 @@ pub enum Command {
     Restart,
     Search,
     ClearFilter,
+    /// The `S` menu, and what it offers: an order for the list, a shuffle,
+    /// and the same order backwards.
+    SortMenu,
+    SortBy(Sort),
+    Shuffle,
+    ReverseOrder,
     FrameForward,
     FrameBack,
     Quit,
@@ -167,6 +174,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "w" => SizeToImage,
             "r" => Reload,
             "s" => Save,
+            "S" => SortMenu,
             "L" => SaveFilelist,
             "q" => Quit,
             digit => Action(digit.parse().ok().filter(|n| *n <= 9)?),
@@ -225,6 +233,7 @@ pub const MENU: &[Option<MenuItem>] = &[
     submenu("Zoom", ZOOM, Applies::Always),
     submenu("Rotate", ROTATE, Applies::Always),
     submenu("View", VIEW, Applies::Always),
+    submenu("Sort", SORT, Applies::Always),
     submenu("Marks", MARKS, Applies::Always),
     submenu("File", FILE, Applies::Always),
     submenu("Debug", DEBUG, Applies::Always),
@@ -273,6 +282,17 @@ const VIEW: &[Option<MenuItem>] = &[
     None,
     item("Info", "i", Command::ToggleInfo),
     image_item("EXIF data", "e", Command::ToggleExif),
+];
+
+/// Also the `S` menu.
+pub const SORT: &[Option<MenuItem>] = &[
+    item("Name", "", Command::SortBy(Sort::Name)),
+    item("File name, ignoring folders", "", Command::SortBy(Sort::Filename)),
+    item("Newest first", "", Command::SortBy(Sort::Mtime)),
+    item("Smallest first", "", Command::SortBy(Sort::Size)),
+    item("Shuffle", "", Command::Shuffle),
+    None,
+    item("Reverse", "", Command::ReverseOrder),
 ];
 
 const MARKS: &[Option<MenuItem>] = &[
@@ -348,6 +368,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("PgDn  PgUp", "Jump 5% forward / back"),
                 ("z", "Random image (in the grid: shuffle)"),
                 ("{  }", "Previous / next directory"),
+                ("S", "Sort: name, newest, size, shuffle, reverse"),
                 ("Wheel", "Next / previous image"),
                 ("/", "Search: Enter goes, Tab keeps matches"),
                 ("", "is:video  is:marked  >10mb  ^start  !without"),

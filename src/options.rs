@@ -81,6 +81,7 @@ Keys:
                              Also is:video is:image is:gif is:marked, and
                              sizes such as >10mb or <1gb (b, kb, mb, gb)
   Ctrl+arrows, Alt+arrows    scroll, by a page   Z  small images: fit screen / actual size
+  S                          sort: name, newest, size, shuffle, reverse
   ( / )                      rotate              _ |           flip, mirror
   [ / ]                      slower / faster     \\             normal speed
   f fullscreen  t filmstrip  i info  e EXIF  a actions  o pointer

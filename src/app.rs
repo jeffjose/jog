@@ -16,7 +16,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::commands::{self, Applies, Command, MenuItem};
 use crate::convert::{self, Format};
-use crate::files;
+use crate::files::{self, Sort};
 use crate::frame::{fit_size, Frame, Transform};
 use crate::loader::{Job, Loader, Request};
 use crate::meta::{self, Meta};
@@ -336,6 +336,10 @@ pub struct App {
     /// A search that was kept: what was typed and every file, in order.
     /// `list` then holds only the matches.
     filter: Option<(String, Vec<usize>)>,
+    /// The order the list was last put in, unless shuffled since, and
+    /// whether it runs backwards.
+    sort: Option<Sort>,
+    reversed: bool,
     /// File sizes looked up for searches such as `>10mb`.
     sizes: HashMap<usize, Option<u64>>,
     /// Where videos were left, read the first time one is played.
@@ -613,6 +617,8 @@ impl App {
             prompt: None,
             search: None,
             filter: None,
+            sort: options.listing.sort.filter(|_| !options.listing.randomize),
+            reversed: options.listing.reverse,
             sizes: HashMap::new(),
             positions: None,
             confirm: None,
@@ -1629,6 +1635,17 @@ impl App {
             Action(slot) => self.run_action(slot),
             Mark => self.toggle_mark(),
             MarkMenu => self.open_mark_menu(),
+            SortMenu => self.open_menu(commands::SORT, Some("Sort".to_string())),
+            SortBy(sort) => self.sort_by(sort),
+            Shuffle => {
+                self.shuffle();
+                self.toast("Shuffled");
+            }
+            ReverseOrder => {
+                self.reversed = !self.reversed;
+                self.reorder(|ids, _| ids.reverse());
+                self.toast("Order reversed");
+            }
             OnlyMarked if self.marks.is_empty() => self.toast("Nothing is marked"),
             OnlyMarked => {
                 // The same as typing it into the search box and keeping it.
@@ -1703,6 +1720,8 @@ impl App {
             ToggleFilmstrip => self.strip_pinned,
             ToggleInfo => self.show_info,
             ToggleDebug => self.show_debug,
+            SortBy(sort) => self.sort == Some(sort),
+            ReverseOrder => self.reversed,
             ToggleVerbose => self.options.verbose,
             ToggleDebugLog => self.options.debug,
             ToggleExif => self.show_exif,
@@ -2469,11 +2488,43 @@ impl App {
 
     /// Shuffles the viewing order. The image being viewed stays current.
     fn shuffle(&mut self) {
-        let id = self.id();
-        self.rng.shuffle(&mut self.list);
-        self.pos = self.list.iter().position(|&other| other == id).unwrap_or(0);
+        (self.sort, self.reversed) = (None, false);
+        let mut rng = std::mem::replace(&mut self.rng, Rng::from_clock());
+        self.reorder(|ids, _| rng.shuffle(ids));
+        self.rng = rng;
+    }
+
+    /// Puts the list in a different order, and with it the files a kept
+    /// search is hiding. The file on view stays on view, and the grid's
+    /// cursor stays on its file.
+    fn reorder(&mut self, mut order: impl FnMut(&mut Vec<usize>, &[PathBuf])) {
+        let (viewed, focus) = (self.id(), self.list[self.focus()]);
+        order(&mut self.list, &self.files);
+        if let Some((_, all)) = &mut self.filter {
+            order(all, &self.files);
+        }
+        let at = |id: usize| self.list.iter().position(|&other| other == id).unwrap_or(0);
+        let (viewed, focus) = (at(viewed), at(focus));
+        self.pos = viewed;
+        if let Some(grid) = &mut self.grid {
+            grid.cursor = focus;
+        }
         self.request();
         self.refresh();
+        self.redraw();
+    }
+
+    fn sort_by(&mut self, sort: Sort) {
+        self.sort = Some(sort);
+        let reversed = self.reversed;
+        self.reorder(|ids, files| {
+            files::sort_ids(ids, files, sort);
+            if reversed {
+                ids.reverse();
+            }
+        });
+        let label = commands::SORT.iter().flatten().find(|item| item.command == Command::SortBy(sort)).map_or("", |item| item.label);
+        self.toast(format!("Sorted: {}{}", label.to_lowercase(), if reversed { ", reversed" } else { "" }));
     }
 
     fn grid_key(&mut self, key: Key<&str>, event_loop: &ActiveEventLoop) {
@@ -2510,6 +2561,7 @@ impl App {
                 | Command::SaveFilelist
                 | Command::Search
                 | Command::ClearFilter
+                | Command::SortMenu
                 | Command::Quit),
             ) => self.execute(command, event_loop),
             _ => {}
