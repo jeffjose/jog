@@ -646,9 +646,11 @@ impl App {
             }
             video.showing = showing;
         }
-        // The hidden window of a scripted run is never asked to redraw, and
-        // mpv stalls waiting for frames nobody takes. Take them here.
-        if self.snapshot.is_some() && matches!(signal, Signal::Frame) {
+        // mpv stalls, for over half a second when changing file, if a frame
+        // it has announced is not taken. Redrawing takes it, but that only
+        // happens once the video is showing, and never for the hidden window
+        // of a scripted run; in those cases take it here and discard it.
+        if matches!(signal, Signal::Frame) && (!video.showing || self.snapshot.is_some()) {
             let (width, height): (u32, u32) = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
             self.scene.resize(width as usize * height as usize, 0);
             self.scene_key = None;
