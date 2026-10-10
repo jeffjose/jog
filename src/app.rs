@@ -1534,6 +1534,15 @@ impl App {
             }
             ToggleInfo => self.show_info = !self.show_info,
             ToggleDebug => self.show_debug = !self.show_debug,
+            ToggleVerbose => {
+                self.options.verbose = !self.options.verbose;
+                self.toast(if self.options.verbose { "Printing files to the terminal" } else { "No longer printing files" });
+            }
+            ToggleDebugLog => {
+                self.options.debug = !self.options.debug;
+                self.loader.set_debug(self.options.debug);
+                self.toast(if self.options.debug { "Printing timings to the terminal" } else { "No longer printing timings" });
+            }
             ToggleExif => self.show_exif = !self.show_exif,
             ToggleActions => self.show_actions = !self.show_actions,
             TogglePointer => {
@@ -1645,6 +1654,8 @@ impl App {
             ToggleFilmstrip => self.strip_pinned,
             ToggleInfo => self.show_info,
             ToggleDebug => self.show_debug,
+            ToggleVerbose => self.options.verbose,
+            ToggleDebugLog => self.options.debug,
             ToggleExif => self.show_exif,
             ToggleSlideshow => self.slide_at.is_some(),
             _ => false,

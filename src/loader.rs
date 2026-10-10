@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -233,6 +234,8 @@ struct Shared {
     background: u32,
     state: Mutex<State>,
     wake: Condvar,
+    /// Whether each job is reported on the terminal as it finishes.
+    debug: AtomicBool,
 }
 
 /// Decodes the current image and its neighbours on background threads so
@@ -251,7 +254,7 @@ impl Loader {
         on_loaded: impl Fn(Job) + Send + Sync + 'static,
     ) -> Self {
         let state = Mutex::new(State { files, ..State::default() });
-        let shared = Arc::new(Shared { background, state, wake: Condvar::new() });
+        let shared = Arc::new(Shared { background, state, wake: Condvar::new(), debug: AtomicBool::new(debug) });
         let on_loaded = Arc::new(on_loaded);
         let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_WORKERS);
 
@@ -261,10 +264,15 @@ impl Loader {
             let thumbs_allowed = index >= RESERVED_WORKERS.min(workers - 1);
             std::thread::Builder::new()
                 .name("jog-decode".into())
-                .spawn(move || worker(&shared, &*on_loaded, thumbs_allowed, debug))
+                .spawn(move || worker(&shared, &*on_loaded, thumbs_allowed))
                 .expect("failed to spawn decode thread");
         }
         Self { shared }
+    }
+
+    /// Turns the terminal report of each finished job on or off.
+    pub fn set_debug(&self, debug: bool) {
+        self.shared.debug.store(debug, Ordering::Relaxed);
     }
 
     /// Replaces what is wanted. What was decoded stays cached, within a
@@ -352,7 +360,7 @@ impl Loader {
     }
 }
 
-fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allowed: bool, debug: bool) {
+fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allowed: bool) {
     let mut state = shared.state.lock().unwrap();
     loop {
         let Some(job) = state.next_job(thumbs_allowed) else {
@@ -373,7 +381,7 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
         let (result, source, read) = perform(work, spec, keep);
         let took = started.elapsed();
         let made = Made { how, read, fit: took.saturating_sub(read), at: Instant::now() };
-        if debug {
+        if shared.debug.load(Ordering::Relaxed) {
             let kind = match job {
                 Job::Fitted(_) => "fit",
                 Job::Full(_) => "full",
