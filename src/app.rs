@@ -57,6 +57,8 @@ const RESUME_MARGIN: f64 = 10.0;
 const PREVIEW_TIMEOUT: Duration = Duration::from_millis(400);
 /// How soon a second click must follow the first to make a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// How long a thumbnail in the grid takes to give way to its trailer.
+const TRAILER_FADE: Duration = Duration::from_millis(350);
 /// How many videos' frames are kept at once.
 const STORIES_KEPT: usize = 4;
 /// How often the directories are listed again while watching.
@@ -390,8 +392,10 @@ impl TextField {
 /// The trailer playing in the grid, under the cursor.
 struct Trailer {
     id: usize,
-    /// The frame last taken from the thread playing it.
+    /// The frame last taken from the thread playing it, and when the
+    /// first one came.
     frame: Option<Frame>,
+    since: Option<Instant>,
 }
 
 /// How the box for finding files is brought to a close.
@@ -1859,7 +1863,13 @@ impl App {
             FrameBack => self.video_action(VideoAction::Frame(false)),
             VolumeUp => self.video_action(VideoAction::Volume(5)),
             VolumeDown => self.video_action(VideoAction::Volume(-5)),
-            Restart => self.seek_to(0.0, true),
+            Restart => {
+                self.seek_to(0.0, true);
+                // One that had played to its end is paused there.
+                if let (Some(player), Some(_)) = (&self.player, &self.video) {
+                    player.set("pause", "no");
+                }
+            }
             ClearFilter => self.clear_filter(),
             Quit => event_loop.exit(),
         }
@@ -3775,12 +3785,23 @@ impl App {
             let area = self.grid_area(&layout, cell, canvas.height as u32);
             // A video under the cursor plays as a trailer.
             let trailer = self.trailer.as_ref().filter(|trailer| trailer.id == id && pos == grid.cursor);
+            let since = trailer.and_then(|trailer| trailer.since);
             let trailer = trailer.and_then(|trailer| trailer.frame.as_ref()).filter(|frame| !frame.pixels.is_empty());
             let thumb = self.loader.thumb(id);
             let [x, y, w, h] = match (trailer, &thumb) {
                 (Some(frame), _) => {
                     let place = Self::grid_picture(area, (frame.width, frame.height), true);
+                    // The thumbnail gives way to the trailer's first frames
+                    // gradually, rather than being cut off by them.
+                    let left = since.map_or(0.0, |since| 1.0 - since.elapsed().as_secs_f64() / TRAILER_FADE.as_secs_f64());
+                    let fading = thumb.as_ref().filter(|_| left > 0.0).map(|thumb| {
+                        canvas.image(thumb, place[0], place[1], place[2], place[3]);
+                        canvas.copy(place[0], place[1], place[2], place[3])
+                    });
                     canvas.image(frame, place[0], place[1], place[2], place[3]);
+                    if let Some(was) = fading {
+                        canvas.dissolve(place[0], place[1], place[2], place[3], &was, (left * 256.0) as u32);
+                    }
                     place
                 }
                 (None, Some(thumb)) => {
@@ -4117,7 +4138,7 @@ impl App {
         let trailers = self.trailers.get_or_insert_with(|| Trailers::new(move |note| proxy.send_event(Event::Trailer(note)).is_ok()));
         let window = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
         trailers.play(id, self.files[id].clone(), GridLayout::for_window(window).thumb_size());
-        self.trailer = Some(Trailer { id, frame: None });
+        self.trailer = Some(Trailer { id, frame: None, since: None });
     }
 
     /// Sees to it that the frames of the video picked out in the go-to box
@@ -4560,6 +4581,7 @@ impl ApplicationHandler<Event> for App {
                 if let (Some(trailer), Some((id, frame))) = (&mut self.trailer, taken) {
                     if trailer.id == id {
                         trailer.frame = Some(frame);
+                        trailer.since.get_or_insert_with(Instant::now);
                         self.redraw();
                     }
                 }

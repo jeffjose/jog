@@ -109,6 +109,7 @@ where they were left unless --no-resume is given. While one is up:
   Space                      play / pause        Left / Right  seek 5 seconds (faster held)
   PgUp / PgDn                seek 1 minute       pointer at the bottom: seek bar with previews
   Shift+Left / Shift+Right   step one frame      Up / Down     volume
+  b                          back to the start of the video
   Ctrl+Left / Ctrl+Right, or , . < > n           previous / next file
 
 Mouse: drag to pan, middle-drag to zoom, wheel for next/previous,

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::frame::{fit_size, Frame};
-use crate::mpv::{Player, Role, Signal};
+use crate::mpv::{Player, PlayerEvent, Role, Signal};
 
 /// How many stretches of a longer video are shown, and for how long each.
 /// A video no longer than `WHOLE` seconds is simply played through.
@@ -38,6 +38,30 @@ struct Playing {
     length: Option<f64>,
     stretch: usize,
     next_at: Option<Instant>,
+    /// How many times the player has begun showing this video: once on
+    /// opening it, and again after each move to another stretch.
+    restarts: usize,
+    /// Whether its frames are ones to show. Until the player has opened it
+    /// they are of the video before, and in a longer video, until the first
+    /// stretch is reached, they are of its opening, which is often black.
+    showing: bool,
+}
+
+/// Reads the player's events, noting when the video last asked for has
+/// begun to show. `opening` counts the files asked for that have not been
+/// started on yet: frames only count once none are left.
+fn heed(player: &Player, opening: &mut usize, playing: &mut Option<Playing>) {
+    for event in player.events() {
+        match event {
+            PlayerEvent::Started => *opening = opening.saturating_sub(1),
+            PlayerEvent::Showing if *opening == 0 => {
+                if let Some(playing) = playing {
+                    playing.restarts += 1;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 pub struct Trailers {
@@ -60,6 +84,7 @@ impl Trailers {
             let Ok(player) = Player::new(Role::Preview, wake) else { return };
             player.set("loop-file", "inf");
             let mut playing: Option<Playing> = None;
+            let mut opening = 0;
             // Frames are rendered into this when nobody wants them.
             let mut spare = Vec::new();
             loop {
@@ -75,18 +100,21 @@ impl Trailers {
                         // Only the last of a run of requests matters: the
                         // cursor may have crossed several videos by now.
                         let mut newest = message.ok();
-                        let mut signals = Vec::new();
                         while let Ok(later) = inbox.try_recv() {
                             match later {
-                                Message::Player(signal) => signals.push(signal),
+                                Message::Player(_) => {}
                                 ask => newest = Some(ask),
                             }
                         }
+                        // Whatever the player said meanwhile was about the
+                        // video before.
+                        heed(&player, &mut opening, &mut playing);
                         playing = match newest {
                             Some(Message::Play(id, path, bounds)) => {
+                                opening += 1;
                                 player.open(&path);
                                 player.set("pause", "no");
-                                Some(Playing { id, bounds, length: None, stretch: 0, next_at: None })
+                                Some(Playing { id, bounds, length: None, stretch: 0, next_at: None, restarts: 0, showing: false })
                             }
                             _ => {
                                 player.set("pause", "yes");
@@ -95,15 +123,13 @@ impl Trailers {
                                 None
                             }
                         };
-                        if !signals.is_empty() {
-                            player.events();
-                        }
                     }
-                    // Only to empty the queue, so that mpv keeps signalling.
-                    Ok(Message::Player(Signal::Events)) => drop(player.events()),
+                    Ok(Message::Player(Signal::Events)) => heed(&player, &mut opening, &mut playing),
                     Ok(Message::Player(Signal::Frame)) => {
-                        // mpv stalls unless each frame it announces is taken.
-                        let Some(playing) = &playing else {
+                        // mpv stalls unless each frame it announces is taken,
+                        // wanted or not: with nothing playing, or while the
+                        // frame is still one of the video before.
+                        let Some(playing) = playing.as_ref().filter(|playing| playing.showing) else {
                             spare.resize(16 * 9, 0);
                             player.render(&mut spare, 16, 9);
                             continue;
@@ -124,13 +150,22 @@ impl Trailers {
                 // A longer video moves on from stretch to stretch, each from
                 // the middle of its part: the very start is often black.
                 let Some(playing) = &mut playing else { continue };
+                // Before it has opened, the player still speaks of the
+                // video before.
+                if playing.restarts == 0 {
+                    continue;
+                }
                 if playing.length.is_none() {
                     playing.length = player.number("duration");
                     if let Some(length) = playing.length {
                         notify(Note::Length(playing.id, length));
                     }
                 }
-                let Some(length) = playing.length.filter(|length| *length > WHOLE) else { continue };
+                let Some(length) = playing.length.filter(|length| *length > WHOLE) else {
+                    playing.showing = true;
+                    continue;
+                };
+                playing.showing = playing.restarts >= 2;
                 if playing.next_at.is_none_or(|at| at <= Instant::now()) {
                     let at = length * (playing.stretch as f64 + 0.5) / STRETCHES as f64;
                     player.command_later(&[b"seek", at.to_string().as_bytes(), b"absolute+keyframes"]);

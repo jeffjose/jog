@@ -31,6 +31,19 @@ impl<'a> Canvas<'a> {
         self.rows(x, y, w, h).for_each(|row| row.fill(color));
     }
 
+    /// What is in a rectangle now, to be laid back over it with `dissolve`.
+    pub fn copy(&mut self, x: i32, y: i32, w: i32, h: i32) -> Vec<u32> {
+        self.rows(x, y, w, h).flat_map(|row| row.iter().copied()).collect()
+    }
+
+    /// Lays what `copy` took from this same rectangle back over it,
+    /// `amount`/256 opaque: one picture giving way to another.
+    pub fn dissolve(&mut self, x: i32, y: i32, w: i32, h: i32, was: &[u32], amount: u32) {
+        for (pixel, was) in self.rows(x, y, w, h).flatten().zip(was) {
+            *pixel = mix(*pixel, *was, amount.min(256));
+        }
+    }
+
     /// Darkens a rectangle, keeping `keep`/256 of the brightness.
     pub fn shade(&mut self, x: i32, y: i32, w: i32, h: i32, keep: u32) {
         for pixel in self.rows(x, y, w, h).flatten() {
