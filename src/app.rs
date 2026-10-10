@@ -67,6 +67,15 @@ struct Moved {
     to: PathBuf,
 }
 
+/// A clickable button and the command it runs.
+struct Button {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    command: Command,
+}
+
 /// The delete confirmation: the question, the highlighted answer (No to
 /// begin with) and the files it is about.
 struct Confirm {
@@ -123,6 +132,8 @@ pub struct App {
     strip_used: bool,
     menu: Option<Menu>,
     grid: Option<Grid>,
+    /// Where the buttons under the grid were last drawn, for clicks.
+    grid_buttons: Vec<Button>,
     help: bool,
     snapshot: Option<Snapshot>,
     toast: Option<(String, Instant)>,
@@ -165,6 +176,7 @@ struct Menu {
     width: i32,
     height: i32,
     px: u32,
+    title: Option<String>,
     rows: Vec<MenuRow>,
     selected: Option<usize>,
 }
@@ -336,6 +348,7 @@ impl App {
             strip_used: options.filmstrip,
             menu: None,
             grid: None,
+            grid_buttons: Vec::new(),
             help: false,
             snapshot: Snapshot::from_env(),
             toast: None,
@@ -749,7 +762,7 @@ impl App {
             }
             ToggleMenu => match self.menu.take() {
                 Some(_) => {}
-                None => self.open_menu(),
+                None => self.open_menu(commands::MENU, None),
             },
             ToggleGrid => self.toggle_grid(),
             ToggleHelp => self.help = !self.help,
@@ -768,7 +781,7 @@ impl App {
                 self.request();
             }
             Remove => self.remove_current(event_loop),
-            Trash => self.trash_current(event_loop),
+            Trash => self.trash(event_loop),
             Save => {
                 let copy = format!("jog_{}_{}", std::process::id(), self.name());
                 match std::fs::copy(self.path(), &copy) {
@@ -788,6 +801,15 @@ impl App {
             }
             Action(slot) => self.run_action(slot),
             Mark => self.toggle_mark(),
+            MarkMenu => self.open_mark_menu(),
+            MarkAll => {
+                self.marks = self.list.iter().copied().collect();
+                self.toast(format!("Marked all {}", self.marks.len()));
+            }
+            InvertMarks => {
+                self.marks = self.list.iter().copied().filter(|id| !self.marks.contains(id)).collect();
+                self.toast(format!("{} marked", self.marks.len()));
+            }
             ClearMarks => {
                 let count = self.marks.len();
                 self.marks.clear();
@@ -804,17 +826,6 @@ impl App {
             Quit => event_loop.exit(),
         }
         self.redraw();
-    }
-
-    fn trash_current(&mut self, event_loop: &ActiveEventLoop) {
-        let name = self.name();
-        let status = std::process::Command::new("gio").arg("trash").arg("--").arg(self.path()).status();
-        if status.is_ok_and(|s| s.success()) {
-            self.toast(format!("Moved to trash: {name}"));
-            self.remove_current(event_loop);
-        } else {
-            self.toast(format!("Could not move {name} to trash"));
-        }
     }
 
     fn run_action(&mut self, slot: usize) {
@@ -935,6 +946,8 @@ impl App {
             self.drop_from_list(&removed, event_loop);
             self.undo.push(Undo::Moved(sent));
         } else {
+            // The marked images have been dealt with; start a fresh selection.
+            self.marks.clear();
             self.undo.push(Undo::Created(sent.into_iter().map(|copy| copy.to).collect()));
         }
     }
@@ -1171,36 +1184,77 @@ impl App {
 
     // ---- Menu ----------------------------------------------------------
 
-    fn open_menu(&mut self) {
+    /// Opens a menu of `entries`. One with a title is keyboard-first: it
+    /// sits in the middle of the window with its first item selected. One
+    /// without opens at the pointer.
+    fn open_menu(&mut self, entries: &'static [Option<MenuItem>], title: Option<String>) {
         let (width, height) = self.window_size();
         let px = ui_px(height);
         let text = self.text.get_or_insert_with(Text::load);
         let (row_height, separator_height, pad) = (px as i32 * 9 / 5, px as i32 * 3 / 5, px as i32 / 2);
 
-        let items = commands::MENU.iter().flatten();
+        let items = entries.iter().flatten();
         let label_width = items.clone().map(|i| text.width(i.label, px)).max().unwrap_or(0);
         let keys_width = items.map(|i| text.width(i.keys, px)).max().unwrap_or(0);
+        let title_width = title.as_ref().map_or(0, |title| text.width(title, px));
         // Padding, a gutter for check marks, the label, a gap and the keys.
-        let menu_width = pad + px as i32 + label_width + px as i32 * 2 + keys_width + pad;
+        let content_width = (px as i32 + label_width + px as i32 * 2 + keys_width).max(title_width);
+        let menu_width = content_width + 2 * pad;
 
-        let mut top = pad;
+        let mut top = pad + if title.is_some() { row_height } else { 0 };
         let mut rows = Vec::new();
-        for entry in commands::MENU {
+        for entry in entries {
             let row_height = if entry.is_some() { row_height } else { separator_height };
             rows.push(MenuRow { top, height: row_height, item: entry.as_ref() });
             top += row_height;
         }
         let menu_height = top + pad;
 
+        let centred = ((width as i32 - menu_width) / 2, (height as i32 - menu_height) / 2);
+        let (x, y) = if title.is_some() { centred } else { (self.mouse.0 as i32, self.mouse.1 as i32) };
         self.menu = Some(Menu {
-            x: (self.mouse.0 as i32).clamp(0, (width as i32 - menu_width).max(0)),
-            y: (self.mouse.1 as i32).clamp(0, (height as i32 - menu_height).max(0)),
+            x: x.clamp(0, (width as i32 - menu_width).max(0)),
+            y: y.clamp(0, (height as i32 - menu_height).max(0)),
             width: menu_width,
             height: menu_height,
             px,
+            selected: title.as_ref().and(rows.iter().position(|row| row.item.is_some())),
             rows,
-            selected: None,
+            title,
         });
+    }
+
+    /// The `X` menu: what can be done with the marked images.
+    fn open_mark_menu(&mut self) {
+        let title = match self.marks.len() {
+            0 => format!("Nothing marked: applies to {}", self.name_of(self.list[self.focus()])),
+            1 => "1 marked image".to_string(),
+            count => format!("{count} marked images"),
+        };
+        self.open_menu(commands::MARK_MENU, Some(title));
+    }
+
+    /// Moves the target files to the trash.
+    fn trash(&mut self, event_loop: &ActiveEventLoop) {
+        let (mut removed, mut failed) = (Vec::new(), 0);
+        for id in self.targets() {
+            let Some(pos) = self.list.iter().position(|&other| other == id) else { continue };
+            let status = std::process::Command::new("gio").arg("trash").arg("--").arg(&self.files[id]).status();
+            if status.is_ok_and(|s| s.success()) {
+                println!("[trash] {}", self.files[id].display());
+                removed.push((id, pos));
+            } else {
+                failed += 1;
+            }
+        }
+        let mut summary = format!("Moved {} to trash", removed.len());
+        if failed > 0 {
+            summary.push_str(&format!(", {failed} failed"));
+        }
+        self.toast(summary);
+        if !removed.is_empty() {
+            self.drop_from_list(&removed, event_loop);
+        }
     }
 
     fn menu_key(&mut self, key: Key<&str>, event_loop: &ActiveEventLoop) {
@@ -1349,6 +1403,9 @@ impl App {
                 | Command::Undo
                 | Command::Rename
                 | Command::Delete
+                | Command::Trash
+                | Command::MarkMenu
+                | Command::SaveFilelist
                 | Command::Quit),
             ) => self.execute(command, event_loop),
             _ => {}
@@ -1387,8 +1444,9 @@ impl App {
         self.mouse = (x, y);
 
         if let Some(menu) = &mut self.menu {
+            // Moving the pointer elsewhere leaves a keyboard selection alone.
             let hovered = menu.row_at(x, y);
-            if hovered != menu.selected {
+            if hovered.is_some() && hovered != menu.selected {
                 menu.selected = hovered;
                 self.redraw();
             }
@@ -1436,9 +1494,14 @@ impl App {
             self.help = !pressed;
             return self.redraw();
         }
-        if self.grid.is_some() {
-            if button == MouseButton::Left && pressed && self.point_cursor() {
-                self.open_from_grid();
+        if self.grid.is_some() && self.menu.is_none() {
+            if button == MouseButton::Left && pressed {
+                let hit = |b: &&Button| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32));
+                if let Some(command) = self.grid_buttons.iter().find(hit).map(|button| button.command) {
+                    self.execute(command, event_loop);
+                } else if self.point_cursor() {
+                    self.open_from_grid();
+                }
             }
             return;
         }
@@ -1661,7 +1724,7 @@ impl App {
             return;
         }
         let mut text = self.text.take().unwrap_or_else(Text::load);
-        text_block(canvas, &mut text, &footer, px, |w, h| ((width - w) / 2, height - h));
+        self.draw_grid_footer(canvas, &mut text, &footer, px);
         text_block(canvas, &mut text, &top_left, px, |_, _| (margin, margin));
         text_block(canvas, &mut text, &exif, px, |_, h| (margin, bottom - h));
         text_block(canvas, &mut text, &actions, px, |w, h| (width - margin - w, bottom - h));
@@ -1709,6 +1772,44 @@ impl App {
                 let color = if pos == grid.cursor { TEXT_COLOR } else { HIGHLIGHT_COLOR };
                 canvas.outline(left - edge, top - edge, cell_w + 2 * edge, cell_h + 2 * edge, edge, color);
             }
+        }
+    }
+
+    /// Draws the line under the grid. While images are marked it also has
+    /// the count and a row of buttons for acting on them.
+    fn draw_grid_footer(&mut self, canvas: &mut Canvas, text: &mut Text, footer: &[String], px: u32) {
+        self.grid_buttons.clear();
+        let Some(label) = footer.first() else { return };
+        let (pad, gap) = (px as i32 / 2, px as i32 * 2);
+        let height = Text::line_height(px) + pad;
+        let actions = if self.marks.is_empty() { &[][..] } else { commands::GRID_ACTIONS };
+        let count = format!("{} marked", self.marks.len());
+
+        let button_width = |text: &mut Text, label: &str| text.width(label, px) + 2 * pad;
+        let mut width = text.width(label, px);
+        if !actions.is_empty() {
+            width += gap + text.width(&count, px) + gap - pad;
+            width += actions.iter().map(|(label, _)| button_width(text, label) + pad).sum::<i32>();
+        }
+        let footer_height = GridLayout::footer_height(canvas.height as u32);
+        let mut x = (canvas.width - width) / 2;
+        let y = canvas.height - footer_height + (footer_height - height) / 2;
+
+        canvas.shade(x - pad, y, width + 2 * pad, height, 80);
+        text.draw(canvas, x, y + pad / 2, px, TEXT_COLOR, label);
+        if actions.is_empty() {
+            return;
+        }
+        x += text.width(label, px) + gap;
+        text.draw(canvas, x, y + pad / 2, px, MARK_COLOR, &count);
+        x += text.width(&count, px) + gap;
+        for &(label, command) in actions {
+            let width = button_width(text, label);
+            canvas.fill(x, y, width, height, MENU_COLOR);
+            canvas.outline(x, y, width, height, 1, MENU_EDGE_COLOR);
+            text.draw(canvas, x + pad, y + pad / 2, px, TEXT_COLOR, label);
+            self.grid_buttons.push(Button { x, y, width, height, command });
+            x += width + pad;
         }
     }
 
@@ -1782,6 +1883,9 @@ impl App {
         let pad = px as i32 / 2;
         canvas.fill(menu.x, menu.y, menu.width, menu.height, MENU_COLOR);
         canvas.outline(menu.x, menu.y, menu.width, menu.height, 1, MENU_EDGE_COLOR);
+        if let Some(title) = &menu.title {
+            text.draw(canvas, menu.x + pad, menu.y + pad, px, DIM_TEXT_COLOR, title);
+        }
 
         for (index, row) in menu.rows.iter().enumerate() {
             let top = menu.y + row.top;

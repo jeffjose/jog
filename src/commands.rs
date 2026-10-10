@@ -48,6 +48,9 @@ pub enum Command {
     SaveFilelist,
     Action(usize),
     Mark,
+    MarkMenu,
+    MarkAll,
+    InvertMarks,
     ClearMarks,
     CopyName,
     CopyPath,
@@ -129,6 +132,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "v" => CopyTo,
             "u" => Undo,
             "x" => Mark,
+            "X" => MarkMenu,
             "c" => CopyName,
             "C" => CopyPath,
             "g" => ToggleGrid,
@@ -181,6 +185,7 @@ pub const MENU: &[Option<MenuItem>] = &[
     item("Slideshow", "h", Command::ToggleSlideshow),
     None,
     item("Mark", "x", Command::Mark),
+    item("Marked images...", "X", Command::MarkMenu),
     item("Clear all marks", "", Command::ClearMarks),
     item("Copy file name", "c", Command::CopyName),
     item("Copy full path", "C", Command::CopyPath),
@@ -200,6 +205,36 @@ pub const MENU: &[Option<MenuItem>] = &[
     None,
     item("Keyboard shortcuts", "?", Command::ToggleHelp),
     item("Quit", "q", Command::Quit),
+];
+
+/// The `X` menu: what can be done with the marked images.
+pub const MARK_MENU: &[Option<MenuItem>] = &[
+    item("Copy to folder", "v", Command::CopyTo),
+    item("Move to folder", "m", Command::MoveTo),
+    None,
+    item("Copy file names", "c", Command::CopyName),
+    item("Copy full paths", "C", Command::CopyPath),
+    item("Save list to a file", "L", Command::SaveFilelist),
+    None,
+    item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
+    item("Convert to PNG", "", Command::Convert(Format::Png)),
+    item("Convert to WebP", "", Command::Convert(Format::WebP)),
+    None,
+    item("Move to trash", "Ctrl+Del", Command::Trash),
+    item("Delete...", "d", Command::Delete),
+    None,
+    item("Mark all", "", Command::MarkAll),
+    item("Invert marks", "", Command::InvertMarks),
+    item("Clear marks", "", Command::ClearMarks),
+];
+
+/// The buttons under the grid while images are marked.
+pub const GRID_ACTIONS: &[(&str, Command)] = &[
+    ("Copy  v", Command::CopyTo),
+    ("Move  m", Command::MoveTo),
+    ("Names  c", Command::CopyName),
+    ("Delete  d", Command::Delete),
+    ("More  X", Command::MarkMenu),
 ];
 
 /// The `?` overlay: columns of sections, each a title and its key list.
@@ -264,6 +299,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             "Files",
             &[
                 ("x", "Mark / unmark"),
+                ("X", "Menu of things to do with the marked"),
                 ("c  C", "Copy file name / full path"),
                 ("v  m", "Copy / move to the -o folder"),
                 ("u", "Undo copy, move, rename or convert"),
