@@ -121,10 +121,18 @@ impl<'a> Canvas<'a> {
     /// A filled rectangle with rounded corners, `amount`/256 opaque.
     #[allow(clippy::too_many_arguments)]
     pub fn round_fill(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, amount: u32) {
+        let radius = radius.clamp(0, w.min(h) / 2);
         for py in y..y + h {
-            for px in x..x + w {
+            // Only the ends of the rows at the top and bottom curve; the
+            // rest of every row is plain.
+            let curved = py < y + radius || py >= y + h - radius;
+            let inset = if curved { radius } else { 0 };
+            for px in (x..x + inset).chain(x + w - inset..x + w) {
                 let cover = rounded_cover(px, py, x, y, w, h, radius, 0.0);
                 self.cover(px, py, color, (cover * f64::from(amount)) as u32);
+            }
+            for row in self.rows(x + inset, py, w - 2 * inset, 1) {
+                row.iter_mut().for_each(|pixel| *pixel = mix(*pixel, color, amount.min(256)));
             }
         }
     }

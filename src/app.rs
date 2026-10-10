@@ -267,17 +267,105 @@ struct Confirm {
 struct TextField {
     text: Vec<char>,
     cursor: usize,
+    /// Where a selection started; it runs from here to the cursor.
+    anchor: Option<usize>,
 }
 
 impl TextField {
+    fn new(text: Vec<char>, cursor: usize) -> TextField {
+        TextField { text, cursor, anchor: None }
+    }
+
     fn string(&self) -> String {
         self.text.iter().collect()
     }
 
+    /// The selected stretch, if there is one: where it starts and ends.
+    fn selection(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor.filter(|anchor| *anchor != self.cursor)?;
+        Some((anchor.min(self.cursor), anchor.max(self.cursor)))
+    }
+
+    /// Takes out what is selected. Returns whether anything was.
+    fn cut(&mut self) -> bool {
+        let selection = self.selection();
+        if let Some((from, to)) = selection {
+            self.text.drain(from..to);
+            self.cursor = from;
+        }
+        self.anchor = None;
+        selection.is_some()
+    }
+
+    fn insert(&mut self, typed: &str) {
+        self.cut();
+        // What is pasted may run over several lines; this is one.
+        for c in typed.chars().filter(|c| !c.is_control()) {
+            self.text.insert(self.cursor, c);
+            self.cursor += 1;
+        }
+    }
+
+    /// Where the word before, or after, the cursor ends.
+    fn word_edge(&self, forward: bool) -> usize {
+        let mut at = self.cursor;
+        let space = |at: usize| self.text[at].is_whitespace();
+        if forward {
+            while at < self.text.len() && space(at) {
+                at += 1;
+            }
+            while at < self.text.len() && !space(at) {
+                at += 1;
+            }
+        } else {
+            while at > 0 && space(at - 1) {
+                at -= 1;
+            }
+            while at > 0 && !space(at - 1) {
+                at -= 1;
+            }
+        }
+        at
+    }
+
     /// Applies an editing key. Returns whether the text changed.
+    ///
+    /// Beyond typing: the arrows, Home and End move, by a word with Ctrl
+    /// and selecting with Shift; Ctrl+A selects everything; Ctrl+C, Ctrl+X
+    /// and Ctrl+V copy, cut and paste; Ctrl+Backspace or Ctrl+W takes out
+    /// the word before the cursor, and Ctrl+U everything.
     fn key(&mut self, key: Key<&str>, modifiers: ModifiersState) -> bool {
-        let typing = !modifiers.control_key() && !modifiers.alt_key();
+        let (ctrl, shift) = (modifiers.control_key(), modifiers.shift_key());
+        let typing = !ctrl && !modifiers.alt_key() && !modifiers.super_key();
+        let before = self.text.clone();
+        // Moving the cursor with Shift held stretches the selection to it.
+        let move_to = |field: &mut TextField, to: usize| {
+            field.anchor = if shift { field.anchor.or(Some(field.cursor)) } else { None };
+            field.cursor = to;
+        };
         match key {
+            Key::Character(letter) if ctrl => match letter.to_lowercase().as_str() {
+                "a" => (self.anchor, self.cursor) = (Some(0), self.text.len()),
+                "c" | "x" => {
+                    let (from, to) = self.selection().unwrap_or((0, self.text.len()));
+                    ops::set_clipboard(&self.text[from..to].iter().collect::<String>());
+                    if letter.eq_ignore_ascii_case("x") {
+                        self.cut();
+                    }
+                }
+                "v" => self.insert(&ops::clipboard().unwrap_or_default()),
+                "u" => (self.text, self.cursor, self.anchor) = (Vec::new(), 0, None),
+                "w" => {
+                    self.anchor = Some(self.word_edge(false));
+                    self.cut();
+                }
+                _ => {}
+            },
+            Key::Named(NamedKey::Backspace | NamedKey::Delete) if self.cut() => {}
+            Key::Named(NamedKey::Backspace) if ctrl => {
+                self.anchor = Some(self.word_edge(false));
+                self.cut();
+            }
             Key::Named(NamedKey::Backspace) if self.cursor > 0 => {
                 self.cursor -= 1;
                 self.text.remove(self.cursor);
@@ -285,20 +373,17 @@ impl TextField {
             Key::Named(NamedKey::Delete) if self.cursor < self.text.len() => {
                 self.text.remove(self.cursor);
             }
-            Key::Named(NamedKey::Space) | Key::Character(_) if typing => {
-                let typed = if let Key::Character(text) = key { text } else { " " };
-                for c in typed.chars() {
-                    self.text.insert(self.cursor, c);
-                    self.cursor += 1;
-                }
-            }
-            Key::Named(NamedKey::ArrowLeft) => self.cursor = self.cursor.saturating_sub(1),
-            Key::Named(NamedKey::ArrowRight) => self.cursor = (self.cursor + 1).min(self.text.len()),
-            Key::Named(NamedKey::Home) => self.cursor = 0,
-            Key::Named(NamedKey::End) => self.cursor = self.text.len(),
+            Key::Named(NamedKey::Space) if typing => self.insert(" "),
+            Key::Character(typed) if typing => self.insert(typed),
+            Key::Named(NamedKey::ArrowLeft) if ctrl => move_to(self, self.word_edge(false)),
+            Key::Named(NamedKey::ArrowRight) if ctrl => move_to(self, self.word_edge(true)),
+            Key::Named(NamedKey::ArrowLeft) => move_to(self, self.cursor.saturating_sub(1)),
+            Key::Named(NamedKey::ArrowRight) => move_to(self, (self.cursor + 1).min(self.text.len())),
+            Key::Named(NamedKey::Home) => move_to(self, 0),
+            Key::Named(NamedKey::End) => move_to(self, self.text.len()),
             _ => {}
         }
-        matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete | NamedKey::Space) | Key::Character(_))
+        self.text != before
     }
 }
 
@@ -2091,7 +2176,7 @@ impl App {
         let text: Vec<char> = self.name_of(id).chars().collect();
         // Start typing before the extension.
         let cursor = text.iter().rposition(|c| *c == '.').filter(|at| *at > 0).unwrap_or(text.len());
-        self.prompt = Some(Prompt { id, field: TextField { text, cursor } });
+        self.prompt = Some(Prompt { id, field: TextField::new(text, cursor) });
         self.menu = None;
         self.redraw();
     }
@@ -2661,7 +2746,7 @@ impl App {
     /// earlier comes back as it was typed, ready to be changed.
     fn open_palette(&mut self) {
         let text: Vec<char> = self.filter.as_ref().map(|(typed, _)| typed.chars().collect()).unwrap_or_default();
-        let field = TextField { cursor: text.len(), text };
+        let field = TextField::new(text.clone(), text.len());
         self.menu = None;
         self.palette = Some(Palette { field, matches: Vec::new(), narrowed: false, selected: 0, focus: 0, drawn: Vec::new() });
         self.palette_changed();
@@ -2781,8 +2866,12 @@ impl App {
         // out, as wide as the window allows.
         let frame_width = (width as i32 * 9 / 10 / story::SEGMENTS as i32).min(px as i32 * 14);
         let frame = (frame_width, frame_width * 9 / 16);
-        let top = height as i32 / 16 + frame.1 + px as i32;
-        let fit = ((height as i32 * 5 / 6 - top - head) / row_height).clamp(1, 12) as usize;
+        // The whole of it, with the frames above and as many matches as fit
+        // below, sits in the middle; what is typed then stays where it is
+        // however many matches there are.
+        let above = frame.1 + px as i32;
+        let fit = ((height as i32 * 3 / 4 - above - head) / row_height).clamp(1, 10) as usize;
+        let top = (height as i32 - above - head - fit as i32 * row_height) / 2 + above;
         let rows = fit.min(palette.matches.len());
         let first = (palette.selected + 1).saturating_sub(rows);
         let box_width = (px as i32 * 48).min(width as i32);
@@ -2809,8 +2898,7 @@ impl App {
         let (px, pad) = (layout.px, layout.px as i32);
         let line = Text::line_height(px);
         let height = layout.head + layout.rows as i32 * layout.row_height + if layout.rows > 0 { pad / 2 } else { 0 };
-        canvas.fill(layout.left, layout.top, layout.width, height, MENU_COLOR);
-        canvas.outline(layout.left, layout.top, layout.width, height, 1, MENU_EDGE_COLOR);
+        panel(canvas, layout.left, layout.top, layout.width, height, pad * 2 / 3);
 
         // Above the box, for a video: frames from along it, side by side.
         if let Some(frames) = self.story_subject().and_then(|id| self.story_frames.get(&id)) {
@@ -2818,8 +2906,7 @@ impl App {
             let (cell_w, cell_h) = layout.frame;
             let strip_width = (cell_w + gap) * frames.len() as i32 + gap;
             let (strip_left, strip_top) = ((canvas.width - strip_width) / 2, layout.top - cell_h - 2 * gap - pad / 2);
-            canvas.fill(strip_left, strip_top, strip_width, cell_h + 2 * gap, MENU_COLOR);
-            canvas.outline(strip_left, strip_top, strip_width, cell_h + 2 * gap, 1, MENU_EDGE_COLOR);
+            panel(canvas, strip_left, strip_top, strip_width, cell_h + 2 * gap, pad / 2);
             for (index, frame) in frames.iter().enumerate() {
                 let (cell_left, cell_top) = (strip_left + gap + index as i32 * (cell_w + gap), strip_top + gap);
                 // One frame stands for each stretch: the middle one.
@@ -2831,6 +2918,7 @@ impl App {
                     }
                     None => canvas.fill(cell_left, cell_top, cell_w, cell_h, PLACEHOLDER_COLOR),
                 }
+                canvas.round_off(cell_left, cell_top, cell_w, cell_h, pad / 3, MENU_COLOR);
             }
         }
 
@@ -2844,6 +2932,7 @@ impl App {
         let (x, y) = (layout.left + pad, layout.top + pad);
         let typed_left = x + text.width(label, px);
         text.draw(canvas, x, y, px, DIM_TEXT_COLOR, label);
+        draw_selection(canvas, text, &palette.field, typed_left, y, px);
         text.draw(canvas, typed_left, y, px, TEXT_COLOR, &typed);
         if palette.focus == 0 {
             canvas.fill(typed_left + text.width(&before_cursor, px), y, (pad / 10).max(2), line, TEXT_COLOR);
@@ -2872,7 +2961,7 @@ impl App {
             let at = layout.first + row;
             let (id, top) = (palette.matches[at], layout.top + layout.head + row as i32 * layout.row_height);
             if at == palette.selected {
-                canvas.fill(layout.left + 1, top, layout.width - 2, layout.row_height, HIGHLIGHT_COLOR);
+                canvas.round_fill(layout.left + pad / 3, top, layout.width - 2 * (pad / 3), layout.row_height, pad / 2, HIGHLIGHT_COLOR, 256);
             }
             let (cell_left, cell_top) = (layout.left + pad, top + pad / 8);
             match self.loader.thumb(id) {
@@ -4096,8 +4185,7 @@ impl App {
     fn draw_menu(&self, canvas: &mut Canvas, text: &mut Text, menu: &Menu) {
         let px = menu.px;
         let pad = px as i32 / 2;
-        canvas.fill(menu.x, menu.y, menu.width, menu.height, MENU_COLOR);
-        canvas.outline(menu.x, menu.y, menu.width, menu.height, 1, MENU_EDGE_COLOR);
+        panel(canvas, menu.x, menu.y, menu.width, menu.height, pad);
         if let Some(title) = &menu.title {
             text.draw(canvas, menu.x + pad, menu.y + pad, px, DIM_TEXT_COLOR, title);
         }
@@ -4109,7 +4197,7 @@ impl App {
                 continue;
             };
             if menu.selected == Some(index) {
-                canvas.fill(menu.x + 1, top, menu.width - 2, row.height, HIGHLIGHT_COLOR);
+                canvas.round_fill(menu.x + pad / 2, top, menu.width - pad, row.height, pad / 2, HIGHLIGHT_COLOR, 256);
             }
             if self.is_checked(item.command) {
                 let mark = px as i32 / 2;
@@ -4178,6 +4266,13 @@ fn clipped(text: &mut Text, line: &str, width: i32, px: u32) -> String {
     }
 }
 
+/// The background of a menu or box: a dark panel with rounded corners and
+/// a thin edge.
+fn panel(canvas: &mut Canvas, x: i32, y: i32, width: i32, height: i32, radius: i32) {
+    canvas.round_fill(x, y, width, height, radius, MENU_COLOR, 256);
+    canvas.round_outline(x, y, width, height, radius, 1, MENU_EDGE_COLOR);
+}
+
 /// Draws lines of text on a darkened panel. `place` is given the panel size
 /// and returns its top-left corner.
 fn text_block(canvas: &mut Canvas, text: &mut Text, lines: &[String], px: u32, place: impl Fn(i32, i32) -> (i32, i32)) {
@@ -4189,7 +4284,7 @@ fn text_block(canvas: &mut Canvas, text: &mut Text, lines: &[String], px: u32, p
     let width = lines.iter().map(|line| text.width(line, px)).max().unwrap_or(0) + 2 * pad;
     let height = line_height * lines.len() as i32 + 2 * pad;
     let (x, y) = place(width, height);
-    canvas.shade(x, y, width, height, 80);
+    canvas.round_fill(x, y, width, height, pad, 0x000000, 176);
     for (index, line) in lines.iter().enumerate() {
         text.draw(canvas, x + pad, y + pad + index as i32 * line_height, px, TEXT_COLOR, line);
     }
@@ -4226,6 +4321,15 @@ fn draw_confirm(canvas: &mut Canvas, text: &mut Text, confirm: &Confirm, px: u32
 /// Draws the rename box, centred with its bottom edge at `bottom`.
 /// `label` names what is being typed and `note`, at the right, says
 /// something about it, such as how many files match.
+/// Shades the selected stretch of a text field whose text starts at
+/// `(x, y)`, for the text to be drawn over.
+fn draw_selection(canvas: &mut Canvas, text: &mut Text, field: &TextField, x: i32, y: i32, px: u32) {
+    let Some((from, to)) = field.selection() else { return };
+    let mut upto = |at: usize| text.width(&field.text[..at].iter().collect::<String>(), px);
+    let (left, right) = (upto(from), upto(to));
+    canvas.fill(x + left, y, right - left, Text::line_height(px), HIGHLIGHT_COLOR);
+}
+
 /// Draws a box to type in, with any buttons in a row to its right, and
 /// returns where each button went. `focus` is 0 while the text has the
 /// keyboard, otherwise the button that has it, counting from 1.
@@ -4257,6 +4361,7 @@ fn draw_prompt(
     canvas.fill(left, top, width, height, MENU_COLOR);
     canvas.outline(left, top, width, height, 1, MENU_EDGE_COLOR);
     text.draw(canvas, left + pad, top + pad, px, DIM_TEXT_COLOR, label);
+    draw_selection(canvas, text, field, left + pad + label_width, top + pad, px);
     text.draw(canvas, left + pad + label_width, top + pad, px, TEXT_COLOR, &typed);
     text.draw(canvas, left + width - pad - note_width, top + pad, px, DIM_TEXT_COLOR, note);
     if focus == 0 {
@@ -4556,6 +4661,28 @@ impl ApplicationHandler<Event> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_fields_select_and_edit_by_the_word() {
+        let (plain, ctrl, shift) = (ModifiersState::empty(), ModifiersState::CONTROL, ModifiersState::SHIFT);
+        let mut field = TextField::new("one two three".chars().collect(), 13);
+        // Ctrl+A then typing replaces everything.
+        assert!(!field.key(Key::Character("a"), ctrl));
+        assert_eq!(field.selection(), Some((0, 13)));
+        assert!(field.key(Key::Character("x y"), plain));
+        assert_eq!(field.string(), "x y");
+        // Ctrl+Backspace takes out a word; Shift+Left selects a letter.
+        assert!(field.key(Key::Named(NamedKey::Backspace), ctrl));
+        assert_eq!(field.string(), "x ");
+        assert!(!field.key(Key::Named(NamedKey::ArrowLeft), shift));
+        assert_eq!(field.selection(), Some((1, 2)));
+        assert!(field.key(Key::Named(NamedKey::Delete), plain));
+        assert_eq!((field.string().as_str(), field.cursor), ("x", 1));
+        // Moving without Shift lets a selection go.
+        field.key(Key::Character("a"), ctrl);
+        field.key(Key::Named(NamedKey::Home), plain);
+        assert_eq!(field.selection(), None);
+    }
 
     #[test]
     fn titles_drop_the_extension_and_a_release_s_small_print() {

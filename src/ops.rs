@@ -44,6 +44,16 @@ pub fn set_clipboard(text: &str) -> bool {
     })
 }
 
+/// The text on the clipboard, read with whichever helper is installed.
+pub fn clipboard() -> Option<String> {
+    let helpers: [&[&str]; 3] =
+        [&["xclip", "-selection", "clipboard", "-o"], &["xsel", "--clipboard", "--output"], &["wl-paste", "-n"]];
+    helpers.iter().find_map(|helper| {
+        let output = Command::new(helper[0]).args(&helper[1..]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+        output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
