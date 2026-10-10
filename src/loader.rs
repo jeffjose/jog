@@ -92,7 +92,8 @@ impl State {
             Job::Thumb(id) => (id, Some(self.request.thumb_size)),
             Job::Full(id) => (id, None),
         };
-        (id, Spec { target, transform: self.transform(id), background })
+        let thumbnail = matches!(job, Job::Thumb(_));
+        (id, Spec { target, transform: self.transform(id), background, thumbnail })
     }
 
     /// Stores a finished decode unless the user has moved on from it.

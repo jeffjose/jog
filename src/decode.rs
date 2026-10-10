@@ -22,11 +22,14 @@ pub struct Spec {
     pub transform: Transform,
     /// Colour shown through transparent pixels, as `0RGB`.
     pub background: u32,
+    /// Whether this is for a thumbnail, which for a video should be a
+    /// telling frame rather than the one playback opens on.
+    pub thumbnail: bool,
 }
 
 pub fn load(path: &Path, spec: Spec) -> Result<Frame> {
     if files::is_video(path) {
-        let (image, orientation) = decode(&video_poster(path)?)?;
+        let (image, orientation) = decode(&video_still(path, spec.thumbnail)?)?;
         return finish(image, orientation, spec);
     }
     let bytes = std::fs::read(path)?;
@@ -38,11 +41,13 @@ pub fn load(path: &Path, spec: Spec) -> Result<Frame> {
     finish(image, orientation, spec)
 }
 
-/// A still from a video, as an encoded image, for thumbnails and for showing
-/// while the player starts. Taken one second in, where there is usually
-/// more to see than in the opening frame.
-fn video_poster(path: &Path) -> Result<Vec<u8>> {
-    for seek in ["1", "0"] {
+/// A still from a video, as an encoded image. A thumbnail is taken one
+/// second in, where there is usually more to see than in the opening frame.
+/// Otherwise it is the opening frame, so that the still shown while the
+/// player starts is the picture playback begins on.
+fn video_still(path: &Path, thumbnail: bool) -> Result<Vec<u8>> {
+    let seeks: &[&str] = if thumbnail { &["1", "0"] } else { &["0"] };
+    for seek in seeks {
         let output = Command::new("ffmpeg")
             .args(["-v", "error", "-ss", seek, "-i"])
             .arg(path)
@@ -225,7 +230,7 @@ mod tests {
     use image::{ImageFormat, Rgb};
 
     fn spec(target: Option<(u32, u32)>) -> Spec {
-        Spec { target, transform: Transform::default(), background: 0 }
+        Spec { target, transform: Transform::default(), background: 0, thumbnail: false }
     }
 
     fn rgb(pixel: u32) -> (u32, u32, u32) {

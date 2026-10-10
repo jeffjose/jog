@@ -37,6 +37,8 @@ const SMOOTH_ALWAYS: usize = 12_000_000;
 const SHOW_PIXELS_AT: u32 = 4;
 const TOAST: Duration = Duration::from_millis(1500);
 const DEFAULT_SLIDE_DELAY: f64 = 3.0;
+/// How often a slideshow checks whether the video it is waiting on is over.
+const VIDEO_END_POLL: Duration = Duration::from_millis(200);
 /// Seconds that `<` and `>` move through a video.
 const SEEK_STEP: f64 = 5.0;
 /// How long after a seek the player's reported position cannot be trusted.
@@ -56,6 +58,7 @@ pub enum Event {
     Loaded(Job),
     Converted { created: Vec<PathBuf>, failed: usize, format: Format },
     Video(Signal),
+    Player(Result<Player, String>),
 }
 
 /// A file operation that `u` can take back.
@@ -79,6 +82,8 @@ struct Moved {
 struct Video {
     id: usize,
     showing: bool,
+    /// When the player was handed the file.
+    started: Instant,
     /// When the last seek was asked for and the time it was aiming at.
     seeking: Option<(Instant, f64)>,
 }
@@ -154,8 +159,8 @@ pub struct App {
     snapshot: Option<Snapshot>,
     /// Created the first time a video comes up.
     player: Option<Player>,
-    /// Set when the player could not be started, so it is not retried.
-    player_failed: bool,
+    /// Set once the player has been asked for, so that happens only once.
+    player_asked: bool,
     video: Option<Video>,
     toast: Option<(String, Instant)>,
     meta: Option<(usize, Meta)>,
@@ -374,7 +379,7 @@ impl App {
             help: false,
             snapshot: Snapshot::from_env(),
             player: None,
-            player_failed: false,
+            player_asked: false,
             video: None,
             toast: None,
             meta: None,
@@ -588,23 +593,42 @@ impl App {
         }
     }
 
-    fn start_video(&mut self, id: usize) {
-        if self.player.is_none() && !self.player_failed {
-            let proxy = self.proxy.clone();
-            // A scripted test run must not make any sound.
-            let silent = self.snapshot.is_some();
-            match Player::new(silent, move |signal| drop(proxy.send_event(Event::Video(signal)))) {
-                Ok(player) => self.player = Some(player),
-                Err(error) => {
-                    self.player_failed = true;
-                    eprintln!("jog: cannot play videos: {error}");
-                    self.toast(format!("Cannot play videos: {error}"));
-                }
+    /// Starts the player on another thread, once; `Event::Player` delivers
+    /// it. Loading libmpv and starting mpv takes long enough to notice.
+    fn warm_player(&mut self) {
+        if std::mem::replace(&mut self.player_asked, true) {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        // A scripted test run must not make any sound.
+        let silent = self.snapshot.is_some();
+        std::thread::spawn(move || {
+            let wake = proxy.clone();
+            let player = Player::new(silent, move |signal| drop(wake.send_event(Event::Video(signal))));
+            let _ = proxy.send_event(Event::Player(player));
+        });
+    }
+
+    fn player_ready(&mut self, player: Result<Player, String>) {
+        match player {
+            Ok(player) => {
+                self.player = Some(player);
+                // A video may already be waiting for it.
+                self.sync_video();
+            }
+            Err(error) => {
+                eprintln!("jog: cannot play videos: {error}");
+                self.toast(format!("Cannot play videos: {error}"));
             }
         }
+    }
+
+    fn start_video(&mut self, id: usize) {
+        self.warm_player();
         if let Some(player) = &self.player {
+            let started = Instant::now();
             player.play(&self.files[id]);
-            self.video = Some(Video { id, showing: false, seeking: None });
+            self.video = Some(Video { id, showing: false, started, seeking: None });
         }
     }
 
@@ -616,7 +640,19 @@ impl App {
         let Some(video) = &mut self.video else { return };
         for event in events {
             // The still stays up until the player has a frame to show.
-            video.showing = event == PlayerEvent::Showing;
+            let showing = event == PlayerEvent::Showing;
+            if showing && !video.showing && std::env::var_os("JOG_DEBUG").is_some() {
+                eprintln!("jog: {:>7.1?} video start {}", video.started.elapsed(), self.files[video.id].display());
+            }
+            video.showing = showing;
+        }
+        // The hidden window of a scripted run is never asked to redraw, and
+        // mpv stalls waiting for frames nobody takes. Take them here.
+        if self.snapshot.is_some() && matches!(signal, Signal::Frame) {
+            let (width, height): (u32, u32) = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
+            self.scene.resize(width as usize * height as usize, 0);
+            self.scene_key = None;
+            player.render(&mut self.scene, width, height);
         }
         if video.showing {
             self.redraw();
@@ -1756,6 +1792,11 @@ impl App {
             return self.snapshot_step(event_loop);
         }
         let Some(snapshot) = self.snapshot.take() else { return };
+        if let (Some(player), true) = (&self.player, std::env::var_os("JOG_DEBUG").is_some()) {
+            let count = |property| player.number(property).unwrap_or(0.0);
+            let (position, late, dropped) = (count("time-pos"), count("frame-drop-count"), count("vo-drop-frame-count"));
+            eprintln!("jog: video at {position:.1}s, {late} frames decoded late, {dropped} not shown");
+        }
         let window = self.window_size();
         let mut pixels = vec![0u32; window.0 as usize * window.1 as usize];
         self.settle_at = None;
@@ -2243,6 +2284,10 @@ impl ApplicationHandler<Event> for App {
         self.window = Some(window);
         self.update_monitor();
         self.refresh();
+        // Have the player ready before the first video is reached.
+        if self.files.iter().any(|file| files::is_video(file)) {
+            self.warm_player();
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
@@ -2256,6 +2301,7 @@ impl ApplicationHandler<Event> for App {
             Event::Loaded(_) => {}
             Event::Converted { created, failed, format } => self.converted(created, failed, format),
             Event::Video(signal) => self.video_signal(signal),
+            Event::Player(player) => self.player_ready(player),
         }
     }
 
@@ -2295,7 +2341,15 @@ impl ApplicationHandler<Event> for App {
             self.redraw();
         }
         if self.slide_at.is_some_and(|at| at <= now) {
-            self.advance_slideshow(event_loop);
+            // A video gets to play to its end, however short the delay; the
+            // slideshow moves on as soon as it has finished.
+            let playing = self.video.is_some()
+                && self.player.as_ref().is_some_and(|player| player.flag("eof-reached") != Some(true));
+            if playing {
+                self.slide_at = Some(now + VIDEO_END_POLL);
+            } else {
+                self.advance_slideshow(event_loop);
+            }
         }
         let snapshot_at = self.snapshot.as_ref().and_then(|snapshot| snapshot.at);
         if snapshot_at.is_some_and(|at| at <= now) {

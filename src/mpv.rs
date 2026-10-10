@@ -121,6 +121,10 @@ pub struct Player {
     _library: Library,
 }
 
+// SAFETY: mpv's client and render APIs may be called from any thread, as
+// long as it is one at a time, which `&self` on a non-`Sync` type ensures.
+unsafe impl Send for Player {}
+
 unsafe extern "C" fn on_events(context: *mut c_void) {
     // SAFETY: the context is the `Wake` that `Player` keeps boxed for as
     // long as mpv can call back.
@@ -168,7 +172,10 @@ impl Player {
                 ("idle", "yes"),
                 // Hold the last frame at the end instead of going blank.
                 ("keep-open", "yes"),
-                ("hwdec", "auto-copy"),
+                // Decoding on the CPU starts a file about twice as fast as
+                // setting up a GPU decoder for it, and frames are wanted in
+                // main memory anyway.
+                ("hwdec", "no"),
                 ("input-default-bindings", "no"),
                 ("osc", "no"),
                 ("terminal", "no"),
