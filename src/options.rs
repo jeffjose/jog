@@ -77,16 +77,15 @@ Keys:
   Home / End                 first / last        PgDn / PgUp   jump 5%
   z                          shuffle the list    { / }         previous / next directory
   + Up / - Down              zoom in / out       * 0 !         100%, fit, fill
-  /                          search: type to narrow the list, then Enter to go to
-                             the match, Tab to keep only the matches, Esc to cancel
-                             (^foo starts with, !foo without; Esc later clears)
-                             Right moves on to the buttons: Keep the matches,
-                             or Show all once a search has been kept.
-                             Also is:video is:image is:gif is:marked, and
-                             sizes such as >10mb or <1gb (b, kb, mb, gb)
+  / or Ctrl+K                find: type part of a name, Up / Down to pick among
+                             the matches, Enter to go to the one picked, Tab to
+                             show only the matches, Esc to cancel. Right moves
+                             on to the buttons: Show only the matches, or Show
+                             all once a search has been kept (Esc later, too).
+                             ^foo starts with, !foo without; also is:video
+                             is:image is:gif is:marked, and sizes such as
+                             >10mb or <1gb (b, kb, mb, gb)
   Ctrl+arrows, Alt+arrows    scroll, by a page   Z  small images: fit screen / actual size
-  Ctrl+K                     go to a file: type part of its name, Up / Down to
-                             pick among the matches, Enter to go
   S                          sort: name, newest, size, shuffle, reverse
   ( / )                      rotate              _ |           flip, mirror
   [ / ]                      slower / faster     \\             normal speed
