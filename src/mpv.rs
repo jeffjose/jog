@@ -54,6 +54,8 @@ struct Api {
     set_option_string: unsafe extern "C" fn(Handle, *const c_char, *const c_char) -> c_int,
     set_property_string: unsafe extern "C" fn(Handle, *const c_char, *const c_char) -> c_int,
     get_property: unsafe extern "C" fn(Handle, *const c_char, c_int, *mut c_void) -> c_int,
+    get_property_string: unsafe extern "C" fn(Handle, *const c_char) -> *mut c_char,
+    free: unsafe extern "C" fn(*mut c_void),
     command: unsafe extern "C" fn(Handle, *mut *const c_char) -> c_int,
     command_async: unsafe extern "C" fn(Handle, u64, *mut *const c_char) -> c_int,
     wait_event: unsafe extern "C" fn(Handle, c_double) -> *mut RawEvent,
@@ -80,6 +82,8 @@ impl Api {
             set_option_string: symbol!("set_option_string"),
             set_property_string: symbol!("set_property_string"),
             get_property: symbol!("get_property"),
+            get_property_string: symbol!("get_property_string"),
+            free: symbol!("free"),
             command: symbol!("command"),
             command_async: symbol!("command_async"),
             wait_event: symbol!("wait_event"),
@@ -289,6 +293,20 @@ impl Player {
         // SAFETY: as in `number`.
         let status = unsafe { (self.api.get_property)(self.handle, c_string(property).as_ptr(), FORMAT_FLAG, data) };
         (status >= 0).then_some(value != 0)
+    }
+
+    pub fn text(&self, property: &str) -> Option<String> {
+        // SAFETY: mpv returns NULL or a NUL-terminated string that is ours
+        // to free, which happens once it has been copied.
+        unsafe {
+            let value = (self.api.get_property_string)(self.handle, c_string(property).as_ptr());
+            if value.is_null() {
+                return None;
+            }
+            let text = CStr::from_ptr(value).to_string_lossy().into_owned();
+            (self.api.free)(value.cast());
+            Some(text)
+        }
     }
 
     /// Reads the events mpv has queued. Call after `Signal::Events`.

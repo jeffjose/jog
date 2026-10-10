@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -56,6 +56,9 @@ const SEEK_JUMP: f64 = 60.0;
 /// How long after a seek the player's reported position cannot be trusted.
 const SEEK_SETTLE: Duration = Duration::from_millis(500);
 
+/// How often the debug overlay asks the player for its figures.
+const VIDEO_STATS_EVERY: Duration = Duration::from_millis(250);
+
 const TEXT_COLOR: u32 = 0xEEEEEE;
 const DIM_TEXT_COLOR: u32 = 0x9A9A9A;
 const MENU_COLOR: u32 = 0x1E1E1E;
@@ -105,6 +108,72 @@ struct Video {
     started: Instant,
     /// When the last seek was asked for and the time it was aiming at.
     seeking: Option<(Instant, f64)>,
+    /// How long the player took to show its first frame.
+    start_took: Option<Duration>,
+    /// When the oldest seek not yet landed was asked for, and how long the
+    /// last one that did land took.
+    seek_asked: Option<Instant>,
+    seek_took: Option<Duration>,
+}
+
+/// The last time the image layer was scaled afresh.
+struct Scaled {
+    took: Duration,
+    smooth: bool,
+    from: (u32, u32),
+    to: (u32, u32),
+}
+
+/// The timings behind the debug overlay.
+struct Perf {
+    /// The file on view and when it was gone to.
+    id: Option<usize>,
+    arrived: Instant,
+    /// How long after that its picture was first on screen.
+    shown_in: Option<Duration>,
+    scaled: Option<Scaled>,
+    /// The last redraw: filling the buffer, then handing it to the display.
+    paint: Duration,
+    present: Duration,
+    /// When the redraws of the last second happened, for their rate.
+    paints: VecDeque<Instant>,
+    /// How long the player took to draw its last frame.
+    render: Duration,
+    /// The player's own figures, and when they were read.
+    video_lines: Option<(Instant, Vec<String>)>,
+}
+
+impl Perf {
+    fn new() -> Perf {
+        Perf {
+            id: None,
+            arrived: Instant::now(),
+            shown_in: None,
+            scaled: None,
+            paint: Duration::ZERO,
+            present: Duration::ZERO,
+            paints: VecDeque::new(),
+            render: Duration::ZERO,
+            video_lines: None,
+        }
+    }
+
+    /// Redraws per second over the last second.
+    fn rate(&self) -> Option<f64> {
+        let (first, last) = (self.paints.front()?, self.paints.back()?);
+        let span = last.duration_since(*first).as_secs_f64();
+        (span > 0.0).then(|| (self.paints.len() - 1) as f64 / span)
+    }
+}
+
+/// A duration as the debug overlay writes it.
+fn ms(duration: Duration) -> String {
+    let seconds = duration.as_secs_f64();
+    if seconds < 1.0 {
+        format!("{:.1}ms", seconds * 1000.0)
+    } else {
+        format!("{seconds:.2}s")
+    }
 }
 
 /// The seek bar's track: its left end, length and vertical centre. `unit`
@@ -284,6 +353,8 @@ pub struct App {
     scene_key: Option<SceneKey>,
 
     show_info: bool,
+    show_debug: bool,
+    perf: Perf,
     show_exif: bool,
     show_actions: bool,
     pointer_visible: bool,
@@ -540,6 +611,8 @@ impl App {
             scene: Vec::new(),
             scene_key: None,
             show_info: options.draw_info,
+            show_debug: false,
+            perf: Perf::new(),
             show_exif: options.draw_exif,
             show_actions: options.draw_actions,
             pointer_visible: !options.hide_pointer,
@@ -718,6 +791,11 @@ impl App {
     /// Syncs the title and displayed frame with the current image.
     fn refresh(&mut self) {
         let id = self.id();
+        if self.perf.id != Some(id) {
+            self.perf.id = Some(id);
+            self.perf.arrived = Instant::now();
+            self.perf.shown_in = None;
+        }
         match self.loader.fitted(id) {
             Some(Ok(frame)) => {
                 // A different image, or a redone frame of this one, starts
@@ -878,6 +956,7 @@ impl App {
         player.command_later(&[b"seek", target.to_string().as_bytes(), how]);
         if let Some(video) = &mut self.video {
             video.seeking = Some((Instant::now(), target));
+            video.seek_asked.get_or_insert_with(Instant::now);
         }
         self.redraw();
     }
@@ -952,7 +1031,8 @@ impl App {
             player.play(&self.files[id], from);
             // Until the player reports for itself, this is where it is.
             let seeking = from.map(|seconds| (started, seconds));
-            self.video = Some(Video { id, showing: false, started, seeking });
+            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None });
+            self.perf.video_lines = None;
             self.apply_video_view();
         }
         if let Some(seconds) = from {
@@ -984,8 +1064,17 @@ impl App {
         for event in events {
             // The still stays up until the player has a frame to show.
             let showing = event == PlayerEvent::Showing;
-            if showing && !video.showing && self.options.debug {
-                eprintln!("jog: {:>7.1?} video start {}", video.started.elapsed(), self.files[video.id].display());
+            if showing && !video.showing {
+                let took = video.started.elapsed();
+                video.start_took.get_or_insert(took);
+                if self.options.debug {
+                    eprintln!("jog: {took:>7.1?} video start {}", self.files[video.id].display());
+                }
+            } else if showing {
+                // Every seek ends with the player announcing frames again.
+                if let Some(asked) = video.seek_asked.take() {
+                    video.seek_took = Some(asked.elapsed());
+                }
             }
             video.showing = showing;
         }
@@ -1058,6 +1147,7 @@ impl App {
                 };
                 let length = player.number("duration").unwrap_or(0.0);
                 video.seeking = Some((Instant::now(), (from + seconds).clamp(0.0, length)));
+                video.seek_asked.get_or_insert_with(Instant::now);
             }
             // Both leave the video paused on the frame they land on.
             VideoAction::Frame(true) => player.command(&[b"frame-step"]),
@@ -1385,6 +1475,7 @@ impl App {
                 self.redraw();
             }
             ToggleInfo => self.show_info = !self.show_info,
+            ToggleDebug => self.show_debug = !self.show_debug,
             ToggleExif => self.show_exif = !self.show_exif,
             ToggleActions => self.show_actions = !self.show_actions,
             TogglePointer => {
@@ -1495,6 +1586,7 @@ impl App {
             ToggleFullscreen => self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
             ToggleFilmstrip => self.strip_pinned,
             ToggleInfo => self.show_info,
+            ToggleDebug => self.show_debug,
             ToggleExif => self.show_exif,
             ToggleSlideshow => self.slide_at.is_some(),
             _ => false,
@@ -2527,13 +2619,37 @@ impl App {
         if let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
             if surface.resize(width, height).is_ok() {
                 if let Ok(mut buffer) = surface.buffer_mut() {
+                    let started = Instant::now();
                     self.paint(&mut buffer, (size.width, size.height));
+                    let painted = started.elapsed();
                     window.pre_present_notify();
                     let _ = buffer.present();
+                    self.painted(started, painted);
                 }
             }
         }
         self.surface = Some(surface);
+    }
+
+    /// Notes how long a redraw took, and whether it was the first to show
+    /// the file on view.
+    fn painted(&mut self, started: Instant, painted: Duration) {
+        let now = Instant::now();
+        let perf = &mut self.perf;
+        perf.paint = painted;
+        perf.present = now.duration_since(started).saturating_sub(painted);
+        perf.paints.push_back(now);
+        while perf.paints.front().is_some_and(|at| now.duration_since(*at) > Duration::from_secs(1)) {
+            perf.paints.pop_front();
+        }
+        let up = self.grid.is_none() && self.shown.as_ref().is_some_and(|(id, _)| *id == self.id());
+        if up && self.perf.shown_in.is_none() {
+            self.perf.shown_in = Some(now.duration_since(self.perf.arrived));
+            // The overlay was drawn before these figures were known.
+            if self.show_debug {
+                self.redraw();
+            }
+        }
     }
 
     /// The frame to draw from: the full-resolution one when it is loaded.
@@ -2546,7 +2662,9 @@ impl App {
     fn paint(&mut self, pixels: &mut [u32], window: (u32, u32)) {
         let playing = self.grid.is_none() && self.video.as_ref().is_some_and(|video| video.showing);
         let player = self.player.as_ref().filter(|_| playing);
+        let started = Instant::now();
         if player.is_some_and(|player| player.render(pixels, window.0, window.1)) {
+            self.perf.render = started.elapsed();
             return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
         }
         let source = if self.grid.is_some() { None } else { self.source() };
@@ -2579,10 +2697,13 @@ impl App {
                     self.scene.resize(pixels.len(), 0);
                     let background = self.options.background;
                     render::draw_image(&mut self.scene, window, &key.frame, picture, layout, smooth, background);
+                    let took = started.elapsed();
                     if self.options.debug {
                         let how = if smooth { "smooth" } else { "nearest" };
-                        eprintln!("jog: {:>7.1?} draw  {how} {}x{} -> {}x{}", started.elapsed(), key.frame.width, key.frame.height, layout.width, layout.height);
+                        eprintln!("jog: {took:>7.1?} draw  {how} {}x{} -> {}x{}", key.frame.width, key.frame.height, layout.width, layout.height);
                     }
+                    let (from, to) = ((key.frame.width, key.frame.height), (layout.width, layout.height));
+                    self.perf.scaled = Some(Scaled { took, smooth, from, to });
                     self.scene_key = Some(key);
                 }
                 pixels.copy_from_slice(&self.scene);
@@ -2624,6 +2745,9 @@ impl App {
             if let Some((position, length)) = self.video_time() {
                 top_left.push(format!("{} / {}", clock(position), clock(length)));
             }
+        }
+        if viewing && self.show_debug {
+            top_left.extend(self.debug_lines());
         }
         // The seek bar: a rounded track lifted off the bottom edge, with a
         // handle and the times at either end. It is out of the way during
@@ -2843,6 +2967,102 @@ impl App {
             line.push_str(&format!("   {size}"));
         }
         line
+    }
+
+    /// The debug overlay: what the player reports while a video is showing,
+    /// otherwise what decoding and drawing the image cost.
+    fn debug_lines(&mut self) -> Vec<String> {
+        let perf = &self.perf;
+        let redraw = format!("paint {}   present {}", ms(perf.paint), ms(perf.present));
+        if self.video.as_ref().is_some_and(|video| video.showing) {
+            // Asking the player on every frame would get in its way, and
+            // the figures would change too fast to read.
+            let fresh = perf.video_lines.as_ref().is_some_and(|(at, _)| at.elapsed() < VIDEO_STATS_EVERY);
+            if !fresh {
+                let lines = self.video_debug_lines();
+                self.perf.video_lines = Some((Instant::now(), lines));
+            }
+            let perf = &self.perf;
+            let mut lines = perf.video_lines.as_ref().map(|(_, lines)| lines.clone()).unwrap_or_default();
+            let rate = perf.rate().map(|rate| format!("   {rate:.1} fps drawn")).unwrap_or_default();
+            // The player holds a frame back until it is due, so only a
+            // paused video shows what drawing one costs by itself.
+            let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
+            let render = if paused { "render" } else { "render+wait" };
+            lines.insert(1.min(lines.len()), format!("{render} {}   {redraw}{rate}", ms(perf.render)));
+            return lines;
+        }
+
+        let stats = self.loader.stats(self.id());
+        let mut lines = Vec::new();
+        if let (Some(made), Some(native)) = (stats.fitted, self.native()) {
+            let megapixels = f64::from(native.0) * f64::from(native.1) / 1e6;
+            let mut line = if made.how.is_empty() {
+                let total = ms(made.read + made.fit);
+                let rate = megapixels / made.read.as_secs_f64().max(1e-6);
+                format!("decode {total} (read {} + fit {})   {megapixels:.1} MP   {rate:.0} MP/s", ms(made.read), ms(made.fit))
+            } else {
+                format!("decode {} ({})   {megapixels:.1} MP", ms(made.fit), made.how)
+            };
+            // Decoded ahead as a neighbour, or only once it was gone to.
+            line.push_str(if made.at <= perf.arrived { "   prefetched" } else { "   on demand" });
+            if let Some(full) = stats.full {
+                let how = if full.how.is_empty() { String::new() } else { format!(" ({})", full.how) };
+                line.push_str(&format!("   full-res {}{how}", ms(full.read + full.fit)));
+            }
+            lines.push(line);
+        }
+        if let Some(scaled) = &perf.scaled {
+            let how = if scaled.smooth { "smooth" } else { "nearest" };
+            let (from, to) = (scaled.from, scaled.to);
+            lines.push(format!("draw {} {how} {}x{} -> {}x{}", ms(scaled.took), from.0, from.1, to.0, to.1));
+        }
+        let shown = perf.shown_in.map(|took| format!("   shown in {}", ms(took))).unwrap_or_default();
+        lines.push(format!("{redraw}{shown}"));
+        let kept = |(count, bytes): (usize, usize)| format!("{count} ({})", meta::human_size(bytes as u64));
+        let (fitted, thumbs) = (kept(stats.fitted_kept), kept(stats.thumbs_kept));
+        lines.push(format!("in memory: {fitted} frames   {thumbs} thumbnails   {} decoding", stats.busy));
+        lines
+    }
+
+    /// What the player says about the video: the file, then how playback
+    /// is keeping up.
+    fn video_debug_lines(&self) -> Vec<String> {
+        let (Some(player), Some(video)) = (&self.player, &self.video) else { return Vec::new() };
+        let number = |property| player.number(property);
+        let mut file = Vec::new();
+        if let Some(took) = video.start_took {
+            file.push(format!("start {}", ms(took)));
+        }
+        let size = number("width").zip(number("height")).map(|(w, h)| format!(" {w:.0}x{h:.0}"));
+        let codec = player.text("video-format").unwrap_or_default();
+        let pixels = player.text("video-params/pixelformat").map(|format| format!(" {format}"));
+        file.push(format!("{codec}{}{}", size.unwrap_or_default(), pixels.unwrap_or_default()));
+        if let Some(rate) = number("container-fps") {
+            file.push(format!("{rate:.2} fps"));
+        }
+        if let Some(bits) = number("video-bitrate").filter(|bits| *bits > 0.0) {
+            file.push(format!("{:.1} Mbps", bits / 1e6));
+        }
+        match player.text("hwdec-current").as_deref() {
+            None | Some("no" | "") => file.push("CPU decode".to_string()),
+            Some(decoder) => file.push(format!("{decoder} decode")),
+        }
+
+        let mut playback = Vec::new();
+        let count = |property| number(property).unwrap_or(0.0);
+        playback.push(format!("late {:.0}", count("frame-drop-count")));
+        playback.push(format!("dropped {:.0}", count("vo-drop-frame-count")));
+        if let Some(sync) = number("avsync") {
+            playback.push(format!("A-V {:+.0}ms", sync * 1000.0));
+        }
+        if let Some(ahead) = number("demuxer-cache-duration") {
+            playback.push(format!("read ahead {ahead:.1}s"));
+        }
+        if let Some(took) = video.seek_took {
+            playback.push(format!("seek {}", ms(took)));
+        }
+        vec![file.join("   "), playback.join("   ")]
     }
 
     /// Details of the current file, or `None` while they are being read.
