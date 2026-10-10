@@ -176,8 +176,12 @@ impl State {
 
         let fitted = self.fitted.get(&id).filter(|slot| slot.transform == transform);
         let fitted = fitted.and_then(|slot| slot.frame.as_ref().ok()).cloned();
+        // A video's fitted frame is its opening one, which is often black;
+        // its thumbnail is taken from further in instead.
+        let own_still = matches!(job, Job::Thumb(_)) && files::is_video(&self.files[id]);
         let work = match (job, fitted, self.source_for(id)) {
-            (Job::Thumb(_), Some(frame), _) => Work::FromFrame(frame),
+            (Job::Thumb(_), Some(frame), _) if !own_still => Work::FromFrame(frame),
+            (_, _, Some(source)) if !own_still => Work::FromSource(source),
             (_, _, Some(source)) => Work::FromSource(source),
             _ => Work::Decode(self.files[id].clone()),
         };

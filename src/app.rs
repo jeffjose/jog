@@ -57,9 +57,9 @@ const PREVIEW_TIMEOUT: Duration = Duration::from_millis(400);
 /// How soon a second click must follow the first to make a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// How long each frame stays up when the grid runs through a video.
-const STORY_STEP: Duration = Duration::from_millis(500);
+const STORY_STEP: Duration = Duration::from_millis(125);
 /// How many videos' frames are kept at once.
-const STORIES_KEPT: usize = 8;
+const STORIES_KEPT: usize = 4;
 /// How often the directories are listed again while watching.
 const WATCH_EVERY: Duration = Duration::from_secs(1);
 /// The playback speeds that `[` and `]` step through.
@@ -396,7 +396,7 @@ pub struct App {
     /// it: those fetched so far for each of the last few videos looked at,
     /// oldest first in `story_order`.
     stories: Option<Stories>,
-    story_frames: HashMap<usize, Vec<Option<Arc<Frame>>>>,
+    story_frames: HashMap<usize, Vec<Option<Vec<Arc<Frame>>>>>,
     story_order: VecDeque<usize>,
     /// The video whose frames are being fetched.
     story_asked: Option<usize>,
@@ -873,7 +873,7 @@ impl App {
             }
         }
         // The go-to box shows a small picture beside each match.
-        if self.grid.is_none() {
+        {
             let shown = self.palette_shown();
             thumbs.retain(|id| !shown.contains(id));
             thumbs.splice(0..0, shown);
@@ -2839,6 +2839,11 @@ impl App {
     fn finish_palette(&mut self) {
         let Some(palette) = self.palette.take() else { return };
         if let Some(&pos) = palette.matches.get(palette.selected) {
+            // From the grid, the file is opened as Enter on its cell would.
+            if let Some(grid) = &mut self.grid {
+                grid.cursor = pos;
+                return self.open_from_grid();
+            }
             self.go_to(pos, pos > self.pos);
         }
         self.redraw();
@@ -2854,7 +2859,7 @@ impl App {
         let (head, row_height) = (line + 2 * px as i32, line * 2);
         // Above it there is room for a row of frames from the video picked
         // out, as wide as the window allows.
-        let frame_width = (width as i32 * 9 / 10 / story::FRAMES as i32).min(px as i32 * 14);
+        let frame_width = (width as i32 * 9 / 10 / story::SEGMENTS as i32).min(px as i32 * 14);
         let frame = (frame_width, frame_width * 9 / 16);
         let top = height as i32 / 16 + frame.1 + px as i32;
         let fit = ((height as i32 * 5 / 6 - top - head) / row_height).clamp(1, 12) as usize;
@@ -2898,7 +2903,8 @@ impl App {
             canvas.outline(strip_left, strip_top, strip_width, cell_h + 2 * gap, 1, MENU_EDGE_COLOR);
             for (index, frame) in frames.iter().enumerate() {
                 let (cell_left, cell_top) = (strip_left + gap + index as i32 * (cell_w + gap), strip_top + gap);
-                match frame {
+                // One frame stands for each stretch: the middle one.
+                match frame.as_ref().and_then(|segment| segment.get(segment.len() / 2)) {
                     Some(frame) => {
                         let (w, h) = fit_size((frame.width, frame.height), (cell_w as u32, cell_h as u32), true);
                         let (w, h) = (w as i32, h as i32);
@@ -2985,6 +2991,10 @@ impl App {
             Key::Named(NamedKey::ArrowUp) => return self.step_cursor(0, -1),
             Key::Named(NamedKey::ArrowDown) => return self.step_cursor(0, 1),
             _ => {}
+        }
+        // Ctrl+K is the one key here that a modifier changes the meaning of.
+        if commands::for_key(key.clone(), self.modifiers, false) == Some(Command::Palette) {
+            return self.execute(Command::Palette, event_loop);
         }
         match commands::for_key(key, ModifiersState::empty(), false) {
             Some(Command::Next) => self.step_cursor(1, 0),
@@ -4031,10 +4041,10 @@ impl App {
                 let oldest = self.story_order.pop_front();
                 oldest.map(|oldest| self.story_frames.remove(&oldest));
             }
-            self.story_frames.insert(id, vec![None; story::FRAMES]);
+            self.story_frames.insert(id, vec![None; story::SEGMENTS]);
         }
         let frames = &self.story_frames[&id];
-        let missing: Vec<usize> = (0..story::FRAMES).filter(|index| frames[*index].is_none()).collect();
+        let missing: Vec<usize> = (0..story::SEGMENTS).filter(|index| frames[*index].is_none()).collect();
         if !missing.is_empty() && self.story_asked != Some(id) {
             self.story_asked = Some(id);
             let proxy = self.proxy.clone();
@@ -4042,7 +4052,7 @@ impl App {
             stories.want(id, self.files[id].clone(), missing);
         }
         // The grid runs through them; the go-to box lays them side by side.
-        let several = self.story_frames[&id].iter().flatten().count() > 1;
+        let several = self.story_frames[&id].iter().flatten().flatten().count() > 1;
         if self.palette.is_none() && several && self.story_due.is_none() {
             self.story_due = Some(Instant::now() + STORY_STEP);
         }
@@ -4053,7 +4063,7 @@ impl App {
         if self.story_shown != Some(id) || self.palette.is_some() {
             return None;
         }
-        let fetched: Vec<&Arc<Frame>> = self.story_frames.get(&id)?.iter().flatten().collect();
+        let fetched: Vec<&Arc<Frame>> = self.story_frames.get(&id)?.iter().flatten().flatten().collect();
         (!fetched.is_empty()).then(|| fetched[self.story_tick % fetched.len()].clone())
     }
 
@@ -4418,9 +4428,9 @@ impl ApplicationHandler<Event> for App {
                 self.redraw();
             }
             Event::Story(Found::Length(id, seconds)) => drop(self.durations.insert(id, seconds)),
-            Event::Story(Found::Frame(id, index, frame)) => {
+            Event::Story(Found::Segment(id, index, segment)) => {
                 if let Some(frames) = self.story_frames.get_mut(&id) {
-                    frames[index] = Some(Arc::new(frame));
+                    frames[index] = Some(segment.into_iter().map(Arc::new).collect());
                 }
                 if self.story_subject() == Some(id) {
                     self.redraw();

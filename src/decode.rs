@@ -10,6 +10,7 @@ use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageReader, RgbImage,
 use memchr::memmem;
 
 use crate::files;
+use crate::story;
 use crate::frame::{fit_size, Animation, Frame, Transform};
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
@@ -196,11 +197,45 @@ fn video_still(path: &Path, thumbnail: bool) -> Result<Vec<u8>> {
                 .map_err(|error| format!("cannot run ffmpeg for a video still: {error}"))?;
             // Nothing comes out when the video is shorter than the seek.
             if !output.stdout.is_empty() {
-                return Ok(output.stdout);
+                // A thumbnail of the black a video fades in from says
+                // nothing about it; one from further in does.
+                let still = output.stdout;
+                let further = if thumbnail && flat_bmp(&still) { later_still(path) } else { None };
+                return Ok(further.unwrap_or(still));
             }
         }
     }
     Err("ffmpeg could not read a frame from this video".into())
+}
+
+/// The first frame that is not one flat colour among those a twentieth, a
+/// sixth, a third and half of the way through a video.
+fn later_still(path: &Path) -> Option<Vec<u8>> {
+    let length = story::length(path)?;
+    [0.05, 0.15, 0.33, 0.5].into_iter().find_map(|part| {
+        let output = Command::new("ffmpeg")
+            .args(["-v", "error", "-threads", "1", "-noaccurate_seek", "-ss", &format!("{:.3}", length * part), "-i"])
+            .arg(path)
+            .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "bmp", "-"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        (!output.stdout.is_empty() && !flat_bmp(&output.stdout)).then_some(output.stdout)
+    })
+}
+
+/// Whether an uncompressed BMP, as ffmpeg writes it, is all but one
+/// colour. Reads a scattering of pixels straight out of the file.
+fn flat_bmp(bytes: &[u8]) -> bool {
+    let field = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+    let (Some(start), Some(depth)) = (field(10), field(28).map(|depth| (depth & 0xFFFF) / 8)) else { return false };
+    let Some(data) = bytes.get(start..).filter(|_| depth >= 3) else { return false };
+    let step = (data.len() / depth / 2000).max(1) * depth;
+    let pixels: Vec<u32> = (data.chunks_exact(depth).step_by(step / depth))
+        .map(|p| u32::from(p[2]) << 16 | u32::from(p[1]) << 8 | u32::from(p[0]))
+        .collect();
+    story::is_flat(&pixels)
 }
 
 /// An image in a format ffmpeg decodes and the built-in decoders do not,
