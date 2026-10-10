@@ -172,24 +172,28 @@ fn finish(image: DynamicImage, orientation: Orientation, spec: Spec) -> Result<F
     use Orientation::*;
     let exif_swaps = matches!(orientation, Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH);
 
-    let mut rgb = flatten(image, spec.background);
-    let (w, h) = rgb.dimensions();
-    if let Some(target) = spec.target {
-        // Rotating is cheapest after shrinking, so scale into the pre-rotation box.
-        let swaps = exif_swaps ^ spec.transform.swaps_axes();
-        let bounds = if swaps { (target.1, target.0) } else { target };
-        let size = fit_size((w, h), bounds, false);
-        if size != (w, h) {
-            rgb = resize(&rgb, size)?;
+    let (w, h) = (image.width(), image.height());
+    let size = match spec.target {
+        Some(target) => {
+            // Rotating is cheapest after shrinking, so scale into the pre-rotation box.
+            let swaps = exif_swaps ^ spec.transform.swaps_axes();
+            let bounds = if swaps { (target.1, target.0) } else { target };
+            fit_size((w, h), bounds, false)
         }
-    }
+        None => (w, h),
+    };
 
+    let mut rgb = flatten(image, spec.background);
+    if size != (w, h) {
+        rgb = resize(&rgb, size)?;
+    }
     let mut oriented = DynamicImage::ImageRgb8(rgb);
     oriented.apply_orientation(orientation);
     let rgb = oriented.into_rgb8();
 
     let pixels = rgb
-        .pixels()
+        .as_raw()
+        .chunks_exact(3)
         .map(|p| u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2]))
         .collect();
     let native = if exif_swaps { (h, w) } else { (w, h) };
@@ -197,20 +201,33 @@ fn finish(image: DynamicImage, orientation: Orientation, spec: Spec) -> Result<F
     Ok(if spec.transform.is_identity() { frame } else { frame.transformed(spec.transform) })
 }
 
+/// One RGBA pixel composited over an opaque colour.
+fn blend_over(px: &[u8], bg: [u8; 3]) -> [u8; 3] {
+    let alpha = u32::from(px[3]);
+    let mix = |c: u8, back: u8| {
+        let blended = u32::from(c) * alpha + u32::from(back) * (255 - alpha) + 128;
+        // Rounds `blended / 255` exactly for every value it can take.
+        ((blended + (blended >> 8)) >> 8) as u8
+    };
+    [mix(px[0], bg[0]), mix(px[1], bg[1]), mix(px[2], bg[2])]
+}
+
 /// Converts to 8-bit RGB, compositing any transparency over `background`.
+/// Images with an alpha channel are very often opaque throughout, in which
+/// case the channel is simply dropped.
 pub fn flatten(image: DynamicImage, background: u32) -> RgbImage {
     if !image.color().has_alpha() {
         return image.into_rgb8();
     }
-    let bg = [(background >> 16) as u8, (background >> 8) as u8, background as u8];
     let rgba = image.into_rgba8();
-    let mut rgb = Vec::with_capacity(rgba.as_raw().len() / 4 * 3);
-    for px in rgba.as_raw().chunks_exact(4) {
-        let alpha = u32::from(px[3]);
-        for c in 0..3 {
-            let blended = u32::from(px[c]) * alpha + u32::from(bg[c]) * (255 - alpha);
-            rgb.push(((blended + 127) / 255) as u8);
-        }
+    let raw = rgba.as_raw();
+    let mut rgb = vec![0u8; raw.len() / 4 * 3];
+    let pairs = raw.chunks_exact(4).zip(rgb.chunks_exact_mut(3));
+    if raw.chunks_exact(4).all(|px| px[3] == 255) {
+        pairs.for_each(|(px, out)| out.copy_from_slice(&px[..3]));
+    } else {
+        let bg = [(background >> 16) as u8, (background >> 8) as u8, background as u8];
+        pairs.for_each(|(px, out)| out.copy_from_slice(&blend_over(px, bg)));
     }
     RgbImage::from_raw(rgba.width(), rgba.height(), rgb).expect("buffer matches dimensions")
 }
@@ -218,8 +235,7 @@ pub fn flatten(image: DynamicImage, background: u32) -> RgbImage {
 fn resize(src: &RgbImage, (width, height): (u32, u32)) -> Result<RgbImage> {
     let view = fir::images::ImageRef::new(src.width(), src.height(), src.as_raw(), fir::PixelType::U8x3)?;
     let mut dst = fir::images::Image::new(width, height, fir::PixelType::U8x3);
-    let options = fir::ResizeOptions::new()
-        .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Lanczos3));
+    let options = fir::ResizeOptions::new().resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Lanczos3));
     fir::Resizer::new().resize(&view, &mut dst, &options)?;
     Ok(RgbImage::from_raw(width, height, dst.into_vec()).expect("buffer matches dimensions"))
 }
@@ -290,6 +306,19 @@ mod tests {
         let spec = Spec { transform: Transform::CW, ..spec(Some((100, 100))) };
         let frame = finish(image, Orientation::NoTransforms, spec).unwrap();
         assert_eq!((frame.width, frame.height, frame.native), (50, 100, (200, 400)));
+    }
+
+    #[test]
+    fn blending_rounds_like_a_division() {
+        for alpha in 0..=255u32 {
+            for c in (0..=255u8).step_by(5) {
+                for back in (0..=255u8).step_by(7) {
+                    let exact = (f64::from(c) * f64::from(alpha) + f64::from(back) * f64::from(255 - alpha)) / 255.0;
+                    let got = blend_over(&[c, c, c, alpha as u8], [back; 3])[0];
+                    assert_eq!(got, exact.round() as u8, "c={c} alpha={alpha} back={back}");
+                }
+            }
+        }
     }
 
     #[test]
