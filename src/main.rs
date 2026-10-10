@@ -66,7 +66,11 @@ fn main() -> ExitCode {
         let _ = loaded.send_event(Event::Loaded(job));
     });
 
+    let watch = options.watch;
     let mut app = App::new(options, files, playlist.start, loader, proxy);
+    if watch {
+        app.set_watch(true);
+    }
     let result = event_loop.run_app(&mut app);
     app.remember_position();
     app.print_marked();

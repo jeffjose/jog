@@ -34,6 +34,8 @@ File list:
   -z, --randomize            shuffle the list
       --start-at FILE        start at this file
   -f, --filelist FILE        read paths from FILE, one per line
+      --watch                add files as they appear in the directories, and
+                             drop those that go (W turns it on and off)
 
 Slideshow and actions:
   -D, --slideshow-delay SEC  advance automatically
@@ -91,7 +93,9 @@ Keys:
   x                          mark / unmark       c / C         copy file name / full path
   v / m                      copy / move marked images (or the current one) to -o DIR
   u                          undo copy, move, rename or convert
-  F2                         rename              r F5          reload
+  F2                         rename              r F5          refresh: look for
+                             new and deleted files, and read this one again
+  W                          watch: refresh by itself as files come and go
   s save copy  L save file list (marked ones if any)  w size window to image
   Delete                     remove from list    Ctrl+Delete   move to trash
   Enter, 1-9                 run action          q Esc         quit
@@ -140,6 +144,7 @@ pub struct Options {
     pub print_marked: bool,
     pub debug: bool,
     pub verbose: bool,
+    pub watch: bool,
     /// Whether videos pick up where they were left.
     pub resume: bool,
 }
@@ -192,7 +197,7 @@ fn is_switch(name: &str) -> bool {
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
         "cycle-once", "autoplay", "no-autoplay", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
-        "debug", "verbose", "resume", "no-resume",
+        "debug", "verbose", "watch", "resume", "no-resume",
     ];
     switches.contains(&name)
 }
@@ -231,6 +236,7 @@ fn parse_with(
         print_marked: false,
         debug: std::env::var_os("JOG_DEBUG").is_some(),
         verbose: false,
+        watch: false,
         resume: true,
     };
     let mut fullscreen = None;
@@ -345,6 +351,7 @@ fn apply(
         "print-marked" => options.print_marked = true,
         "debug" => options.debug = true,
         "verbose" => options.verbose = true,
+        "watch" => options.watch = true,
         "resume" => options.resume = true,
         "no-resume" => options.resume = false,
         "action" => options.actions[0] = Some(value()?),

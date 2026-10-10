@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{self, AtomicBool};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -53,6 +54,8 @@ const RESUME_MARGIN: f64 = 10.0;
 const PREVIEW_TIMEOUT: Duration = Duration::from_millis(400);
 /// How soon a second click must follow the first to make a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// How often the directories are listed again while watching.
+const WATCH_EVERY: Duration = Duration::from_secs(1);
 /// The playback speeds that `[` and `]` step through.
 const SPEEDS: [f64; 9] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
 /// Seconds that Page Up and Page Down move through a video.
@@ -85,6 +88,8 @@ pub enum Event {
     Meta(usize, Meta),
     /// The font, loaded on another thread while the first image decodes.
     Font(Text),
+    /// The files in the directories being watched, after a change.
+    Listed(Vec<PathBuf>),
 }
 
 /// A file operation that `u` can take back.
@@ -340,6 +345,10 @@ pub struct App {
     /// whether it runs backwards.
     sort: Option<Sort>,
     reversed: bool,
+    shuffled: bool,
+    /// Set while the directories are watched; clearing it stops the thread
+    /// that does the watching.
+    watch: Option<Arc<AtomicBool>>,
     /// File sizes looked up for searches such as `>10mb`.
     sizes: HashMap<usize, Option<u64>>,
     /// Where videos were left, read the first time one is played.
@@ -619,6 +628,8 @@ impl App {
             filter: None,
             sort: options.listing.sort.filter(|_| !options.listing.randomize),
             reversed: options.listing.reverse,
+            shuffled: options.listing.randomize,
+            watch: None,
             sizes: HashMap::new(),
             positions: None,
             confirm: None,
@@ -1611,8 +1622,11 @@ impl App {
                 self.loader.invalidate(self.id());
                 self.meta = None;
                 self.meta_asked = None;
+                let listed = files::relist(&self.options.paths, &self.options.listing);
+                self.take_listing(listed, false);
                 self.request();
             }
+            ToggleWatch => self.set_watch(self.watch.is_none()),
             Remove => self.remove_current(event_loop),
             Trash => self.trash(event_loop),
             Save => {
@@ -1720,6 +1734,7 @@ impl App {
             ToggleFilmstrip => self.strip_pinned,
             ToggleInfo => self.show_info,
             ToggleDebug => self.show_debug,
+            ToggleWatch => self.watch.is_some(),
             SortBy(sort) => self.sort == Some(sort),
             ReverseOrder => self.reversed,
             ToggleVerbose => self.options.verbose,
@@ -2488,7 +2503,7 @@ impl App {
 
     /// Shuffles the viewing order. The image being viewed stays current.
     fn shuffle(&mut self) {
-        (self.sort, self.reversed) = (None, false);
+        (self.sort, self.reversed, self.shuffled) = (None, false, true);
         let mut rng = std::mem::replace(&mut self.rng, Rng::from_clock());
         self.reorder(|ids, _| rng.shuffle(ids));
         self.rng = rng;
@@ -2514,8 +2529,169 @@ impl App {
         self.redraw();
     }
 
+    // ---- Refresh and watch ---------------------------------------------
+
+    /// Starts or stops watching the directories. A thread lists them once
+    /// a second and reports when what it finds has changed.
+    pub fn set_watch(&mut self, on: bool) {
+        if let Some(watching) = self.watch.take() {
+            watching.store(false, atomic::Ordering::Relaxed);
+        }
+        if on {
+            let watching = Arc::new(AtomicBool::new(true));
+            self.watch = Some(watching.clone());
+            let (paths, proxy) = (self.options.paths.clone(), self.proxy.clone());
+            let listing = files::Listing {
+                recursive: self.options.listing.recursive,
+                filelist: self.options.listing.filelist.clone(),
+                ..files::Listing::default()
+            };
+            std::thread::spawn(move || {
+                let mut known = files::relist(&paths, &listing);
+                while watching.load(atomic::Ordering::Relaxed) {
+                    std::thread::sleep(WATCH_EVERY);
+                    let listed = files::relist(&paths, &listing);
+                    if listed != known && watching.load(atomic::Ordering::Relaxed) {
+                        known.clone_from(&listed);
+                        if proxy.send_event(Event::Listed(listed)).is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+            // Whatever changed before the watching began.
+            let listed = files::relist(&self.options.paths, &self.options.listing);
+            self.take_listing(listed, true);
+        }
+        self.toast(if on { "Watching for new files" } else { "No longer watching" });
+    }
+
+    /// Brings the list up to date with `listed`, the files now in the
+    /// directories: those not seen before join it where the order puts
+    /// them, and those no longer on disk leave it. Marks, the place in the
+    /// list and a kept search all stay. When watching, a file arriving
+    /// just past the end being viewed is gone to.
+    fn take_listing(&mut self, listed: Vec<PathBuf>, watching: bool) {
+        // Not under an open search box, whose own lists would go stale.
+        if self.search.is_some() {
+            return;
+        }
+        let seen: HashSet<&Path> = self.files.iter().map(PathBuf::as_path).collect();
+        let fresh: Vec<PathBuf> = listed.iter().filter(|path| !seen.contains(path.as_path())).cloned().collect();
+        let exists = |id: &usize| self.files[*id].exists();
+        let total = self.filter.as_ref().map_or(&self.list, |(_, all)| all);
+        let gone: HashSet<usize> = total.iter().copied().filter(|id| !exists(id)).collect();
+        // With every file gone there would be nothing to show: leave them.
+        let gone = if gone.len() == total.len() && fresh.is_empty() { HashSet::new() } else { gone };
+        if fresh.is_empty() && gone.is_empty() {
+            if !watching {
+                self.toast("Refreshed: nothing new");
+            }
+            return;
+        }
+
+        let (viewed, focus) = (self.id(), self.list[self.focus()]);
+        let (was_first, was_last) = (self.pos == 0, self.pos + 1 == self.list.len());
+        let first_new = self.files.len();
+        let query = self.filter.as_ref().map(|(typed, _)| Query::parse(typed));
+        for path in fresh.iter().cloned() {
+            let id = self.files.len();
+            self.loader.add_file(path.clone());
+            self.files.push(path);
+            // Among a kept search's matches only if it matches too.
+            let matches = query.as_ref().is_none_or(|query| self.score(query, id).is_some());
+            if let Some((_, all)) = &mut self.filter {
+                all.push(id);
+            }
+            if matches {
+                self.list.push(id);
+            }
+        }
+        self.sizes.clear();
+
+        // Leave what has gone out, unless that would leave nothing.
+        let keep = |list: &mut Vec<usize>| {
+            if list.iter().any(|id| !gone.contains(id)) {
+                list.retain(|id| !gone.contains(id));
+            }
+        };
+        keep(&mut self.list);
+        if let Some((_, all)) = &mut self.filter {
+            keep(all);
+        }
+        self.marks.retain(|id| !gone.contains(id));
+
+        // Put the newcomers where the order has them. A shuffled list has
+        // no such place, so there they stay at the end.
+        let (sort, reversed, shuffled) = (self.sort, self.reversed, self.shuffled);
+        let place: HashMap<&Path, usize> = listed.iter().enumerate().map(|(at, path)| (path.as_path(), at)).collect();
+        let order = |ids: &mut Vec<usize>, files: &[PathBuf]| {
+            match sort {
+                _ if shuffled => return,
+                Some(sort) => files::sort_ids(ids, files, sort),
+                None => ids.sort_by_key(|id| place.get(files[*id].as_path()).copied().unwrap_or(usize::MAX)),
+            }
+            if reversed {
+                ids.reverse();
+            }
+        };
+        order(&mut self.list, &self.files);
+        if let Some((_, all)) = &mut self.filter {
+            order(all, &self.files);
+        }
+
+        // Stay on the file that was on view, or where it was if it went.
+        let at = |id: usize, fallback: usize| self.list.iter().position(|&other| other == id).unwrap_or(fallback);
+        let last = self.list.len() - 1;
+        let (mut pos, cursor) = (at(viewed, self.pos.min(last)), at(focus, self.focus().min(last)));
+        let is_new = |pos: usize| self.list[pos] >= first_new;
+        if watching && self.grid.is_none() {
+            if was_last && is_new(last) {
+                pos = last;
+            } else if was_first && is_new(0) && sort == Some(Sort::Mtime) && !reversed {
+                pos = 0;
+            }
+        }
+        let moved = self.list[pos] != viewed;
+        self.pos = pos;
+        if let Some(grid) = &mut self.grid {
+            grid.cursor = cursor;
+        }
+        if moved {
+            self.error = None;
+            self.reset_view();
+        }
+
+        let mut parts = Vec::new();
+        if !fresh.is_empty() {
+            parts.push(format!("{} new", fresh.len()));
+        }
+        if !gone.is_empty() {
+            parts.push(format!("{} gone", gone.len()));
+        }
+        if self.options.verbose {
+            fresh.iter().for_each(|path| eprintln!("jog: new file {}", path.display()));
+            eprintln!("jog: refreshed: {}, {} files now", parts.join(", "), self.total());
+        }
+        self.toast(format!("{}: {}", if watching { "Watch" } else { "Refreshed" }, parts.join(", ")));
+        self.request();
+        self.refresh();
+        self.redraw();
+    }
+
+    /// How well file `id` matches a search, or `None` if it does not.
+    fn score(&mut self, query: &Query, id: usize) -> Option<i32> {
+        let path = &self.files[id];
+        let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
+        let size = match query.wants_size() {
+            true => *self.sizes.entry(id).or_insert_with(|| std::fs::metadata(path).ok().map(|meta| meta.len())),
+            false => None,
+        };
+        query.score(&Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), size })
+    }
+
     fn sort_by(&mut self, sort: Sort) {
-        self.sort = Some(sort);
+        (self.sort, self.shuffled) = (Some(sort), false);
         let reversed = self.reversed;
         self.reorder(|ids, files| {
             files::sort_ids(ids, files, sort);
@@ -3726,6 +3902,7 @@ impl ApplicationHandler<Event> for App {
                 // As for the player: empty the queue so that mpv signals.
                 self.preview_signal(Signal::Events);
             }
+            Event::Listed(listed) => self.take_listing(listed, true),
             Event::Meta(id, meta) => {
                 if self.meta_asked == Some(id) {
                     self.meta = Some((id, meta));

@@ -311,6 +311,11 @@ impl Loader {
         self.shared.state.lock().unwrap().files[id] = path;
     }
 
+    /// Takes on another file, which gets the next id.
+    pub fn add_file(&self, path: PathBuf) {
+        self.shared.state.lock().unwrap().files.push(path);
+    }
+
     /// Forgets everything decoded for `id`, so it is read from disk again.
     pub fn invalidate(&self, id: usize) {
         let mut state = self.shared.state.lock().unwrap();

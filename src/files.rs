@@ -122,6 +122,13 @@ pub fn collect(args: &[PathBuf], listing: &Listing) -> Playlist {
     Playlist { files, start }
 }
 
+/// The files the command line names as they are now, in listing order: for
+/// finding out what has appeared since `collect` was called.
+pub fn relist(args: &[PathBuf], listing: &Listing) -> Vec<PathBuf> {
+    let plain = Listing { recursive: listing.recursive, filelist: listing.filelist.clone(), ..Listing::default() };
+    collect(args, &plain).files
+}
+
 /// Appends the images in `dir` in natural order, subdirectories last.
 fn list_dir(dir: &Path, recursive: bool, files: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
