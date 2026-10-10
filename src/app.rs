@@ -53,6 +53,8 @@ const RESUME_MARGIN: f64 = 10.0;
 const PREVIEW_TIMEOUT: Duration = Duration::from_millis(400);
 /// How soon a second click must follow the first to make a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+/// The playback speeds that `[` and `]` step through.
+const SPEEDS: [f64; 9] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
 /// Seconds that Page Up and Page Down move through a video.
 const SEEK_JUMP: f64 = 60.0;
 /// How long after a seek the player's reported position cannot be trusted.
@@ -391,6 +393,8 @@ pub struct App {
     preview_busy: Option<Instant>,
     /// How many times in a row a seek key has repeated from being held.
     held: u32,
+    /// Playback speed, kept from one video to the next.
+    speed: f64,
     toast: Option<(String, Instant)>,
     /// While set, the video's time and a larger progress bar are shown.
     time_until: Option<Instant>,
@@ -641,6 +645,7 @@ impl App {
             preview_sent: None,
             preview_busy: None,
             held: 0,
+            speed: 1.0,
             toast: None,
             time_until: None,
             meta: None,
@@ -1005,6 +1010,7 @@ impl App {
     fn player_ready(&mut self, player: Result<Player, String>, event_loop: &ActiveEventLoop) {
         match player {
             Ok(player) => {
+                player.set("speed", &self.speed.to_string());
                 self.player = Some(player);
                 *self.video_view_sent.borrow_mut() = None;
                 // A video may already be waiting for it.
@@ -1210,6 +1216,21 @@ impl App {
         // Bring up the time and the larger progress bar for a moment.
         self.time_until = Some(Instant::now() + TOAST);
         self.redraw();
+    }
+
+    /// Moves the playback speed a step up or down the list, or with no
+    /// direction back to normal. It applies to every video from then on.
+    fn change_speed(&mut self, faster: Option<bool>) {
+        let at = SPEEDS.iter().position(|speed| *speed >= self.speed).unwrap_or(SPEEDS.len() - 1);
+        self.speed = match faster {
+            Some(true) => SPEEDS[(at + 1).min(SPEEDS.len() - 1)],
+            Some(false) => SPEEDS[at.saturating_sub(1)],
+            None => 1.0,
+        };
+        if let Some(player) = &self.player {
+            player.set("speed", &self.speed.to_string());
+        }
+        self.toast(format!("Speed {}x", self.speed));
     }
 
     /// Where playback is and how long the video is, in seconds.
@@ -1615,6 +1636,9 @@ impl App {
             Rename => self.start_rename(),
             Delete => self.ask_delete(),
             Convert(format) => self.convert(format),
+            SpeedUp => self.change_speed(Some(true)),
+            SpeedDown => self.change_speed(Some(false)),
+            SpeedReset => self.change_speed(None),
             PlayPause => self.video_action(VideoAction::Pause),
             SeekForward => self.video_action(VideoAction::Seek(SEEK_STEP)),
             SeekBack => self.video_action(VideoAction::Seek(-SEEK_STEP)),
@@ -2850,7 +2874,8 @@ impl App {
             top_left.push(format!("{}   [{}/{}]", self.name(), self.pos + 1, self.list.len()));
             top_left.push(self.info_line());
             if let Some((position, length)) = self.video_time() {
-                top_left.push(format!("{} / {}", clock(position), clock(length)));
+                let speed = if self.speed == 1.0 { String::new() } else { format!("   {}x", self.speed) };
+                top_left.push(format!("{} / {}{speed}", clock(position), clock(length)));
             }
         }
         if viewing && self.show_debug {

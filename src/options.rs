@@ -77,7 +77,8 @@ Keys:
                              the match, Tab to keep only the matches, Esc to cancel
                              (^foo starts with, !foo without; Esc later clears)
   Ctrl+arrows, Alt+arrows    scroll, by a page   Z  small images: fit screen / actual size
-  [ / ]                      rotate              _ |           flip, mirror
+  ( / )                      rotate              _ |           flip, mirror
+  [ / ]                      slower / faster     \\             normal speed
   f fullscreen  t filmstrip  i info  e EXIF  a actions  o pointer
   d                          delete (asks first; marked images, or the current one)
   g                          grid view           ?             list of shortcuts
@@ -85,7 +86,7 @@ Keys:
   x                          mark / unmark       c / C         copy file name / full path
   v / m                      copy / move marked images (or the current one) to -o DIR
   u                          undo copy, move, rename or convert
-  r F2                       rename              F5            reload
+  F2                         rename              r F5          reload
   s save copy  L save file list (marked ones if any)  w size window to image
   Delete                     remove from list    Ctrl+Delete   move to trash
   Enter, 1-9                 run action          q Esc         quit
