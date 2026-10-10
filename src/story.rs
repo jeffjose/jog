@@ -1,5 +1,4 @@
-//! Short stretches from along a video: a quick look through it, in the
-//! manner of a trailer, without playing it.
+//! Frames from along a video: a look through it without playing it.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -8,15 +7,10 @@ use std::sync::{mpsc, Arc};
 
 use crate::frame::Frame;
 
-/// How many stretches are taken, evenly spaced through the video.
+/// How many places, evenly spaced through the video, a frame is taken at.
 pub const SEGMENTS: usize = 8;
-/// How long each stretch is, in seconds, and how many frames of it are
-/// kept. Shown at the same rate, a stretch plays at its true speed.
-const SEGMENT_SECONDS: f64 = 1.5;
-pub const SEGMENT_FRAMES: usize = 12;
-/// The frames are shrunk to fit this. A whole video's worth is some
-/// thirty megabytes, so only those of a few videos can be kept.
-const BOUNDS: (u32, u32) = (384, 216);
+/// The frames are shrunk to fit this.
+const BOUNDS: (u32, u32) = (480, 270);
 
 /// What the thread fetching frames reports.
 pub enum Found {
@@ -59,8 +53,7 @@ impl Stories {
                     }
                     // From the middle of each part: a video's very start
                     // and end are often titles or black.
-                    let length = length.unwrap_or(0.0);
-                    let at = (length * (index as f64 + 0.5) / SEGMENTS as f64).min((length - SEGMENT_SECONDS).max(0.0));
+                    let at = length.unwrap_or(0.0) * (index as f64 + 0.5) / SEGMENTS as f64;
                     let frames = segment_at(&path, at).into_iter().filter(|frame| !is_flat(&frame.pixels)).collect();
                     report(Found::Segment(id, index, frames));
                 }
@@ -124,17 +117,15 @@ pub fn bmp_frames(mut bytes: &[u8]) -> Vec<Frame> {
     frames
 }
 
-/// Frames from the stretch of the video starting near `seconds`, shrunk.
-/// It starts at the keyframe before, which saves decoding up to the exact
-/// moment: that matters little here and can take most of a second.
+/// The keyframe nearest before `seconds` into the video, shrunk; nothing
+/// if there is none. Stopping at a keyframe saves decoding up to the exact
+/// moment, which matters little here and can take most of a second.
 fn segment_at(path: &Path, seconds: f64) -> Vec<Frame> {
-    let rate = SEGMENT_FRAMES as f64 / SEGMENT_SECONDS;
-    let filter = format!("fps={rate},scale={}:{}:force_original_aspect_ratio=decrease", BOUNDS.0, BOUNDS.1);
+    let filter = format!("scale={}:{}:force_original_aspect_ratio=decrease", BOUNDS.0, BOUNDS.1);
     let output = Command::new("ffmpeg")
-        .args(["-v", "error", "-threads", "2", "-noaccurate_seek", "-ss", &format!("{seconds:.3}")])
-        .args(["-t", &SEGMENT_SECONDS.to_string(), "-i"])
+        .args(["-v", "error", "-threads", "1", "-noaccurate_seek", "-ss", &format!("{seconds:.3}"), "-i"])
         .arg(path)
-        .args(["-an", "-frames:v", &SEGMENT_FRAMES.to_string(), "-vf", &filter, "-f", "image2pipe", "-c:v", "bmp", "-"])
+        .args(["-an", "-frames:v", "1", "-vf", &filter, "-f", "image2pipe", "-c:v", "bmp", "-"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output();

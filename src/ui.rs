@@ -84,6 +84,57 @@ impl<'a> Canvas<'a> {
         self.fill(x + w - thickness, y, thickness, h, color);
     }
 
+    /// Paints `color` over the corners of a rectangle, outside a curve of
+    /// `radius`, so that what was drawn in it has rounded corners. `color`
+    /// is whatever lies behind it.
+    pub fn round_off(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32) {
+        let radius = radius.min(w / 2).min(h / 2);
+        for (corner_x, corner_y) in [(x, y), (x + w - radius, y), (x, y + h - radius), (x + w - radius, y + h - radius)] {
+            for py in corner_y..corner_y + radius {
+                for px in corner_x..corner_x + radius {
+                    let inside = rounded_cover(px, py, x, y, w, h, radius, 0.0);
+                    self.cover(px, py, color, ((1.0 - inside) * 256.0) as u32);
+                }
+            }
+        }
+    }
+
+    /// An outline `thickness` wide with rounded corners, `radius` being
+    /// that of its outer edge.
+    #[allow(clippy::too_many_arguments)]
+    pub fn round_outline(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, thickness: i32, color: u32) {
+        let band = radius.max(thickness);
+        for py in y..y + h {
+            // Away from the top and bottom only the two sides have any.
+            let full = py < y + band || py >= y + h - band;
+            let spans = if full { [(x, x + w), (0, 0)] } else { [(x, x + thickness), (x + w - thickness, x + w)] };
+            for (from, to) in spans {
+                for px in from..to {
+                    let ring = rounded_cover(px, py, x, y, w, h, radius, 0.0) - rounded_cover(px, py, x, y, w, h, radius, f64::from(thickness));
+                    self.cover(px, py, color, (ring * 256.0) as u32);
+                }
+            }
+        }
+    }
+
+    /// A filled rectangle with rounded corners, `amount`/256 opaque.
+    #[allow(clippy::too_many_arguments)]
+    pub fn round_fill(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, amount: u32) {
+        for py in y..y + h {
+            for px in x..x + w {
+                let cover = rounded_cover(px, py, x, y, w, h, radius, 0.0);
+                self.cover(px, py, color, (cover * f64::from(amount)) as u32);
+            }
+        }
+    }
+
+    fn cover(&mut self, x: i32, y: i32, color: u32, amount: u32) {
+        if amount > 0 && x >= 0 && y >= 0 && x < self.width && y < self.height {
+            let pixel = &mut self.pixels[(y * self.width + x) as usize];
+            *pixel = mix(*pixel, color, amount.min(256));
+        }
+    }
+
     /// Draws `frame` scaled to exactly fill a rectangle: filtered when it
     /// is shrunk, which thumbnails usually are, and by repeating pixels
     /// when it is enlarged.
@@ -146,6 +197,20 @@ fn shrink(frame: &Frame, w: u32, h: u32) -> Option<Vec<u32>> {
 }
 
 /// Blends `amount`/256 of `b` into `a`, two channels at a time.
+/// How much of the pixel at `(px, py)`, from 0 to 1, lies within a
+/// rectangle with corners of `radius`, shrunk by `inset` on every side.
+/// Fractions along the edge are what make the curve smooth.
+#[allow(clippy::too_many_arguments)]
+fn rounded_cover(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32, radius: i32, inset: f64) -> f64 {
+    let (half_w, half_h) = (f64::from(w) / 2.0 - inset, f64::from(h) / 2.0 - inset);
+    let radius = (f64::from(radius) - inset).clamp(0.0, half_w.min(half_h).max(0.0));
+    // Distance from the middle, less the straight part of each side.
+    let across = (f64::from(px) + 0.5 - f64::from(x) - f64::from(w) / 2.0).abs() - (half_w - radius);
+    let down = (f64::from(py) + 0.5 - f64::from(y) - f64::from(h) / 2.0).abs() - (half_h - radius);
+    let outside = across.max(0.0).hypot(down.max(0.0)) + across.max(down).min(0.0) - radius;
+    (0.5 - outside).clamp(0.0, 1.0)
+}
+
 fn mix(a: u32, b: u32, amount: u32) -> u32 {
     let lerp = |mask: u32| (((a & mask) * (256 - amount) + (b & mask) * amount) >> 8) & mask;
     lerp(0xFF00FF) | lerp(0x00FF00)
