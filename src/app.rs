@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicBool};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -90,6 +91,8 @@ pub enum Event {
     Font(Text),
     /// The files in the directories being watched, after a change.
     Listed(Vec<PathBuf>),
+    /// How long a video is, in seconds, for the file list.
+    Duration(usize, Option<f64>),
 }
 
 /// A file operation that `u` can take back.
@@ -348,6 +351,16 @@ pub struct App {
     shuffled: bool,
     /// Whether the panel of file names is open.
     show_list: bool,
+    /// The first row the file list was scrolled to with the wheel, along
+    /// with the position and list length it was scrolled at: once either
+    /// changes, the list goes back to following the file on view.
+    list_scroll: Option<(usize, usize, usize)>,
+    /// The list position under the pointer, in the file list.
+    list_hover: Option<usize>,
+    /// Video lengths, found out on another thread as their rows come up.
+    /// Asked for but not yet known ones are `None`.
+    durations: HashMap<usize, Option<f64>>,
+    prober: Option<mpsc::Sender<(usize, PathBuf)>>,
     /// Set while the directories are watched; clearing it stops the thread
     /// that does the watching.
     watch: Option<Arc<AtomicBool>>,
@@ -632,6 +645,10 @@ impl App {
             reversed: options.listing.reverse,
             shuffled: options.listing.randomize,
             show_list: false,
+            list_scroll: None,
+            list_hover: None,
+            durations: HashMap::new(),
+            prober: None,
             watch: None,
             sizes: HashMap::new(),
             positions: None,
@@ -2836,6 +2853,11 @@ impl App {
             self.point_cursor();
             return;
         }
+        let hover = self.list_row_at(x, y);
+        if hover != self.list_hover {
+            self.list_hover = hover;
+            self.redraw();
+        }
         match &mut self.drag {
             Some(Drag::Pan) => self.pan(dx, dy),
             Some(Drag::Zoom { start_x, start_scale, anchor, moved }) => {
@@ -2945,11 +2967,9 @@ impl App {
                 let (width, height) = self.window_size();
                 let strip = Strip::for_height(height);
                 let panel = self.list_panel().filter(|panel| (x as i32) < panel.width && (y as i32) < panel.bottom);
-                if let Some(panel) = panel {
+                if panel.is_some() {
                     // A click on a name goes to that file.
-                    let row = (y as i32 - panel.top).div_euclid(panel.row_height);
-                    if (0..panel.rows as i32).contains(&row) {
-                        let pos = panel.first + row as usize;
+                    if let Some(pos) = self.list_row_at(x, y) {
                         self.go_to(pos, pos > self.pos);
                     }
                 } else if self.strip_visible() && y >= f64::from(strip.top) {
@@ -2995,6 +3015,16 @@ impl App {
         };
         if lines == 0.0 || self.menu.is_some() {
             return;
+        }
+        // Over the file list the wheel moves the list, not the file on view.
+        let (x, y) = self.mouse;
+        if let Some(panel) = self.list_panel().filter(|panel| (x as i32) < panel.width && (y as i32) < panel.bottom) {
+            let rows = (lines * 3.0).round() as i64;
+            let last = (self.list.len() - panel.rows) as i64;
+            let first = (panel.first as i64 - rows).clamp(0, last) as usize;
+            self.list_scroll = Some((self.pos, self.list.len(), first));
+            self.list_hover = self.list_row_at(x, y);
+            return self.redraw();
         }
         if self.modifiers.control_key() && self.grid.is_none() {
             self.scrolled = 0.0;
@@ -3057,6 +3087,11 @@ impl App {
                     // `{Move:X,Y}` moves the pointer and `{Click}` clicks.
                     if let Some((x, y)) = name.strip_prefix("Move:").and_then(|to| to.split_once(',')) {
                         self.mouse_moved(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
+                        continue;
+                    }
+                    // `{Wheel:N}` turns the wheel N lines, up being positive.
+                    if let Some(lines) = name.strip_prefix("Wheel:") {
+                        self.mouse_wheel(MouseScrollDelta::LineDelta(0.0, lines.parse().unwrap_or(0.0)));
                         continue;
                     }
                     if name == "Click" {
@@ -3371,6 +3406,9 @@ impl App {
         // What sits on the left moves over to make room for the file list.
         let left = margin + panel.as_ref().map_or(0, |panel| panel.width);
         if let Some(panel) = &panel {
+            for pos in panel.first..panel.first + panel.rows {
+                self.want_duration(self.list[pos]);
+            }
             self.draw_list(canvas, &mut text, panel);
         }
         text_block(canvas, &mut text, &top_left, px, |_, _| (left, margin));
@@ -3667,8 +3705,41 @@ impl App {
         // The first row's worth of space holds the heading.
         let top = row_height + px as i32;
         let rows = (((bottom - top) / row_height).max(1) as usize).min(self.list.len());
-        let first = self.pos.saturating_sub(rows / 2).min(self.list.len() - rows);
-        Some(ListPanel { width: (px as i32 * 24).min(width as i32 / 2), bottom, top, row_height, first, rows, px })
+        let scrolled = self.list_scroll.filter(|(pos, len, _)| (*pos, *len) == (self.pos, self.list.len()));
+        let first = scrolled.map_or(self.pos.saturating_sub(rows / 2), |(_, _, first)| first).min(self.list.len() - rows);
+        Some(ListPanel { width: (px as i32 * 26).min(width as i32 / 2), bottom, top, row_height, first, rows, px })
+    }
+
+    /// Asks for the length of a video, once; `Event::Duration` brings it.
+    /// One thread asks ffprobe about each in turn.
+    fn want_duration(&mut self, id: usize) {
+        if !files::is_video(&self.files[id]) || self.durations.contains_key(&id) {
+            return;
+        }
+        self.durations.insert(id, None);
+        let sender = self.prober.get_or_insert_with(|| {
+            let (sender, receiver) = mpsc::channel::<(usize, PathBuf)>();
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                for (id, path) in receiver {
+                    let arguments = ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"];
+                    let output = std::process::Command::new("ffprobe").args(arguments).arg(&path).output();
+                    let seconds = output.ok().and_then(|output| String::from_utf8_lossy(&output.stdout).trim().parse().ok());
+                    if proxy.send_event(Event::Duration(id, seconds)).is_err() {
+                        return;
+                    }
+                }
+            });
+            sender
+        });
+        let _ = sender.send((id, self.files[id].clone()));
+    }
+
+    /// The list position of the file-list row at a window position.
+    fn list_row_at(&self, x: f64, y: f64) -> Option<usize> {
+        let panel = self.list_panel().filter(|panel| (x as i32) < panel.width && (y as i32) < panel.bottom)?;
+        let row = (y as i32 - panel.top).div_euclid(panel.row_height);
+        (0..panel.rows as i32).contains(&row).then(|| panel.first + row as usize)
     }
 
     fn draw_list(&self, canvas: &mut Canvas, text: &mut Text, panel: &ListPanel) {
@@ -3687,12 +3758,18 @@ impl App {
             let top = panel.top + row as i32 * panel.row_height;
             if pos == self.pos {
                 canvas.fill(0, top, panel.width, panel.row_height, HIGHLIGHT_COLOR);
+            } else if self.list_hover == Some(pos) {
+                canvas.fill(0, top, panel.width, panel.row_height, MENU_EDGE_COLOR);
             }
             if self.marks.contains(&id) {
                 canvas.fill(pad / 2, top + panel.row_height / 4, pad / 2, panel.row_height / 2, MARK_COLOR);
             }
-            let name = clipped(text, &self.name_of(id), panel.width - 3 * pad, px);
             let line = top + (panel.row_height - Text::line_height(px)) / 2;
+            // A video's length sits at the right, once it is known.
+            let length = self.durations.get(&id).copied().flatten().map(clock).unwrap_or_default();
+            let length_width = if length.is_empty() { 0 } else { text.width(&length, px) + pad };
+            text.draw(canvas, panel.width - length_width, line, px, DIM_TEXT_COLOR, &length);
+            let name = clipped(text, &self.name_of(id), panel.width - 3 * pad - length_width, px);
             text.draw(canvas, pad * 2, line, px, TEXT_COLOR, &name);
         }
     }
@@ -4012,6 +4089,10 @@ impl ApplicationHandler<Event> for App {
                 self.preview_signal(Signal::Events);
             }
             Event::Listed(listed) => self.take_listing(listed, true),
+            Event::Duration(id, seconds) => {
+                self.durations.insert(id, seconds);
+                self.redraw();
+            }
             Event::Meta(id, meta) => {
                 if self.meta_asked == Some(id) {
                     self.meta = Some((id, meta));
