@@ -87,7 +87,10 @@ const VIDEO_START: f64 = 0.5;
 const SEEN_AFTER: Duration = Duration::from_secs(5);
 /// How long the small movements of the interface take: a toast sliding
 /// in, the seek bar rising, a cursor going from one cell to the next.
-const EASE: Duration = Duration::from_millis(150);
+const EASE: Duration = Duration::from_millis(170);
+/// How far into its movement something is shown on the frame it sets out
+/// on: one frame of a display that shows sixty a second.
+const HEAD_START: Duration = Duration::from_millis(16);
 /// How long one picture takes to give way to the next.
 const CROSSFADE: Duration = Duration::from_millis(130);
 /// How long a picture takes to grow out of its cell in the grid, or to
@@ -214,10 +217,12 @@ impl Glide {
         Glide { from: value, to: value, since: Instant::now() }
     }
 
-    /// How far along it is, from 0 to 1, eased.
+    /// How far along it is, from 0 to 1, eased: quicker at first, but not
+    /// so much so that the first frame takes a third of the way in one
+    /// stride, which reads as a jerk and not as movement.
     fn part(&self, over: Duration) -> f64 {
         let part = (self.since.elapsed().as_secs_f64() / over.as_secs_f64().max(0.001)).min(1.0);
-        1.0 - (1.0 - part).powi(3)
+        1.0 - (1.0 - part).powi(2)
     }
 
     fn now(&self, over: Duration) -> f64 {
@@ -231,7 +236,10 @@ impl Glide {
     /// Sets it off for somewhere else, from wherever it has got to.
     fn head_for(&mut self, to: f64, over: Duration) {
         if to != self.to {
-            *self = Glide { from: self.now(over), to, since: Instant::now() };
+            // It set out a frame ago, as far as the frame now being drawn
+            // goes: that one already shows it on its way.
+            let now = Instant::now();
+            *self = Glide { from: self.now(over), to, since: now.checked_sub(HEAD_START).unwrap_or(now) };
         }
     }
 }
@@ -809,6 +817,8 @@ pub struct App {
     anim_due: Option<Instant>,
     /// How long the display shows each frame for, once that has been asked.
     frame_every: Option<Duration>,
+    /// When the frame before this one was begun.
+    frame_began: Option<Instant>,
     animating: Cell<bool>,
     /// The first row the file list was scrolled to with the wheel, along
     /// with the position and list length it was scrolled at: once either
@@ -1277,6 +1287,7 @@ impl App {
             seen_at: RefCell::new(HashMap::new()),
             anim_due: None,
             frame_every: None,
+            frame_began: None,
             animating: Cell::new(false),
             list_scroll: None,
             list_hover: None,
@@ -5567,20 +5578,27 @@ impl App {
                     let started = Instant::now();
                     self.paint(&mut buffer, (size.width, size.height));
                     // Something is still on its way somewhere: draw again soon.
-                    if self.animating.take() {
+                    let moving = self.animating.take();
+                    if moving {
                         // No oftener than the display shows a frame.
                         let every = *self.frame_every.get_or_insert_with(|| {
                             let rate = window.current_monitor().and_then(|monitor| monitor.refresh_rate_millihertz());
                             Duration::from_secs_f64(1000.0 / f64::from(rate.filter(|rate| *rate > 0).unwrap_or(60_000)))
                         });
                         self.anim_due = Some((started + every).max(Instant::now() + Duration::from_millis(1)));
-                        if self.options.debug {
-                            eprintln!("jog: {:>7.1?} draw  moving", started.elapsed());
-                        }
                     }
                     let painted = started.elapsed();
                     window.pre_present_notify();
                     let _ = buffer.present();
+                    // What a moving frame really cost: drawing it, handing
+                    // it to the display, and how long after the one before
+                    // it began.
+                    if moving && self.options.debug {
+                        let gap = self.frame_began.map(|before| started.duration_since(before));
+                        let (presented, gap) = (started.elapsed().saturating_sub(painted), gap.unwrap_or_default());
+                        eprintln!("jog: draw  moving  paint {painted:>7.1?}  present {presented:>7.1?}  since last {gap:>7.1?}");
+                    }
+                    self.frame_began = Some(started);
                     self.painted(started, painted);
                 }
             }
