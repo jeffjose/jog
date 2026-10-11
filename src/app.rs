@@ -387,6 +387,9 @@ struct SeekBar {
     width: i32,
     middle: i32,
     unit: i32,
+    /// Where the bar's room begins: the window's left edge, or the edge
+    /// of the file list when that is up, which the bar stands beside.
+    left: i32,
     /// The right edge of the window, and how many buttons stand at it.
     end: i32,
     buttons: i32,
@@ -403,7 +406,7 @@ impl SeekBar {
     /// pause, and the file after, counted from 0.
     fn control(&self, which: i32) -> (i32, i32, i32) {
         let side = self.unit * 5 / 4;
-        (self.unit * 3 / 2 + which * (side + self.unit), self.middle - side / 2, side)
+        (self.left + self.unit * 3 / 2 + which * (side + self.unit), self.middle - side / 2, side)
     }
 
     /// Whether a window position is on the symbol, with some slack around
@@ -968,6 +971,10 @@ pub struct App {
     looping: Looping,
     /// What is being held down over a video, and how strong the loupe is
     /// while `v` is held for one.
+    /// Whether the video that was on view plays on in a corner while the
+    /// grid is up, and room for its picture there.
+    pip: bool,
+    pip_frame: Vec<u32>,
     hold: Option<Hold>,
     loupe: Option<f64>,
     /// Whether seeking lands on the very moment asked for or on the
@@ -1387,6 +1394,8 @@ impl App {
             speed: 1.0,
             muted: false,
             looping: Looping::Off,
+            pip: false,
+            pip_frame: Vec::new(),
             hold: None,
             loupe: None,
             precise: options.precise_seeking,
@@ -1462,6 +1471,19 @@ impl App {
                 println!("{}", self.files[*id].display());
             }
         }
+    }
+
+    /// Quits, at once. What is to be kept has been written by now or is
+    /// written here; shutting the players down in good order takes most
+    /// of a second with their sound open, and gains nothing.
+    fn leave(&mut self, event_loop: &ActiveEventLoop) {
+        if self.snapshot.is_some() {
+            return event_loop.exit();
+        }
+        self.remember_position();
+        self.print_marked();
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        std::process::exit(0);
     }
 
     fn window_size(&self) -> (u32, u32) {
@@ -1658,7 +1680,8 @@ impl App {
     fn sync_video(&mut self) {
         let id = self.id();
         let playing = self.video.as_ref().map(|video| video.id);
-        let wanted = self.grid.is_none() && self.overview.is_none() && files::is_video(&self.files[id]);
+        // With the grid up, the video that was on view plays on in a corner.
+        let wanted = (self.grid.is_none() || self.pip) && self.overview.is_none() && files::is_video(&self.files[id]);
         if wanted && playing != Some(id) {
             self.start_video(id);
         } else if !wanted && playing.is_some() {
@@ -1777,7 +1800,9 @@ impl App {
         // on the right for the duration and the buttons there.
         let (end, buttons) = (width as i32, self.bar_buttons().len() as i32);
         let right = unit * 7 + buttons * unit * 9 / 4;
-        SeekBar { x: unit * 13, width: (end - unit * 13 - right).max(1), middle: base - unit * 2, unit, end, buttons }
+        // Beside the file list when that is up, not under it.
+        let left = self.list_panel().map_or(0, |panel| panel.width);
+        SeekBar { x: left + unit * 13, width: (end - left - unit * 13 - right).max(1), middle: base - unit * 2, unit, left, end, buttons }
     }
 
     /// Tracks the pointer over the seek bar: shows it at full size, and the
@@ -2560,7 +2585,8 @@ impl App {
         let window = self.window_size();
         let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map(|(_, frame)| frame.native);
         let (zoom, pan) = match native {
-            Some(native) if window.0 > 0 && window.1 > 0 => {
+            // In its corner of the grid it is simply all there.
+            Some(native) if window.0 > 0 && window.1 > 0 && self.grid.is_none() => {
                 let layout = self.view.layout(native, window);
                 // mpv's zoom is a power of two on top of filling the window.
                 let filling = fit_size(native, window, true);
@@ -2922,7 +2948,7 @@ impl App {
             SubtitlesSmaller => self.size_subtitles(false),
             ClearFilter => self.clear_filter(false),
             ShowAllHere => self.clear_filter(true),
-            Quit => event_loop.exit(),
+            Quit => self.leave(event_loop),
         }
         self.redraw();
     }
@@ -3327,6 +3353,41 @@ impl App {
             key => drop(prompt.field.key(key, self.modifiers)),
         }
         self.redraw();
+    }
+
+    // ---- A video in the corner ----------------------------------------
+
+    /// Where the video that was on view goes on playing while the grid is
+    /// up: a small picture in the bottom right corner, over the cells.
+    fn pip_place(&self, window: (u32, u32)) -> Option<[i32; 4]> {
+        let video = self.video.as_ref().filter(|_| self.pip && self.grid.is_some())?;
+        let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map_or((16, 9), |(_, frame)| frame.native);
+        let unit = ui_px(window.1) as i32;
+        let (w, h) = fit_size(native, ((window.0 / 4).max(320), (window.1 / 3).max(180)), true);
+        let (w, h) = (w as i32, h as i32);
+        let bottom = window.1 as i32 - GridLayout::footer_height(window.1) - unit * 2;
+        Some([window.0 as i32 - w - unit * 2, bottom - h, w, h])
+    }
+
+    /// Draws the video in its corner of the grid.
+    fn draw_pip(&mut self, pixels: &mut [u32], window: (u32, u32)) {
+        let Some([x, y, w, h]) = self.pip_place(window) else { return };
+        let showing = self.video.as_ref().is_some_and(|video| video.showing);
+        let Some(player) = self.player.as_ref().filter(|_| showing && x >= 0 && y >= 0) else { return };
+        self.pip_frame.resize((w * h) as usize, 0);
+        if !player.render(&mut self.pip_frame, w as u32, h as u32) {
+            return;
+        }
+        let mut canvas = Canvas::new(pixels, window.0, window.1);
+        let (edge, round) = ((ui_px(window.1) as i32 / 6).max(2), (ui_px(window.1) as i32 / 2).max(4));
+        // A dark surround lifts it off the cells it lies over.
+        canvas.round_fill(x - 3 * edge, y - 3 * edge, w + 6 * edge, h + 6 * edge, round + 3 * edge, 0x000000, 150);
+        let stride = window.0 as usize;
+        for (row, line) in self.pip_frame.chunks_exact(w as usize).enumerate() {
+            let at = (y as usize + row) * stride + x as usize;
+            canvas.all()[at..at + w as usize].copy_from_slice(line);
+        }
+        canvas.round_outline(x - edge, y - edge, w + 2 * edge, h + 2 * edge, round, edge, TEXT_COLOR);
     }
 
     // ---- Held keys -----------------------------------------------------
@@ -4024,12 +4085,18 @@ impl App {
     fn toggle_grid(&mut self) {
         let window = self.window_size();
         let layout = self.grid_layout(window);
-        // The picture on view grows out of its cell, or shrinks into it.
         let id = self.id();
+        // Out of the grid, the picture on view grows from its cell, or from
+        // the corner it was playing in; into the grid it shrinks to its
+        // cell, unless it is a video, which plays on in a corner instead.
+        let corner = self.pip_place(window);
+        let stays = self.grid.is_none() && self.video.is_some();
         self.grow = match &self.grid {
-            Some(_) => self.grid_cell(self.pos, &layout, window).map(|cell| Grow { id, cell, since: Instant::now(), opening: true }),
+            Some(_) => corner.or_else(|| self.grid_cell(self.pos, &layout, window)).map(|cell| Grow { id, cell, since: Instant::now(), opening: true }),
+            None if stays => None,
             None => Some(Grow { id, cell: [0; 4], since: Instant::now(), opening: false }),
         };
+        self.pip = stays;
         self.grid = match self.grid {
             Some(_) => None,
             None => Some(Grid::at(self.pos, &layout)),
@@ -4039,6 +4106,7 @@ impl App {
         self.drag = None;
         self.request();
         self.sync_video();
+        self.apply_video_view();
         self.redraw();
     }
 
@@ -4139,9 +4207,11 @@ impl App {
             self.grow = self.grid_cell(cursor, &layout, window).map(|cell| Grow { id, cell, since: Instant::now(), opening: true });
         }
         let Some(grid) = self.grid.take() else { return };
+        self.pip = false;
         self.go_to(grid.cursor, grid.cursor >= self.pos);
         self.request();
         self.sync_video();
+        self.apply_video_view();
         self.redraw();
     }
 
@@ -5481,6 +5551,14 @@ impl App {
             }
             return;
         }
+        // A click on the video in the corner of the grid goes back to it.
+        let on_pip = self.pip_place(self.window_size()).is_some_and(|[px, py, w, h]| (px..px + w).contains(&(x as i32)) && (py..py + h).contains(&(y as i32)));
+        if on_pip && self.menu.is_none() && button == MouseButton::Left {
+            if pressed {
+                self.toggle_grid();
+            }
+            return;
+        }
         if self.grid.is_some() && self.menu.is_none() {
             let hit = |b: &&Button| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32));
             match (button, pressed) {
@@ -6010,6 +6088,7 @@ impl App {
                 self.scene_live = false;
                 self.draw_grid(&mut Canvas::new(pixels, window.0, window.1));
                 self.draw_shrinking(&mut Canvas::new(pixels, window.0, window.1), &layout);
+                self.draw_pip(pixels, window);
                 if self.options.debug {
                     eprintln!("jog: {:>7.1?} draw  grid", started.elapsed());
                 }
@@ -6178,7 +6257,7 @@ impl App {
             let shade_top = bar.middle - unit * 6;
             // Down to what the bar stands on: the window's edge, or a strip
             // along it, which is not to be darkened with the picture.
-            canvas.fade_down(0, shade_top, width, (bar.middle + unit * 2).min(height) - shade_top, 70);
+            canvas.fade_down(bar.left, shade_top, width - bar.left, (bar.middle + unit * 2).min(height) - shade_top, 70);
             // The handle is where the video is, and jumps with it.
             let done = (f64::from(bar.width) * position / length) as i32;
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 72, bar.width);
@@ -7910,7 +7989,7 @@ impl ApplicationHandler<Event> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.leave(event_loop),
             WindowEvent::RedrawRequested => self.draw(),
             WindowEvent::Resized(_) => {
                 self.update_monitor();
