@@ -729,7 +729,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
         (
             "Video",
             &[
-                ("Space", "Play / pause"),
+                ("Space", "Play / pause; held down, or the mouse button held on the picture, twice the speed"),
                 ("Left  Right", "Seek about 5 seconds, on into the next file or back into the one before"),
                 ("PgUp  PgDn", "Seek 1 minute"),
                 ("Shift+Left  Shift+Right", "Step one frame"),

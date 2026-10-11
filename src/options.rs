@@ -134,6 +134,7 @@ Keys:
   ( / )                      rotate              _ |           flip, mirror
   [ / ]                      slower / faster     \\             normal speed
   f fullscreen  t filmstrip  i info  e EXIF  a actions  o pointer
+  v held                     a loupe under the pointer: the wheel makes it stronger
   p                          file list down the side; click a name to go to it
   D                          delete (asks first; marked images, or the current one)
   g                          grid view           ?             list of shortcuts
@@ -157,6 +158,7 @@ where they were left unless --no-resume is given. While one is up:
   PgUp / PgDn                seek about 1 minute pointer at the bottom: seek bar with previews
   Shift+Left / Shift+Right   step one frame      Up / Down     volume (m mutes)
   b                          back to the start of the video
+  Space or the mouse button held down: twice the speed, until let go
   l                          loop: this video, then the whole list, then off
   T                          scenes of this video along the bottom: Left / Right
                              then go from scene to scene, and a click plays one

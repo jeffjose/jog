@@ -98,6 +98,10 @@ const CROSSFADE: Duration = Duration::from_millis(130);
 const GROW: Duration = Duration::from_millis(170);
 /// How long the dot on a video takes to fade once it has been watched.
 const DOT_FADE: Duration = Duration::from_millis(500);
+/// How long the space bar or the mouse button has to be down to count as
+/// held, and how many times its speed a video then plays at.
+const HOLD_AFTER: Duration = Duration::from_millis(250);
+const HOLD_SPEED: f64 = 2.0;
 /// How far into a scene, in seconds, going back still means the one before.
 const SCENE_RESTART: f64 = 1.5;
 /// The usual size of subtitles and how far off the bottom edge they sit,
@@ -242,6 +246,16 @@ impl Glide {
             *self = Glide { from: self.now(over), to, since: now.checked_sub(HEAD_START).unwrap_or(now) };
         }
     }
+}
+
+/// The space bar or the mouse button being down over a video: since when,
+/// which of the two it is, where the pointer was, and whether it has been
+/// down long enough to hurry the video along.
+struct Hold {
+    since: Instant,
+    by_key: bool,
+    at: (f64, f64),
+    fast: bool,
 }
 
 /// A picture between its cell in the grid and its place in the window:
@@ -952,6 +966,10 @@ pub struct App {
     /// What a video that has played to its end does, kept from one video
     /// to the next.
     looping: Looping,
+    /// What is being held down over a video, and how strong the loupe is
+    /// while `v` is held for one.
+    hold: Option<Hold>,
+    loupe: Option<f64>,
     /// Whether seeking lands on the very moment asked for or on the
     /// nearest keyframe.
     precise: bool,
@@ -1369,6 +1387,8 @@ impl App {
             speed: 1.0,
             muted: false,
             looping: Looping::Off,
+            hold: None,
+            loupe: None,
             precise: options.precise_seeking,
             scenes_on: false,
             scene_over: None,
@@ -1558,7 +1578,8 @@ impl App {
         if files::is_video(&self.files[*id]) || frame.animation.is_some() {
             return false;
         }
-        self.view.layout(frame.native, window).width > frame.width
+        // The loupe shows the picture's own pixels.
+        self.loupe.is_some() || self.view.layout(frame.native, window).width > frame.width
     }
 
     /// Syncs the title and displayed frame with the current image.
@@ -1779,7 +1800,7 @@ impl App {
     fn player_ready(&mut self, player: Result<Player, String>, event_loop: &ActiveEventLoop) {
         match player {
             Ok(player) => {
-                player.set("speed", &self.speed.to_string());
+                player.set("speed", &self.playing_speed().to_string());
                 player.set("mute", if self.muted { "yes" } else { "no" });
                 self.player = Some(player);
                 self.apply_subtitles();
@@ -1820,6 +1841,7 @@ impl App {
         let carried = self.enter_at.take();
         let from = carried.or_else(|| self.resume_from(id));
         let mut held = false;
+        let speed = self.playing_speed().to_string();
         if let Some(player) = &mut self.player {
             let started = Instant::now();
             // Seeking one that is held somewhere else takes longer than
@@ -1834,7 +1856,7 @@ impl App {
                     let old = &spare.player;
                     old.stop();
                     spare.id = None;
-                    player.set("speed", &self.speed.to_string());
+                    player.set("speed", &speed);
                     player.set("mute", if self.muted { "yes" } else { "no" });
                     if let Some(volume) = old.number("volume") {
                         player.set("volume", &volume.to_string());
@@ -2243,9 +2265,14 @@ impl App {
             }
         };
         let action = match key {
-            // Holding space down should not flicker between the two.
+            // The repeats of a space bar held down say nothing new.
             Key::Named(NamedKey::Space) if repeat => return true,
-            Key::Named(NamedKey::Space) => VideoAction::Pause,
+            // Let go at once it pauses or plays; kept down, it hurries the
+            // video along. Which, only its release can say.
+            Key::Named(NamedKey::Space) => {
+                self.begin_hold(true);
+                return true;
+            }
             Key::Named(NamedKey::ArrowRight) => arrow(true),
             Key::Named(NamedKey::ArrowLeft) => arrow(false),
             Key::Named(NamedKey::PageDown) => VideoAction::Seek(SEEK_JUMP),
@@ -2376,7 +2403,7 @@ impl App {
             None => 1.0,
         };
         if let Some(player) = &self.player {
-            player.set("speed", &self.speed.to_string());
+            player.set("speed", &self.playing_speed().to_string());
         }
         self.toast(format!("Speed {}x", self.speed));
     }
@@ -3300,6 +3327,149 @@ impl App {
             key => drop(prompt.field.key(key, self.modifiers)),
         }
         self.redraw();
+    }
+
+    // ---- Held keys -----------------------------------------------------
+
+    /// The speed a video plays at just now: several times the usual while
+    /// a key or the mouse button is held down to hurry it along.
+    fn playing_speed(&self) -> f64 {
+        self.speed * if self.hold.as_ref().is_some_and(|hold| hold.fast) { HOLD_SPEED } else { 1.0 }
+    }
+
+    fn apply_speed(&self) {
+        if let Some(player) = &self.player {
+            player.set("speed", &self.playing_speed().to_string());
+        }
+    }
+
+    /// Something was pressed that hurries the video along if it is kept
+    /// down: the space bar, or the mouse button on the picture.
+    fn begin_hold(&mut self, by_key: bool) {
+        if self.video.is_some() {
+            self.hold = Some(Hold { since: Instant::now(), by_key, at: self.mouse, fast: false });
+        }
+    }
+
+    /// Held long enough, it is no tap: the video hurries along from here.
+    fn tend_hold(&mut self) {
+        let Some(hold) = self.hold.as_mut().filter(|hold| !hold.fast && hold.since.elapsed() >= HOLD_AFTER) else { return };
+        hold.fast = true;
+        // The mouse button held is this, and not the start of a drag.
+        self.drag = None;
+        self.apply_speed();
+        if let Some(player) = &self.player {
+            player.set("pause", "no");
+        }
+        self.toast(format!("{}  {}x", commands::icons::CHEVRONS_RIGHT, self.playing_speed()));
+        // It stays for as long as the hold does.
+        if let Some((_, until)) = &mut self.toast {
+            *until = Instant::now() + Duration::from_secs(3600);
+        }
+    }
+
+    /// What was held is let go: the video goes back to its speed, or, let
+    /// go at once, the space bar was a tap, which pauses and plays.
+    fn end_hold(&mut self, by_key: bool) {
+        let Some(hold) = self.hold.take_if(|hold| hold.by_key == by_key) else { return };
+        if hold.fast {
+            self.apply_speed();
+            self.toast = None;
+            self.redraw();
+        } else if by_key {
+            self.video_action(VideoAction::Pause);
+        }
+    }
+
+    /// Drops a hold without it counting as a tap: the window has lost the
+    /// keyboard, or the pointer has moved off with the button down.
+    fn cancel_hold(&mut self) {
+        if self.hold.take().is_some_and(|hold| hold.fast) {
+            self.apply_speed();
+            self.toast = None;
+            self.redraw();
+        }
+    }
+
+    fn key_released(&mut self, key: Key<&str>) {
+        match key {
+            Key::Named(NamedKey::Space) => self.end_hold(true),
+            Key::Character("v") if self.loupe.take().is_some() => {
+                self.request();
+                self.redraw();
+            }
+            _ => {}
+        }
+    }
+
+    /// The loupe: while `v` is held, a round glass under the pointer shows
+    /// what is there larger. Of a picture it shows the picture's own
+    /// pixels, one to one or twice the size it is on screen, whichever is
+    /// more; of a video, what is on screen at twice the size. The wheel
+    /// makes it stronger or weaker.
+    fn draw_loupe(&self, pixels: &mut [u32], window: (u32, u32)) {
+        let Some(strength) = self.loupe.filter(|_| self.grid.is_none() && self.overview.is_none()) else { return };
+        let (width, height) = (window.0 as i32, window.1 as i32);
+        let radius = ui_px(window.1) as i32 * 10;
+        let (cx, cy) = (self.mouse.0 as i32, self.mouse.1 as i32);
+        let background = self.options.background;
+        let frame = self.source().filter(|_| !self.video.as_ref().is_some_and(|video| video.showing));
+        // What is looked at, as a block of pixels, where in it the pointer
+        // is, and how many pixels of the glass one of its pixels takes.
+        let (source, across, down, at, scale): (Vec<u32>, i32, i32, (f64, f64), f64) = match &frame {
+            Some(frame) => {
+                let layout = self.view.layout(frame.native, window);
+                let shown = f64::from(layout.width) / f64::from(frame.width.max(1));
+                let native = f64::from(frame.native.0.max(1)) / f64::from(frame.width.max(1));
+                let scale = (shown * 2.0).max(native) * strength;
+                let at = (f64::from(cx - layout.x) / shown, f64::from(cy - layout.y) / shown);
+                (frame.picture(self.picture).to_vec(), frame.width as i32, frame.height as i32, at, scale)
+            }
+            None => {
+                // The part of the window under the glass, taken before the
+                // glass is drawn over it.
+                let scale = 2.0 * strength;
+                let half = (f64::from(radius) / scale).ceil() as i32 + 1;
+                let side = 2 * half + 1;
+                let mut block = vec![background; (side * side) as usize];
+                for row in 0..side {
+                    let y = cy - half + row;
+                    for column in 0..side {
+                        let x = cx - half + column;
+                        if (0..width).contains(&x) && (0..height).contains(&y) {
+                            block[(row * side + column) as usize] = pixels[(y * width + x) as usize];
+                        }
+                    }
+                }
+                (block, side, side, (f64::from(half), f64::from(half)), scale)
+            }
+        };
+        for dy in -radius..=radius {
+            let y = cy + dy;
+            if !(0..height).contains(&y) {
+                continue;
+            }
+            for dx in -radius..=radius {
+                let (x, far) = (cx + dx, dx * dx + dy * dy);
+                if far > radius * radius || !(0..width).contains(&x) {
+                    continue;
+                }
+                // A light rim with a dark line inside it, to stand out from
+                // whatever is behind.
+                let pixel = if far >= (radius - 2) * (radius - 2) {
+                    0xF0F0F0
+                } else if far >= (radius - 3) * (radius - 3) {
+                    0x000000
+                } else {
+                    let (sx, sy) = ((at.0 + f64::from(dx) / scale).floor() as i32, (at.1 + f64::from(dy) / scale).floor() as i32);
+                    match (0..across).contains(&sx) && (0..down).contains(&sy) {
+                        true => source[(sy * across + sx) as usize],
+                        false => background,
+                    }
+                };
+                pixels[(y * width + x) as usize] = pixel;
+            }
+        }
     }
 
     // ---- Movement ------------------------------------------------------
@@ -5074,6 +5244,15 @@ impl App {
         if self.filter.is_some() && key == Key::Named(NamedKey::Escape) {
             return self.clear_filter(false);
         }
+        // `v` held is the loupe, there until the key is let go.
+        if matches!(key, Key::Character("v")) && self.modifiers.is_empty() {
+            if !repeat {
+                self.loupe = Some(1.0);
+                self.request();
+                self.redraw();
+            }
+            return;
+        }
         if self.video.is_some() && self.video_key(key.clone(), repeat) {
             return;
         }
@@ -5087,6 +5266,14 @@ impl App {
     fn mouse_moved(&mut self, x: f64, y: f64) {
         let (dx, dy) = (x - self.mouse.0, y - self.mouse.1);
         self.mouse = (x, y);
+        // The button held down and then moved is a drag, not a hold; and
+        // the loupe goes where the pointer does.
+        if self.hold.as_ref().is_some_and(|hold| !hold.by_key && !hold.fast && (x - hold.at.0).hypot(y - hold.at.1) > 6.0) {
+            self.hold = None;
+        }
+        if self.loupe.is_some() {
+            self.redraw();
+        }
         // The scene under the pointer is picked out, and plays.
         let over = self.scene_at(x, y);
         if over != self.scene_over {
@@ -5426,6 +5613,8 @@ impl App {
                     } else {
                         self.last_click = Some((Instant::now(), (x, y)));
                         self.drag = Some(Drag::Pan);
+                        // Kept down on a video, it hurries it along.
+                        self.begin_hold(false);
                     }
                 }
             }
@@ -5436,6 +5625,7 @@ impl App {
                 }
             }
             (MouseButton::Left | MouseButton::Middle, false) => {
+                self.end_hold(false);
                 if let Some(Drag::Zoom { moved: false, .. }) = self.drag.take() {
                     self.execute(Command::ZoomActual, event_loop);
                 }
@@ -5450,6 +5640,11 @@ impl App {
             MouseScrollDelta::LineDelta(_, y) => f64::from(y),
             MouseScrollDelta::PixelDelta(position) => position.y / 50.0,
         };
+        // With the loupe up, the wheel makes it stronger or weaker.
+        if let Some(strength) = &mut self.loupe {
+            *strength = (*strength * 1.25f64.powf(lines)).clamp(0.5, 8.0);
+            return self.redraw();
+        }
         if lines == 0.0 || self.menu.is_some() {
             return;
         }
@@ -5542,18 +5737,21 @@ impl App {
         // press the named key.
         let mut rest = keys;
         while let Some(c) = rest.chars().next() {
-            let mut repeating = false;
+            let (mut repeating, mut pressing, mut releasing) = (false, true, true);
             let named = rest.strip_prefix('{').and_then(|inner| inner.split_once('}'));
             let key = match named {
                 Some((name, after)) => {
                     rest = after;
+                    // `{Down+Space}` only presses a key and `{Up+Space}` only
+                    // lets it go, for one that is held.
+                    (pressing, releasing) = (!name.starts_with("Up+"), !name.starts_with("Down+"));
                     // `{Shift+Right}` and `{Ctrl+Right}` hold a modifier, and
                     // `{Held+Right}` is the key repeating from being held.
                     repeating = name.starts_with("Held+");
                     let (held, name) = match name.split_once('+') {
                         Some(("Shift", name)) => (ModifiersState::SHIFT, name),
                         Some(("Ctrl", name)) => (ModifiersState::CONTROL, name),
-                        Some(("Held", name)) => (ModifiersState::empty(), name),
+                        Some(("Held" | "Down" | "Up", name)) => (ModifiersState::empty(), name),
                         _ => (ModifiersState::empty(), name),
                     };
                     self.modifiers = held;
@@ -5600,7 +5798,13 @@ impl App {
                     Key::Character(typed)
                 }
             };
-            self.key_pressed(key, repeating, false, event_loop);
+            if pressing {
+                self.key_pressed(key.clone(), repeating, false, event_loop);
+            }
+            // A key typed is let go again at once.
+            if releasing && !repeating {
+                self.key_released(key);
+            }
             self.modifiers = ModifiersState::empty();
         }
         self.mouse_moved(self.mouse.0, self.mouse.1);
@@ -5621,6 +5825,7 @@ impl App {
         let mut pixels = vec![0u32; window.0 as usize * window.1 as usize];
         self.settle_at = None;
         self.paint(&mut pixels, window);
+        self.draw_loupe(&mut pixels, window);
 
         let mut ppm = format!("P6 {} {} 255\n", window.0, window.1).into_bytes();
         ppm.extend(pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
@@ -5648,6 +5853,7 @@ impl App {
                     // Whether the window still shows what was last handed it.
                     let kept = ours && buffer.age() == 1 && self.presented.len() == buffer.len();
                     self.paint(&mut buffer, (size.width, size.height));
+                    self.draw_loupe(&mut buffer, (size.width, size.height));
                     // Something is still on its way somewhere: draw again soon.
                     let moving = self.animating.take();
                     if moving {
@@ -7721,6 +7927,14 @@ impl ApplicationHandler<Event> for App {
                 self.redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::KeyboardInput { event, .. } if !event.state.is_pressed() => self.key_released(event.logical_key.as_ref()),
+            WindowEvent::Focused(false) => {
+                // Nothing held is let go where this window can hear of it.
+                self.cancel_hold();
+                if self.loupe.take().is_some() {
+                    self.redraw();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 let numpad = event.location == KeyLocation::Numpad;
                 self.key_pressed(event.logical_key.as_ref(), event.repeat, numpad, event_loop);
@@ -7785,6 +7999,7 @@ impl ApplicationHandler<Event> for App {
         if self.trailer_due.is_some_and(|(_, at)| at <= now) {
             self.tend_trailer();
         }
+        self.tend_hold();
         if self.anim_due.is_some_and(|due| due <= now) {
             self.anim_due = None;
             self.redraw();
@@ -7798,6 +8013,7 @@ impl ApplicationHandler<Event> for App {
             return self.finish_snapshot(event_loop);
         }
 
+        let hold_due = self.hold.as_ref().filter(|hold| !hold.fast).map(|hold| hold.since + HOLD_AFTER);
         let toast_until = self.toast.as_ref().map(|(_, until)| *until);
         // A little before that it starts on its way out, which wants drawing.
         let toast_leaves = toast_until.map(|until| until - EASE);
@@ -7805,7 +8021,7 @@ impl ApplicationHandler<Event> for App {
             self.redraw();
         }
         let toast_leaves = toast_leaves.filter(|at| *at > now);
-        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, self.trailer_due.map(|(_, at)| at), self.overview_due];
+        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
