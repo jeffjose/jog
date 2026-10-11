@@ -37,6 +37,9 @@ File list:
   -z, --randomize            shuffle the list
       --start-at FILE        start at this file
   -f, --filelist FILE        read paths from FILE, one per line
+      --start HOW            what coming back to this folder from another
+                             workspace does: resume (the usual), top, latest
+                             or random; the last two also set its order now
       --filter TEXT          start with only the files the find box would show
                              for TEXT: jog --filter 'beach #video >10mb'
       --watch                add files as they appear in the directories, and
@@ -84,10 +87,12 @@ Workspaces are folders with names, set in the config file:
   jog @pictures starts in one. Ctrl+1 to Ctrl+9 go to them in the order
   they are written, Ctrl+Tab to the next, Ctrl+` back to what jog was
   started on, G shows them all, and @ in the find box lists
-  them; there too a folder opened by its path can be saved as one. Each
-  is listed again when it is gone to, and begun at its first file, so
-  that it shows what is there now; fresh = false in its entry has it
-  pick up where it was left instead. Marks are kept. In the box for
+  them; there too a folder opened by its path can be saved as one.
+  What going to one does is its start: \"top\" (the usual) lists it again
+  and begins at its first file, \"latest\" does so newest first, \"random\"
+  shuffles it, and \"resume\" picks up where it was left. Marks are kept.
+  --start says the same of what is opened by its path, which otherwise
+  resumes. In the box for
   a folder to copy or move into, @pictures means that workspace.
 
   -h, --help                 show this help
@@ -182,6 +187,8 @@ pub struct Options {
     pub watch: bool,
     /// What to narrow the list to from the start, as typed in the find box.
     pub filter: Option<String>,
+    /// What coming back to what was opened does, if it was said.
+    pub start: Option<Start>,
     /// The named folders of the config file, in its order, and which of
     /// them, if any, was asked for by name to start in.
     pub workspaces: Vec<Workspace>,
@@ -200,9 +207,31 @@ pub struct Workspace {
     pub sort: Option<Sort>,
     /// That order backwards.
     pub reverse: bool,
-    /// Whether to list it again, and start at its first file, each time
-    /// it is gone to, rather than pick up where it was left.
-    pub fresh: bool,
+    /// What going to it does.
+    pub start: Start,
+}
+
+/// What going to a workspace does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Start {
+    /// List it again and begin at its first file.
+    Top,
+    /// List it again, newest first, and begin at the newest.
+    Latest,
+    /// List it again and shuffle it.
+    Random,
+    /// Leave it as it was, and pick up where it was left.
+    Resume,
+}
+
+fn parse_start(text: &str) -> Result<Start, String> {
+    Ok(match text {
+        "top" => Start::Top,
+        "latest" => Start::Latest,
+        "random" => Start::Random,
+        "resume" => Start::Resume,
+        _ => return Err(format!("invalid start '{text}', expected top, latest, random or resume")),
+    })
 }
 
 /// Reads the `[workspaces]` table: each entry a path, or a table of a
@@ -211,7 +240,7 @@ fn parse_workspaces(value: &toml::Value) -> Result<Vec<Workspace>, String> {
     let table = value.as_table().ok_or("workspaces: expected a table of names and folders")?;
     let mut workspaces = Vec::new();
     for (name, entry) in table {
-        let plain = |path: &str| Workspace { name: name.clone(), path: expand_home(path), recursive: None, sort: None, reverse: false, fresh: true };
+        let plain = |path: &str| Workspace { name: name.clone(), path: expand_home(path), recursive: None, sort: None, reverse: false, start: Start::Top };
         let workspace = match entry {
             toml::Value::String(path) => plain(path),
             toml::Value::Table(details) => {
@@ -219,7 +248,13 @@ fn parse_workspaces(value: &toml::Value) -> Result<Vec<Workspace>, String> {
                 let mut workspace = plain(path.ok_or_else(|| format!("workspace {name}: needs a path"))?);
                 workspace.recursive = details.get("recursive").and_then(toml::Value::as_bool);
                 workspace.reverse = details.get("reverse").and_then(toml::Value::as_bool).unwrap_or(false);
-                workspace.fresh = details.get("fresh").and_then(toml::Value::as_bool).unwrap_or(true);
+                // `fresh = false` is the old way to say `start = "resume"`.
+                if details.get("fresh").and_then(toml::Value::as_bool) == Some(false) {
+                    workspace.start = Start::Resume;
+                }
+                if let Some(start) = details.get("start").and_then(toml::Value::as_str) {
+                    workspace.start = parse_start(start)?;
+                }
                 if let Some(order) = details.get("sort").and_then(toml::Value::as_str) {
                     workspace.sort = Some(parse_sort(order)?);
                 }
@@ -310,7 +345,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
 
 fn takes_value(name: &str) -> bool {
     let valued = [
-        "geometry", "image-bg", "accent", "zoom", "sort", "start-at", "filelist", "filter", "slideshow-delay", "on-last-slide",
+        "geometry", "image-bg", "accent", "zoom", "sort", "start-at", "start", "filelist", "filter", "slideshow-delay", "on-last-slide",
         "output-dir",
     ];
     valued.contains(&name) || name.starts_with("action")
@@ -365,6 +400,7 @@ fn parse_with(
         verbose: false,
         watch: false,
         filter: None,
+        start: None,
         workspaces: Vec::new(),
         workspace: None,
         resume: true,
@@ -441,6 +477,13 @@ fn parse_with(
         options.listing.recursive |= space.recursive.unwrap_or(false);
         options.listing.sort = options.listing.sort.or(space.sort);
         options.listing.reverse |= space.reverse;
+        options.start = options.start.or(Some(space.start));
+    }
+    // How to start says how to list, where it says anything about order.
+    match options.start {
+        Some(Start::Latest) => options.listing.sort = Some(Sort::Mtime),
+        Some(Start::Random) => options.listing.randomize = true,
+        _ => {}
     }
     Ok(Parsed::Run(Box::new(options)))
 }
@@ -474,6 +517,7 @@ fn apply(
         "randomize" => options.listing.randomize = true,
         "start-at" => options.listing.start_at = Some(value()?.into()),
         "filter" => options.filter = Some(value()?),
+        "start" => options.start = Some(parse_start(&value()?)?),
         "filelist" => options.listing.filelist = Some(value()?.into()),
         "slideshow-delay" => {
             let text = value()?;
@@ -632,10 +676,11 @@ const STARTER_CONFIG: &str = r##"# jog: settings.
 #   sort = "mtime"     newest first (or name, filename, dirname, size)
 #   reverse = true     that order backwards: with mtime, oldest first
 #   recursive = true   look in the folders inside it too
-#   fresh = false      pick up where it was left, each time it is gone
-#                      to. Left out, a workspace is listed again every
-#                      time and begun at its first file: with
-#                      sort = "mtime", the newest
+#   start = "top"      what going to it does. "top", the usual: list it
+#                      again and begin at its first file. "latest": list
+#                      it again, newest first, and begin at the newest.
+#                      "random": list it again and shuffle it. "resume":
+#                      leave it as it was, and pick up where it was left.
 "##;
 
 /// Applies a config file. Its keys are the long option names: switches take

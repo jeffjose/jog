@@ -24,7 +24,7 @@ use crate::loader::{Job, Loader, Request};
 use crate::meta::{self, Meta};
 use crate::mpv::{Player, PlayerEvent, Role, Signal};
 use crate::ops;
-use crate::options::{LastSlide, Options};
+use crate::options::{LastSlide, Options, Start};
 use crate::positions::Positions;
 use crate::render;
 use crate::rng::Rng;
@@ -538,7 +538,7 @@ struct Space {
     sort: Option<Sort>,
     reverse: bool,
     /// Listed again, and begun at its start, each time it is gone to.
-    fresh: bool,
+    start: Start,
     filelist: Option<PathBuf>,
     /// Whether it is in the config file, rather than only opened this once.
     saved: bool,
@@ -1005,7 +1005,7 @@ impl App {
                 recursive: workspace.recursive.unwrap_or(options.listing.recursive),
                 sort: workspace.sort,
                 reverse: workspace.reverse,
-                fresh: workspace.fresh,
+                start: workspace.start,
                 filelist: None,
                 saved: true,
                 kept: None,
@@ -1025,7 +1025,7 @@ impl App {
                 recursive: options.listing.recursive,
                 sort: options.listing.sort,
                 reverse: options.listing.reverse,
-                fresh: false,
+                start: options.start.unwrap_or(Start::Resume),
                 filelist: options.listing.filelist.clone(),
                 saved: false,
                 kept: None,
@@ -3106,20 +3106,28 @@ impl App {
         if to == self.space {
             return self.toast(format!("@{name}"));
         }
-        // One marked fresh is listed anew each time, and begun at its start.
-        let fresh = self.spaces[to].fresh;
-        let incoming = match self.spaces[to].kept.take().filter(|kept| !kept.list.is_empty() && !fresh) {
+        // Only one that resumes is taken up as it was left; any other is
+        // listed anew, to show what is there now.
+        let start = self.spaces[to].start;
+        let incoming = match self.spaces[to].kept.take().filter(|kept| !kept.list.is_empty() && start == Start::Resume) {
             Some(kept) => kept,
             None => {
                 let space = &self.spaces[to];
-                let listing = files::Listing { recursive: space.recursive, sort: space.sort, reverse: space.reverse, filelist: space.filelist.clone(), ..files::Listing::default() };
+                // The newest first, for one that starts on the latest.
+                let sort = if start == Start::Latest { Some(Sort::Mtime) } else { space.sort };
+                let listing = files::Listing { recursive: space.recursive, sort, reverse: space.reverse, filelist: space.filelist.clone(), ..files::Listing::default() };
                 let found = files::collect(&space.paths, &listing).files;
                 if found.is_empty() {
                     return self.toast(format!("@{name} has nothing to show"));
                 }
                 // Files seen before, in whatever workspace, keep their ids.
-                let list = self.ids_for(found);
-                Kept { list, pos: 0, cursor: 0, filter: None, sort: self.spaces[to].sort, reversed: self.spaces[to].reverse, shuffled: false }
+                let mut list = self.ids_for(found);
+                let reversed = self.spaces[to].reverse;
+                // Shuffled anew each time, for one that starts at random.
+                if start == Start::Random {
+                    self.rng.shuffle(&mut list);
+                }
+                Kept { list, pos: 0, cursor: 0, filter: None, sort: sort.filter(|_| start != Start::Random), reversed, shuffled: start == Start::Random }
             }
         };
         let leaving = Kept {
