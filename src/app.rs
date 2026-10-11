@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
@@ -33,7 +33,7 @@ use crate::rng::Rng;
 use crate::search::{Facts, Query};
 use crate::story::{self, Found, Stories};
 use crate::trailer::{Note, Trailers};
-use crate::ui::{Canvas, Text};
+use crate::ui::{self, Canvas, Text};
 use crate::view::{Layout, View, Zoom};
 
 const ZOOM_STEP: f64 = 1.25;
@@ -85,6 +85,16 @@ const VIDEO_END: f64 = 0.25;
 const VIDEO_START: f64 = 0.5;
 /// How long a video has to have been playing to count as watched.
 const SEEN_AFTER: Duration = Duration::from_secs(5);
+/// How long the small movements of the interface take: a toast sliding
+/// in, the seek bar rising, a cursor going from one cell to the next.
+const EASE: Duration = Duration::from_millis(150);
+/// How long one picture takes to give way to the next.
+const CROSSFADE: Duration = Duration::from_millis(130);
+/// How long a picture takes to grow out of its cell in the grid, or to
+/// shrink back into it.
+const GROW: Duration = Duration::from_millis(170);
+/// How long the dot on a video takes to fade once it has been watched.
+const DOT_FADE: Duration = Duration::from_millis(500);
 /// How far into a scene, in seconds, going back still means the one before.
 const SCENE_RESTART: f64 = 1.5;
 /// The usual size of subtitles and how far off the bottom edge they sit,
@@ -186,6 +196,53 @@ struct Moved {
     pos: usize,
     from: PathBuf,
     to: PathBuf,
+}
+
+/// A number on its way to another: where it set out from, where it is
+/// going and when it set out. It gets there quickly at first and then
+/// settles, which reads as prompt.
+#[derive(Clone, Copy)]
+struct Glide {
+    from: f64,
+    to: f64,
+    since: Instant,
+}
+
+impl Glide {
+    /// One that is at `value` already.
+    fn at(value: f64) -> Glide {
+        Glide { from: value, to: value, since: Instant::now() }
+    }
+
+    /// How far along it is, from 0 to 1, eased.
+    fn part(&self, over: Duration) -> f64 {
+        let part = (self.since.elapsed().as_secs_f64() / over.as_secs_f64().max(0.001)).min(1.0);
+        1.0 - (1.0 - part).powi(3)
+    }
+
+    fn now(&self, over: Duration) -> f64 {
+        self.from + (self.to - self.from) * self.part(over)
+    }
+
+    fn moving(&self, over: Duration) -> bool {
+        self.from != self.to && self.since.elapsed() < over
+    }
+
+    /// Sets it off for somewhere else, from wherever it has got to.
+    fn head_for(&mut self, to: f64, over: Duration) {
+        if to != self.to {
+            *self = Glide { from: self.now(over), to, since: Instant::now() };
+        }
+    }
+}
+
+/// A picture between its cell in the grid and its place in the window:
+/// whose it is, where the cell is, when it set out, and which way it goes.
+struct Grow {
+    id: usize,
+    cell: [i32; 4],
+    since: Instant,
+    opening: bool,
 }
 
 /// What happens when a video has played to its end.
@@ -716,6 +773,43 @@ pub struct App {
     /// with Ctrl and + or -; and when to draw it next while it slides.
     grid_columns: Option<i32>,
     grid_due: Option<Instant>,
+    /// Things on their way: a toast sliding in, the seek bar and the strip
+    /// of scenes rising, the seek bar's handle, and the middles of the
+    /// filmstrip and of the strip of scenes.
+    toast_slide: Cell<Glide>,
+    bar_rise: Cell<Glide>,
+    bar_at: Cell<Glide>,
+    scenes_rise: Cell<Glide>,
+    strip_slide: Cell<Glide>,
+    scene_slide: Cell<Glide>,
+    /// The grid cursor's ring on its way to another cell, and whether it
+    /// is to be put straight where it belongs: the grid has just come up.
+    ring: [Cell<Glide>; 4],
+    ring_snap: Cell<bool>,
+    /// The row of the file list the pointer has come onto, lighting up.
+    row_fade: Cell<Glide>,
+    row_faded: Cell<Option<usize>>,
+    /// A menu or a box coming up over the rest, and room for a copy of
+    /// what was there before it.
+    box_fade: Cell<Glide>,
+    fade_buf: Vec<u32>,
+    /// The picture that was on view, which the one now on view takes over
+    /// from gradually: its pixels, whose they were, whether they are what
+    /// the window last showed, and when the change began.
+    scene_was: Vec<u32>,
+    scene_id: Option<usize>,
+    scene_live: bool,
+    crossfade: Option<Instant>,
+    /// A picture growing out of its cell in the grid or shrinking into it.
+    grow: Option<Grow>,
+    /// When videos were found to have been watched, for their dots to fade.
+    seen_at: RefCell<HashMap<usize, Instant>>,
+    /// When to draw again because something is still moving, and whether
+    /// anything was found to be while the frame in hand was drawn.
+    anim_due: Option<Instant>,
+    /// How long the display shows each frame for, once that has been asked.
+    frame_every: Option<Duration>,
+    animating: Cell<bool>,
     /// The first row the file list was scrolled to with the wheel, along
     /// with the position and list length it was scrolled at: once either
     /// changes, the list goes back to following the file on view.
@@ -1163,6 +1257,27 @@ impl App {
             show_list: false,
             grid_columns: None,
             grid_due: None,
+            toast_slide: Cell::new(Glide::at(1.0)),
+            bar_rise: Cell::new(Glide::at(0.0)),
+            bar_at: Cell::new(Glide::at(0.0)),
+            scenes_rise: Cell::new(Glide::at(0.0)),
+            strip_slide: Cell::new(Glide::at(start as f64)),
+            scene_slide: Cell::new(Glide::at(0.0)),
+            ring: std::array::from_fn(|_| Cell::new(Glide::at(0.0))),
+            ring_snap: Cell::new(true),
+            row_fade: Cell::new(Glide::at(0.0)),
+            row_faded: Cell::new(None),
+            box_fade: Cell::new(Glide::at(0.0)),
+            fade_buf: Vec::new(),
+            scene_was: Vec::new(),
+            scene_id: None,
+            scene_live: false,
+            crossfade: None,
+            grow: None,
+            seen_at: RefCell::new(HashMap::new()),
+            anim_due: None,
+            frame_every: None,
+            animating: Cell::new(false),
             list_scroll: None,
             list_hover: None,
             list_button_over: None,
@@ -1324,6 +1439,8 @@ impl App {
 
     fn toast(&mut self, message: impl Into<String>) {
         self.toast = Some((message.into(), Instant::now() + TOAST));
+        // It slides in from the edge.
+        self.toast_slide.set(Glide { from: 0.0, to: 1.0, since: Instant::now() });
         self.redraw();
     }
 
@@ -1918,9 +2035,23 @@ impl App {
         self.options.seen && files::is_video(&self.files[id]) && !self.watched(id)
     }
 
+    /// How strongly a file is marked as not watched yet, from 0 to 1: the
+    /// mark of one just watched fades away over a moment.
+    fn new_level(&self, id: usize) -> f64 {
+        if self.is_new(id) {
+            return 1.0;
+        }
+        let fading = self.seen_at.borrow().get(&id).map(|at| at.elapsed()).filter(|gone| *gone < DOT_FADE && self.options.animations);
+        fading.map_or(0.0, |gone| {
+            self.animating.set(true);
+            1.0 - gone.as_secs_f64() / DOT_FADE.as_secs_f64()
+        })
+    }
+
     /// Remembers a video as watched.
     fn mark_seen(&self, id: usize) {
         if self.options.seen && self.seen_known.borrow_mut().insert(id, true) != Some(true) {
+            self.seen_at.borrow_mut().insert(id, Instant::now());
             self.seen.borrow_mut().get_or_insert_with(Seen::load).add(&self.files[id]);
         }
     }
@@ -3136,6 +3267,25 @@ impl App {
         self.redraw();
     }
 
+    // ---- Movement ------------------------------------------------------
+
+    /// Where a number that glides has got to on its way to `to`, setting
+    /// it off if that is news. With movement turned off it is there at
+    /// once. While it is still on its way, another frame is asked for.
+    fn glide(&self, glide: &Cell<Glide>, to: f64, over: Duration) -> f64 {
+        if !self.options.animations {
+            glide.set(Glide::at(to));
+            return to;
+        }
+        let mut gliding = glide.get();
+        gliding.head_for(to, over);
+        glide.set(gliding);
+        if gliding.moving(over) {
+            self.animating.set(true);
+        }
+        gliding.now(over)
+    }
+
     // ---- Scenes --------------------------------------------------------
 
     /// Whether the strip of the video's scenes is up, in place of the
@@ -3203,7 +3353,8 @@ impl App {
     /// Where the cell of a scene is along the strip, which keeps the one
     /// playing in the middle.
     fn scene_left(&self, strip: &Strip, index: usize, playing: usize, window_width: i32) -> i32 {
-        (window_width - strip.cell_w) / 2 + (index as i32 - playing as i32) * strip.pitch()
+        let centre = self.glide(&self.scene_slide, playing as f64, EASE);
+        (window_width - strip.cell_w) / 2 + ((index as f64 - centre) * f64::from(strip.pitch())).round() as i32
     }
 
     /// The scene whose cell a window position is on.
@@ -3663,16 +3814,68 @@ impl App {
     }
 
     fn toggle_grid(&mut self) {
-        let layout = self.grid_layout(self.window_size());
+        let window = self.window_size();
+        let layout = self.grid_layout(window);
+        // The picture on view grows out of its cell, or shrinks into it.
+        let id = self.id();
+        self.grow = match &self.grid {
+            Some(_) => self.grid_cell(self.pos, &layout, window).map(|cell| Grow { id, cell, since: Instant::now(), opening: true }),
+            None => Some(Grow { id, cell: [0; 4], since: Instant::now(), opening: false }),
+        };
         self.grid = match self.grid {
             Some(_) => None,
             None => Some(Grid::at(self.pos, &layout)),
         };
+        self.ring_snap.set(true);
         self.menu = None;
         self.drag = None;
         self.request();
         self.sync_video();
         self.redraw();
+    }
+
+    /// Where the picture of the file at `pos` is in the grid, if it is on
+    /// the page showing.
+    fn grid_cell(&self, pos: usize, layout: &GridLayout, window: (u32, u32)) -> Option<[i32; 4]> {
+        let area = self.grid_area(layout, pos, window.1);
+        let place = match self.loader.thumb(self.list[pos]) {
+            Some(thumb) => Self::grid_picture(area, (thumb.width, thumb.height), false),
+            None => area,
+        };
+        (place[0] >= 0 && place[0] + place[2] <= window.0 as i32).then_some(place)
+    }
+
+    /// Where a picture that is growing out of its cell has got to on its
+    /// way to `full`, its place in the window; nothing once it is there.
+    fn growing(&mut self, id: usize, full: [i32; 4]) -> Option<[i32; 4]> {
+        let grow = self.grow.as_ref().filter(|grow| grow.opening && grow.id == id && self.options.animations)?;
+        if grow.since.elapsed() >= GROW {
+            self.grow = None;
+            return None;
+        }
+        let part = Glide { from: 0.0, to: 1.0, since: grow.since }.part(GROW);
+        self.animating.set(true);
+        Some(std::array::from_fn(|side| (f64::from(grow.cell[side]) + f64::from(full[side] - grow.cell[side]) * part).round() as i32))
+    }
+
+    /// Draws the picture that was on view shrinking into its cell, over
+    /// the grid that has just come up.
+    fn draw_shrinking(&mut self, canvas: &mut Canvas, layout: &GridLayout) {
+        let Some(grow) = self.grow.as_ref().filter(|grow| !grow.opening && self.options.animations) else { return };
+        let window = (canvas.width as u32, canvas.height as u32);
+        let pos = self.list.iter().position(|id| *id == grow.id);
+        let frame = self.shown.as_ref().filter(|(id, _)| *id == grow.id).map(|(_, frame)| frame.clone());
+        let (Some(pos), Some(frame), true) = (pos, frame, grow.since.elapsed() < GROW) else {
+            self.grow = None;
+            return;
+        };
+        let Some(cell) = self.grid_cell(pos, layout, window) else { return };
+        let full = self.view.layout(frame.native, window);
+        let full = [full.x, full.y, full.width as i32, full.height as i32];
+        let part = Glide { from: 0.0, to: 1.0, since: grow.since }.part(GROW);
+        let [x, y, w, h]: [i32; 4] = std::array::from_fn(|side| (f64::from(full[side]) + f64::from(cell[side] - full[side]) * part).round() as i32);
+        canvas.image_fast(&frame, x, y, w, h);
+        self.animating.set(true);
     }
 
     /// Moves the grid cursor by a number of images, stopping at either end
@@ -3708,6 +3911,13 @@ impl App {
 
     /// Leaves the grid to view the image under the cursor.
     fn open_from_grid(&mut self) {
+        // The picture under the cursor grows out of its cell.
+        let window = self.window_size();
+        let layout = self.grid_layout(window);
+        if let Some(cursor) = self.grid.as_ref().map(|grid| grid.cursor) {
+            let id = self.list[cursor];
+            self.grow = self.grid_cell(cursor, &layout, window).map(|cell| Grow { id, cell, since: Instant::now(), opening: true });
+        }
         let Some(grid) = self.grid.take() else { return };
         self.go_to(grid.cursor, grid.cursor >= self.pos);
         self.request();
@@ -5356,6 +5566,18 @@ impl App {
                 if let Ok(mut buffer) = surface.buffer_mut() {
                     let started = Instant::now();
                     self.paint(&mut buffer, (size.width, size.height));
+                    // Something is still on its way somewhere: draw again soon.
+                    if self.animating.take() {
+                        // No oftener than the display shows a frame.
+                        let every = *self.frame_every.get_or_insert_with(|| {
+                            let rate = window.current_monitor().and_then(|monitor| monitor.refresh_rate_millihertz());
+                            Duration::from_secs_f64(1000.0 / f64::from(rate.filter(|rate| *rate > 0).unwrap_or(60_000)))
+                        });
+                        self.anim_due = Some((started + every).max(Instant::now() + Duration::from_millis(1)));
+                        if self.options.debug {
+                            eprintln!("jog: {:>7.1?} draw  moving", started.elapsed());
+                        }
+                    }
                     let painted = started.elapsed();
                     window.pre_present_notify();
                     let _ = buffer.present();
@@ -5420,6 +5642,7 @@ impl App {
     fn paint(&mut self, pixels: &mut [u32], window: (u32, u32)) {
         // The overview of workspaces takes the whole window.
         if self.overview.is_some() {
+            self.scene_live = false;
             pixels.fill(GRID_COLOR);
             return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
         }
@@ -5428,6 +5651,7 @@ impl App {
         let started = Instant::now();
         if player.is_some_and(|player| player.render(pixels, window.0, window.1)) {
             self.perf.render = started.elapsed();
+            self.scene_live = false;
             return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
         }
         let source = if self.grid.is_some() { None } else { self.source() };
@@ -5451,13 +5675,24 @@ impl App {
                     self.request();
                 }
                 pixels.fill(GRID_COLOR);
+                self.scene_live = false;
                 self.draw_grid(&mut Canvas::new(pixels, window.0, window.1));
+                self.draw_shrinking(&mut Canvas::new(pixels, window.0, window.1), &layout);
                 if self.options.debug {
                     eprintln!("jog: {:>7.1?} draw  grid", started.elapsed());
                 }
             }
             Some(frame) => {
                 let layout = self.view.layout(frame.native, window);
+                // Fresh out of the grid, it grows from the cell it had there.
+                let shown = self.shown.as_ref().map(|(id, _)| *id);
+                let full = [layout.x, layout.y, layout.width as i32, layout.height as i32];
+                if let Some([x, y, w, h]) = shown.and_then(|id| self.growing(id, full)) {
+                    pixels.fill(self.options.background);
+                    Canvas::new(pixels, window.0, window.1).image_fast(&frame, x, y, w, h);
+                    self.scene_live = false;
+                    return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
+                }
                 // Big sources are scaled crudely while zooming or panning,
                 // then smoothly once the view has settled.
                 let settled = self.settle_at.is_none() || frame.pixels.len() <= SMOOTH_ALWAYS;
@@ -5472,6 +5707,14 @@ impl App {
                 let picture = if frame.animation.is_some() { self.picture } else { 0 };
                 let key = SceneKey { frame, picture, layout, smooth, window };
                 if !self.scene_key.as_ref().is_some_and(|current| current.matches(&key)) {
+                    // Another file's picture takes over from the one on
+                    // view gradually: that one is kept to be laid over it.
+                    let another = self.scene_id.is_some() && self.scene_id != shown;
+                    if another && self.scene_live && self.options.animations && self.scene.len() == pixels.len() {
+                        std::mem::swap(&mut self.scene, &mut self.scene_was);
+                        self.crossfade = Some(Instant::now());
+                    }
+                    self.scene_id = shown;
                     let started = Instant::now();
                     self.scene.resize(pixels.len(), 0);
                     let background = self.options.background;
@@ -5486,8 +5729,23 @@ impl App {
                     self.scene_key = Some(key);
                 }
                 pixels.copy_from_slice(&self.scene);
+                // It is well on its way from the first frame, so that
+                // nothing seems to wait.
+                if let Some(since) = self.crossfade {
+                    let part = since.elapsed().as_secs_f64() / CROSSFADE.as_secs_f64();
+                    if part < 1.0 && self.scene_was.len() == pixels.len() {
+                        ui::dissolve_all(pixels, &self.scene_was, ((1.0 - part) * 0.65 * 256.0) as u32);
+                        self.animating.set(true);
+                    } else {
+                        self.crossfade = None;
+                    }
+                }
+                self.scene_live = true;
             }
-            None => pixels.fill(self.options.background),
+            None => {
+                self.scene_live = false;
+                pixels.fill(self.options.background);
+            }
         }
         self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
     }
@@ -5505,7 +5763,12 @@ impl App {
             self.draw_strip(canvas, strip);
         }
         // The scenes of the video on view stand there instead, when asked for.
-        let scene_strip = self.scenes_shown().then(|| Strip::for_height(height as u32));
+        let scenes_level = self.glide(&self.scenes_rise, if self.scenes_shown() { 1.0 } else { 0.0 }, EASE);
+        let scene_strip = (scenes_level > 0.01 && viewing && self.video.is_some()).then(|| {
+            // It rises from the bottom edge and sinks back into it.
+            let strip = Strip::for_height(height as u32);
+            Strip { top: strip.top + ((1.0 - scenes_level) * f64::from(strip.height)) as i32, ..strip }
+        });
         if let Some(strip) = scene_strip {
             self.want_scenes();
             self.draw_scenes(canvas, strip);
@@ -5573,8 +5836,11 @@ impl App {
         let mut buttons: Vec<(i32, i32, &str, u32)> = Vec::new();
         let mut subtitle_margin = SUBTITLE_MARGIN;
         let bar_wanted = viewing && (self.hover.is_some() || self.time_until.is_some());
-        if let Some((position, length)) = self.video_time().filter(|_| bar_wanted) {
-            let bar = self.seek_bar();
+        // It rises from the bottom edge and sinks back into it.
+        let bar_level = self.glide(&self.bar_rise, if bar_wanted { 1.0 } else { 0.0 }, EASE);
+        if let Some((position, length)) = (bar_level > 0.01).then(|| self.video_time()).flatten() {
+            let mut bar = self.seek_bar();
+            bar.middle += ((1.0 - bar_level) * f64::from(bar.unit * 6)) as i32;
             let unit = bar.unit;
             let line = Text::line_height(px);
             let thickness = unit * 2 / 3;
@@ -5583,7 +5849,22 @@ impl App {
             // bottom edge.
             let shade_top = bar.middle - unit * 6;
             canvas.fade_down(0, shade_top, width, height - shade_top, 70);
-            let done = (f64::from(bar.width) * position / length) as i32;
+            // The handle eases over to where a jump has taken it; playing
+            // along, it is simply where the video is.
+            let mut handle = self.bar_at.get();
+            let fraction = position / length;
+            if (fraction - handle.to).abs() > 0.02 && bar_level > 0.5 && self.options.animations {
+                handle.head_for(fraction, EASE);
+            } else if handle.moving(EASE) {
+                handle.to = fraction;
+            } else {
+                handle = Glide::at(fraction);
+            }
+            self.bar_at.set(handle);
+            if handle.moving(EASE) {
+                self.animating.set(true);
+            }
+            let done = (f64::from(bar.width) * handle.now(EASE)) as i32;
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 72, bar.width);
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 256, done.max(thickness / 2));
             // A notch in the bar where each scene starts, while they are up.
@@ -5712,7 +5993,19 @@ impl App {
         self.debug_last = debug;
         text_block(canvas, &mut text, &exif, px, |_, h| (left, bottom - h));
         text_block(canvas, &mut text, &actions, px, |w, h| (width - margin - w, bottom - h));
-        text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w, margin));
+        // A toast slides in from the right edge, and off that way again
+        // as its time runs out.
+        let toast_in = self.glide(&self.toast_slide, 1.0, EASE);
+        let toast_left = self.toast.as_ref().map_or(Duration::ZERO, |(_, until)| until.saturating_duration_since(Instant::now()));
+        let toast_out = match self.options.animations && toast_left < EASE {
+            true => {
+                self.animating.set(true);
+                (1.0 - toast_left.as_secs_f64() / EASE.as_secs_f64()).powi(2)
+            }
+            false => 0.0,
+        };
+        let toast_away = (1.0 - toast_in) + toast_out;
+        text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w + (toast_away * f64::from(w + margin)) as i32, margin));
         // Twice the usual size, centred just above the seek bar.
         text_block(canvas, &mut text, &time, px, |w, h| ((width - w) / 2, time_bottom - h));
         for (centre, top, icon, color) in buttons {
@@ -5735,6 +6028,16 @@ impl App {
             text.draw(canvas, left, *top, px, TEXT_COLOR, label);
         }
         text_block(canvas, &mut text, &error, px, |w, h| ((width - w) / 2, (height - h) / 2));
+        // A menu or a box comes up over a moment: what was there is kept
+        // and laid back over it, less and less. It is well on its way from
+        // the first frame, so that nothing seems to wait.
+        let boxed = self.menu.is_some() || self.prompt.is_some() || self.palette.is_some() || self.confirm.is_some() || self.help;
+        let box_level = self.glide(&self.box_fade, if boxed { 1.0 } else { 0.0 }, EASE);
+        let mut behind = std::mem::take(&mut self.fade_buf);
+        let fading = boxed && box_level < 0.99;
+        if fading {
+            ui::copy_all(&mut behind, canvas.all());
+        }
         if let Some(menu) = &self.menu {
             self.draw_menu(canvas, &mut text, menu);
         }
@@ -5767,6 +6070,10 @@ impl App {
         if self.help {
             draw_help(canvas, &mut text, px);
         }
+        if fading {
+            ui::dissolve_all(canvas.all(), &behind, ((1.0 - box_level) * 0.6 * 256.0) as u32);
+        }
+        self.fade_buf = behind;
         // Letters whose font is still loading show as boxes for now.
         if text.waiting() {
             self.font_due = Some(Instant::now() + Duration::from_millis(150));
@@ -5811,6 +6118,7 @@ impl App {
         let edge = (layout.pad / 4).max(2);
         let radius = (layout.cell_w / 36).max(4);
 
+        let mut cursor_place = None;
         for pos in self.grid_shown(&layout) {
             let id = self.list[pos];
             let area = self.grid_area(&layout, pos, canvas.height as u32);
@@ -5851,11 +6159,29 @@ impl App {
                 canvas.round_fill(x + dot / 2, y + dot / 2, dot, dot, dot / 2, MARK_COLOR, 256);
             }
             // The cursor is ringed brightly, the image being viewed quietly.
-            if pos == grid.cursor || pos == self.pos {
-                let color = if pos == grid.cursor { TEXT_COLOR } else { accent() };
+            if pos == grid.cursor {
+                // Drawn last, on its way from the cell it was on.
+                cursor_place = Some([x, y, w, h]);
+            } else if pos == self.pos {
+                let color = accent();
                 let gap = edge * 2;
                 canvas.round_outline(x - gap, y - gap, w + 2 * gap, h + 2 * gap, radius + gap, edge, color);
             }
+        }
+        // The cursor's ring glides over from the cell it was on. While a
+        // page slides, and when the grid has just come up, it is simply
+        // where it belongs.
+        if let Some(place) = cursor_place {
+            let snap = grid.scrolling() || self.ring_snap.take();
+            let [x, y, w, h] = std::array::from_fn(|side| {
+                let to = f64::from(place[side]);
+                if snap {
+                    self.ring[side].set(Glide::at(to));
+                }
+                self.glide(&self.ring[side], to, EASE).round() as i32
+            });
+            let gap = edge * 2;
+            canvas.round_outline(x - gap, y - gap, w + 2 * gap, h + 2 * gap, radius + gap, edge, TEXT_COLOR);
         }
     }
 
@@ -5928,10 +6254,11 @@ impl App {
             let size = self.loader.thumb(id).map(|thumb| (thumb.width, thumb.height));
             let [x, y, w, h] = size.map_or(area, |size| Self::grid_picture(area, size, false));
             // A dot in the corner of a video not watched yet.
-            if self.is_new(id) {
+            let new = self.new_level(id);
+            if new > 0.0 {
                 let (dot, inset) = ((px as i32 * 2 / 3).max(6), (px as i32 / 2).max(4));
-                canvas.round_fill(x + inset - 2, y + inset - 2, dot + 4, dot + 4, dot / 2 + 2, 0x000000, 150);
-                canvas.round_fill(x + inset, y + inset, dot, dot, dot / 2, accent_soft(), 256);
+                canvas.round_fill(x + inset - 2, y + inset - 2, dot + 4, dot + 4, dot / 2 + 2, 0x000000, (150.0 * new) as u32);
+                canvas.round_fill(x + inset, y + inset, dot, dot, dot / 2, accent_soft(), (256.0 * new) as u32);
             }
             self.want_duration(id);
             if let Some(length) = self.durations.get(&id).copied().flatten().map(clock) {
@@ -6239,7 +6566,9 @@ impl App {
 
     fn strip_left(&self, strip: &Strip, pos: usize, window_width: i32) -> i32 {
         let middle = window_width / 2 - strip.cell_w / 2;
-        middle + (pos as i64 - self.strip_centre()) as i32 * strip.pitch()
+        // The strip slides along to a new middle rather than jumping to it.
+        let centre = self.glide(&self.strip_slide, self.strip_centre() as f64, EASE);
+        middle + ((pos as f64 - centre) * f64::from(strip.pitch())).round() as i32
     }
 
     /// The list position of the filmstrip cell at a window position.
@@ -6309,13 +6638,14 @@ impl App {
             }
             let id = self.list[pos as usize];
             // A dot in the corner of a video not watched yet.
-            if self.is_new(id) {
+            let new = self.new_level(id);
+            if new > 0.0 {
                 let (dot, inset) = ((small as i32 / 2).max(5), (small as i32 / 3).max(3));
                 let left = self.strip_left(strip, pos as usize, canvas.width) + (strip.cell_w - self.loader.thumb(id).map_or(strip.cell_w, |thumb| {
                     fit_size((thumb.width, thumb.height), (strip.cell_w as u32, strip.cell_h as u32), false).0 as i32
                 })) / 2;
-                canvas.round_fill(left + inset - 1, top + inset - 1, dot + 2, dot + 2, dot / 2 + 1, 0x000000, 150);
-                canvas.round_fill(left + inset, top + inset, dot, dot, dot / 2, accent_soft(), 256);
+                canvas.round_fill(left + inset - 1, top + inset - 1, dot + 2, dot + 2, dot / 2 + 1, 0x000000, (150.0 * new) as u32);
+                canvas.round_fill(left + inset, top + inset, dot, dot, dot / 2, accent_soft(), (256.0 * new) as u32);
             }
             self.want_duration(id);
             let Some(length) = self.durations.get(&id).copied().flatten().map(clock) else { continue };
@@ -6571,7 +6901,12 @@ impl App {
             if current {
                 canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, accent(), 256);
             } else if hovered {
-                canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, TEXT_COLOR, 28);
+                // It lights up over a moment rather than at once.
+                if self.row_faded.replace(Some(pos)) != Some(pos) {
+                    self.row_fade.set(Glide::at(0.0));
+                }
+                let lit = self.glide(&self.row_fade, 1.0, EASE);
+                canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, TEXT_COLOR, (28.0 * lit) as u32);
             }
             let line = top + (panel.row_height - Text::line_height(px)) / 2;
             let (main, dim) = row_text(current);
@@ -6589,9 +6924,10 @@ impl App {
             let length_width = if length.is_empty() { 0 } else { text.width(&length, px) + pad };
             text.draw(canvas, panel.width - star_room - length_width, line, px, dim, &length);
             // A dot at the left edge for a video not watched yet.
-            if self.is_new(id) {
+            let new = self.new_level(id);
+            if new > 0.0 {
                 let dot = (px as i32 / 3).max(4);
-                canvas.round_fill(pad * 5 / 4 - dot / 2, top + (panel.row_height - dot) / 2, dot, dot, dot / 2, if current { main } else { accent_soft() }, 256);
+                canvas.round_fill(pad * 5 / 4 - dot / 2, top + (panel.row_height - dot) / 2, dot, dot, dot / 2, if current { main } else { accent_soft() }, (256.0 * new) as u32);
             }
             // Its number in the list, set against the right of a column
             // wide enough for the largest, and then its name.
@@ -7320,6 +7656,10 @@ impl ApplicationHandler<Event> for App {
         if self.trailer_due.is_some_and(|(_, at)| at <= now) {
             self.tend_trailer();
         }
+        if self.anim_due.is_some_and(|due| due <= now) {
+            self.anim_due = None;
+            self.redraw();
+        }
         if self.grid_due.is_some_and(|due| due <= now) {
             self.grid_due = None;
             self.redraw();
@@ -7330,7 +7670,13 @@ impl ApplicationHandler<Event> for App {
         }
 
         let toast_until = self.toast.as_ref().map(|(_, until)| *until);
-        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.font_due, self.grid_due, self.trailer_due.map(|(_, at)| at), self.overview_due];
+        // A little before that it starts on its way out, which wants drawing.
+        let toast_leaves = toast_until.map(|until| until - EASE);
+        if self.options.animations && toast_leaves.is_some_and(|at| at <= now) {
+            self.redraw();
+        }
+        let toast_leaves = toast_leaves.filter(|at| *at > now);
+        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, self.trailer_due.map(|(_, at)| at), self.overview_due];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

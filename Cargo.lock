@@ -870,6 +870,7 @@ dependencies = [
  "kamadak-exif",
  "libloading 0.9.0",
  "memchr",
+ "rayon",
  "softbuffer",
  "toml",
  "winit",

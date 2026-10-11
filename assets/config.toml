@@ -16,6 +16,9 @@
 #     blue  cyan  teal  jade  green  grass  orange  brown  bronze  gold
 #   or any colour as "RRGGBB", such as "3E63DD"
 
+# animations = true
+#   false   nothing slides, fades or glides into place: it is simply there
+
 # What is behind the picture.
 # image-bg = "black"
 #   "black"   "white"   or any colour as "RRGGBB"

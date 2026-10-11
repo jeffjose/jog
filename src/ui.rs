@@ -4,6 +4,7 @@ use std::process::Command;
 use std::sync::mpsc;
 
 use fast_image_resize as fir;
+use rayon::prelude::*;
 
 use crate::frame::Frame;
 
@@ -42,6 +43,35 @@ impl<'a> Canvas<'a> {
         for (pixel, was) in self.rows(x, y, w, h).flatten().zip(was) {
             *pixel = mix(*pixel, *was, amount.min(256));
         }
+    }
+
+    /// Draws `frame` scaled to a rectangle by taking the nearest pixel for
+    /// each, on every core. Rougher than `image` and several times as
+    /// quick, which is the right trade for a picture on the move.
+    pub fn image_fast(&mut self, frame: &Frame, x: i32, y: i32, w: i32, h: i32) {
+        let (sw, sh) = (frame.width as usize, frame.height as usize);
+        let (x0, x1) = (x.max(0), (x + w).min(self.width));
+        if w <= 0 || h <= 0 || x0 >= x1 || sw == 0 || frame.pixels.len() < sw * sh {
+            return;
+        }
+        let columns: Vec<usize> = (x0..x1).map(|px| (i64::from(px - x) * sw as i64 / i64::from(w)) as usize).collect();
+        let width = self.width as usize;
+        self.pixels.par_chunks_exact_mut(width).enumerate().for_each(|(py, row)| {
+            let dy = py as i32 - y;
+            if dy < 0 || dy >= h {
+                return;
+            }
+            let sy = (i64::from(dy) * sh as i64 / i64::from(h)) as usize;
+            let source = &frame.pixels[sy * sw..(sy + 1) * sw];
+            for (pixel, &column) in row[x0 as usize..x1 as usize].iter_mut().zip(&columns) {
+                *pixel = source[column];
+            }
+        });
+    }
+
+    /// Everything on the canvas.
+    pub fn all(&mut self) -> &mut [u32] {
+        self.pixels
     }
 
     /// Draws `frame` as `image` does, with rounded corners, whatever lies
@@ -272,6 +302,27 @@ fn rounded_cover(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32, radius: i32, 
 fn mix(a: u32, b: u32, amount: u32) -> u32 {
     let lerp = |mask: u32| (((a & mask) * (256 - amount) + (b & mask) * amount) >> 8) & mask;
     lerp(0xFF00FF) | lerp(0x00FF00)
+}
+
+/// How many pixels each core is handed at a time when a whole picture is
+/// worked over.
+const SHARE: usize = 1 << 16;
+
+/// Lays one whole picture back over another of the same size, `amount`/256
+/// opaque, on every core: at 4K that is eight million pixels a frame.
+pub fn dissolve_all(pixels: &mut [u32], was: &[u32], amount: u32) {
+    let amount = amount.min(256);
+    pixels.par_chunks_mut(SHARE).zip(was.par_chunks(SHARE)).for_each(|(pixels, was)| {
+        for (pixel, was) in pixels.iter_mut().zip(was) {
+            *pixel = mix(*pixel, *was, amount);
+        }
+    });
+}
+
+/// Copies a whole picture into a buffer kept for the purpose, on every core.
+pub fn copy_all(into: &mut Vec<u32>, from: &[u32]) {
+    into.resize(from.len(), 0);
+    into.par_chunks_mut(SHARE).zip(from.par_chunks(SHARE)).for_each(|(into, from)| into.copy_from_slice(from));
 }
 
 const FONT_PATHS: &[&str] = &[
