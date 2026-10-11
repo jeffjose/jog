@@ -1,33 +1,32 @@
-//! The scenes of a video: where its picture changes to something else,
-//! and a frame from each, to get about in it by what is to be seen.
+//! The scenes of a video: a frame from each of a number of equal parts of
+//! it, to get about in it by what is to be seen.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use crate::frame::Frame;
-use crate::story::{self, is_flat, segment_at};
+use crate::frame::{fit_size, Frame};
+use crate::mpv::{Player, PlayerEvent, Role, Signal};
+use crate::story::{is_flat, segment_at};
 
-/// How unlike the one before a keyframe has to be, from 0 to 1, to begin a
-/// scene.
-const CHANGE: f64 = 0.1;
-/// Scenes shorter than this many seconds are taken with the one before.
-const SHORTEST: f64 = 2.0;
-/// No more scenes than this are kept: a strip of hundreds is no help.
-const MOST: usize = 60;
-/// A video with no changes to be found is cut into this many equal parts.
-const PARTS: usize = 8;
+/// How many equal parts a video is shown as.
+pub const PARTS: usize = 10;
+/// The frames are shrunk to fit this.
+const BOUNDS: (u32, u32) = (480, 270);
+/// How long the player is given to open a file or get to a place in it.
+const PATIENCE: Duration = Duration::from_secs(3);
 
-/// What the thread finding scenes reports.
-pub enum Found {
-    /// When each scene of a video starts, in seconds.
-    Starts(usize, Vec<f64>),
-    /// A frame from the scene at this place among them.
-    Frame(usize, usize, Frame),
+/// When each part of a video this long starts, in seconds.
+pub fn starts(length: f64) -> Vec<f64> {
+    (0..PARTS).map(|part| length * part as f64 / PARTS as f64).collect()
 }
 
-/// Finds scenes on a thread of its own, one video at a time. Asking for
+/// A frame from the part at this place among those of a video.
+pub struct Found(pub usize, pub usize, pub Frame);
+
+/// Fetches frames on a thread of its own, one video at a time. Asking for
 /// another video drops what is left of the one before.
 pub struct Finder {
     jobs: mpsc::Sender<(usize, PathBuf, Vec<f64>)>,
@@ -35,29 +34,43 @@ pub struct Finder {
 }
 
 impl Finder {
-    /// `report` is called from the finding thread; it returns whether
+    /// `report` is called from the fetching thread; it returns whether
     /// anyone is still listening.
     pub fn new(report: impl Fn(Found) -> bool + Send + 'static) -> Finder {
         let (jobs, queue) = mpsc::channel::<(usize, PathBuf, Vec<f64>)>();
         let wanted = Arc::new(AtomicUsize::new(usize::MAX));
         let latest = wanted.clone();
         std::thread::spawn(move || {
-            for (id, path, chapters) in queue {
+            // A player of its own goes from place to place in a file many
+            // times faster than starting ffmpeg for each frame does. Where
+            // there is none, ffmpeg it is.
+            let (signals, inbox) = mpsc::channel();
+            let signals = Mutex::new(signals);
+            let wake = move |signal| {
+                let _ = signals.lock().unwrap().send(signal);
+            };
+            let player = Player::new(Role::Preview, wake).ok();
+            for (id, path, starts) in queue {
                 let current = || latest.load(Ordering::Relaxed) == id;
                 if !current() {
                     continue;
                 }
-                // A video that comes in chapters has said where its scenes are.
-                let starts = if chapters.len() > 1 { chapters } else { starts(&path) };
-                if !report(Found::Starts(id, starts.clone())) {
-                    return;
-                }
+                let opened = player.as_ref().filter(|player| {
+                    player.open(&path);
+                    arrive(player, &inbox).is_some()
+                });
                 for (index, start) in starts.into_iter().enumerate() {
                     if !current() {
                         break;
                     }
-                    if let Some(frame) = frame_of(&path, start) {
-                        report(Found::Frame(id, index, frame));
+                    let frame = match opened {
+                        Some(player) => frame_at(player, &inbox, start),
+                        None => segment_at(&path, start + 0.1).pop(),
+                    };
+                    if let Some(frame) = frame {
+                        if !report(Found(id, index, frame)) {
+                            return;
+                        }
                     }
                 }
             }
@@ -65,64 +78,54 @@ impl Finder {
         Finder { jobs, wanted }
     }
 
-    /// Asks for the scenes of video `id`, which are its chapters if it has
-    /// any: `chapters` is when each of those starts.
-    pub fn want(&self, id: usize, path: PathBuf, chapters: Vec<f64>) {
+    /// Asks for a frame from each part of video `id`, which start at
+    /// `starts`.
+    pub fn want(&self, id: usize, path: PathBuf, starts: Vec<f64>) {
         self.wanted.store(id, Ordering::Relaxed);
-        let _ = self.jobs.send((id, path, chapters));
+        let _ = self.jobs.send((id, path, starts));
     }
 }
 
-/// When each scene of a video starts. Only its keyframes are looked at,
-/// which takes a small part of the time decoding all of it would, and an
-/// encoder puts one where the picture changes anyway.
-fn starts(path: &Path) -> Vec<f64> {
-    let filter = format!("scale=160:-2,select='eq(n\\,0)+gt(scene\\,{CHANGE})',showinfo");
-    let output = Command::new("ffmpeg")
-        .args(["-hide_banner", "-nostats", "-loglevel", "info", "-skip_frame", "nokey", "-i"])
-        .arg(path)
-        .args(["-an", "-vf", &filter, "-vsync", "vfr", "-f", "null", "-"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .output();
-    let said = output.map(|output| String::from_utf8_lossy(&output.stderr).into_owned()).unwrap_or_default();
-    let found = spaced(said.lines().filter_map(shown_at).collect());
-    if found.len() > 1 {
-        return found;
-    }
-    // One long take: equal parts are better than nothing to go by.
-    let length = story::length(path).unwrap_or(0.0);
-    (0..PARTS).map(|part| length * part as f64 / PARTS as f64).collect()
-}
-
-/// The time on a line the `showinfo` filter wrote about a frame.
-fn shown_at(line: &str) -> Option<f64> {
-    let (_, rest) = line.split_once("pts_time:")?;
-    rest.split_whitespace().next()?.parse().ok()
-}
-
-/// The starts that are far enough after the one before, the first always
-/// at the very beginning, and thinned out evenly if there are too many.
-fn spaced(times: Vec<f64>) -> Vec<f64> {
-    let mut kept: Vec<f64> = vec![0.0];
-    for time in times {
-        if time - kept[kept.len() - 1] >= SHORTEST {
-            kept.push(time);
-        }
-    }
-    let step = kept.len().div_ceil(MOST);
-    kept.into_iter().step_by(step).collect()
-}
-
-/// A frame to stand for the scene starting at `start`: its first, or one
-/// from a second in when it opens on a single colour, as a fade does.
-fn frame_of(path: &Path, start: f64) -> Option<Frame> {
-    // A little way in, so that the keyframe found is this scene's own.
-    let first = segment_at(path, start + 0.1).pop()?;
+/// A frame to stand for the part starting at `start`: the keyframe there,
+/// or the frame a few seconds in when that is a single colour, as the
+/// first frame of a video and of a fade often is.
+fn frame_at(player: &Player, inbox: &Receiver<Signal>, start: f64) -> Option<Frame> {
+    let go = |seconds: f64, how: &[u8]| {
+        player.command_later(&[b"seek", format!("{seconds:.3}").as_bytes(), how]);
+        arrive(player, inbox)
+    };
+    let first = go(start, b"absolute+keyframes")?;
     if !is_flat(&first.pixels) {
         return Some(first);
     }
-    segment_at(path, start + 1.0).pop().or(Some(first))
+    // To that very moment: the nearest keyframe is the one just tried.
+    go(start + 3.0, b"absolute+exact").or(Some(first))
+}
+
+/// Waits for the player to have got where it was last sent, a file or a
+/// place in one, and returns the frame it shows there. Every frame it
+/// announces on the way is drawn, as it must be for the player to go on.
+fn arrive(player: &Player, inbox: &Receiver<Signal>) -> Option<Frame> {
+    let until = Instant::now() + PATIENCE;
+    let (mut there, mut frame) = (false, None);
+    while !(there && frame.is_some()) {
+        match inbox.recv_timeout(until.saturating_duration_since(Instant::now())).ok()? {
+            Signal::Events => there |= player.events().contains(&PlayerEvent::Showing),
+            // Asked to draw again without a new frame, it has nothing to
+            // show of where it is going.
+            Signal::Frame if !player.frame_waiting() => {}
+            Signal::Frame => {
+                let size = player.number("dwidth").zip(player.number("dheight"));
+                let native = size.map_or((16, 9), |(w, h)| ((w as u32).max(1), (h as u32).max(1)));
+                let (width, height) = fit_size(native, BOUNDS, false);
+                let mut pixels = vec![0; width as usize * height as usize];
+                if player.render(&mut pixels, width, height) {
+                    frame = Some(Frame::still(width, height, native, pixels));
+                }
+            }
+        }
+    }
+    frame
 }
 
 #[cfg(test)]
@@ -130,19 +133,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn times_are_read_from_what_ffmpeg_says() {
-        let line = "[Parsed_showinfo_2 @ 0x55] n:   3 pts:  48048 pts_time:12.012  duration: 1 fmt:yuv420p";
-        assert_eq!(shown_at(line), Some(12.012));
-        assert_eq!(shown_at("frame=   10 fps=0.0 q=-0.0 size=N/A"), None);
-    }
-
-    #[test]
-    fn scenes_start_at_the_beginning_and_are_not_too_short() {
-        assert_eq!(spaced(vec![0.0, 0.5, 4.0, 5.0, 9.5]), [0.0, 4.0, 9.5]);
-        assert_eq!(spaced(vec![3.0]), [0.0, 3.0]);
-        assert_eq!(spaced(Vec::new()), [0.0]);
-        // Too many are thinned out evenly, keeping the first.
-        let many = spaced((0..300).map(|n| f64::from(n) * 10.0).collect());
-        assert!(many.len() <= MOST && many[0] == 0.0);
+    fn a_video_is_cut_into_equal_parts_from_its_start() {
+        let starts = starts(200.0);
+        assert_eq!(starts.len(), PARTS);
+        assert_eq!((starts[0], starts[1], starts[9]), (0.0, 20.0, 180.0));
     }
 }

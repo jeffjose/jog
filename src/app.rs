@@ -959,6 +959,8 @@ pub struct App {
     /// Whether the strip of scenes is up, the scenes of the videos looked
     /// at so far, and the thread that finds them.
     scenes_on: bool,
+    /// The scene the pointer is on.
+    scene_over: Option<usize>,
     scenes: HashMap<usize, SceneList>,
     scene_finder: Option<scenes::Finder>,
     /// Whether subtitles show, kept from one video to the next, their size
@@ -1371,6 +1373,7 @@ impl App {
             looping: Looping::Off,
             precise: options.precise_seeking,
             scenes_on: false,
+            scene_over: None,
             scenes: HashMap::new(),
             scene_finder: None,
             subtitles: options.subtitles,
@@ -3333,22 +3336,19 @@ impl App {
         self.strip_visible() || self.scenes_shown()
     }
 
-    /// Asks for the scenes of the video on view, once it is showing and
-    /// unless they have been asked for before. Its chapters are its scenes
-    /// if it has any.
+    /// Asks for a frame from each of the equal parts of the video on view,
+    /// once it is showing and unless they have been asked for before.
     fn want_scenes(&mut self) {
-        let (Some(player), Some(video)) = (&self.player, &self.video) else { return };
-        let id = video.id;
-        if !video.showing || self.scenes.contains_key(&id) {
+        let Some(id) = self.video.as_ref().filter(|video| video.showing).map(|video| video.id) else { return };
+        if self.scenes.contains_key(&id) {
             return;
         }
-        let count = player.number("chapter-list/count").unwrap_or(0.0) as usize;
-        let chapters: Vec<f64> = (0..count).filter_map(|n| player.number(&format!("chapter-list/{n}/time"))).collect();
-        let titles = (0..count).map(|n| player.text(&format!("chapter-list/{n}/title"))).collect();
-        self.scenes.insert(id, SceneList { starts: None, titles: if chapters.len() > 1 { titles } else { Vec::new() }, frames: Vec::new() });
+        let Some((_, length)) = self.video_time() else { return };
+        let starts = scenes::starts(length);
+        self.scenes.insert(id, SceneList { frames: vec![None; starts.len()], starts: Some(starts.clone()) });
         let proxy = self.proxy.clone();
         let finder = self.scene_finder.get_or_insert_with(|| scenes::Finder::new(move |found| proxy.send_event(Event::Scenes(found)).is_ok()));
-        finder.want(id, self.files[id].clone(), chapters);
+        finder.want(id, self.files[id].clone(), starts);
     }
 
     /// The scenes of the video on view, once they are known, and which of
@@ -3413,7 +3413,11 @@ impl App {
             if left + strip.cell_w < 0 || left > canvas.width {
                 continue;
             }
-            let [x, y, w, h] = match list.frames.get(index).and_then(Option::as_ref) {
+            // Under the pointer the scene plays, once the player has it.
+            let playing_here = self.trailer.as_ref().filter(|trailer| trailer.id == usize::MAX - index);
+            let live = playing_here.and_then(|trailer| trailer.frame.as_ref()).filter(|frame| !frame.pixels.is_empty());
+            let still = list.frames.get(index).and_then(Option::as_ref).map(|frame| &**frame);
+            let [x, y, w, h] = match live.or(still) {
                 Some(frame) => {
                     let (w, h) = fit_size((frame.width, frame.height), (strip.cell_w as u32, strip.cell_h as u32), false);
                     let (w, h) = (w as i32, h as i32);
@@ -3436,13 +3440,13 @@ impl App {
     }
 
     /// The words on the strip of scenes: in the corner of each when it
-    /// starts, and across its top the name of a chapter that has one.
-    /// Until the scenes are found, that they are being looked for.
+    /// starts.
+    /// Until the video is showing, that they are on their way.
     fn draw_scene_labels(&self, canvas: &mut Canvas, text: &mut Text, strip: &Strip, px: u32) {
         let small = (px * 3 / 4).max(10);
         let (top, pad, line) = (strip.top + strip.pad, (small as i32 / 4).max(2), Text::line_height(small));
-        let Some((list, starts, playing)) = self.scenes_now() else {
-            let words = "Finding the scenes…";
+        let Some((_, starts, playing)) = self.scenes_now() else {
+            let words = "Scenes…";
             let left = (canvas.width - text.width(words, px)) / 2;
             return text.draw(canvas, left, strip.top + (strip.height - Text::line_height(px)) / 2, px, DIM_TEXT_COLOR, words);
         };
@@ -3456,11 +3460,6 @@ impl App {
             let badge_y = top + strip.cell_h - line - pad;
             canvas.round_fill(badge_x, badge_y, badge_w, line, pad, 0x000000, 190);
             text.draw(canvas, badge_x + pad, badge_y, small, TEXT_COLOR, &at);
-            if let Some(title) = list.titles.get(index).and_then(Option::as_ref).filter(|title| !title.is_empty()) {
-                let title = clipped(text, title, strip.cell_w - 4 * pad, small);
-                canvas.round_fill(left + pad, top + pad, text.width(&title, small) + 2 * pad, line, pad, 0x000000, 190);
-                text.draw(canvas, left + 2 * pad, top + pad, small, TEXT_COLOR, &title);
-            }
         }
     }
 
@@ -5071,6 +5070,12 @@ impl App {
     fn mouse_moved(&mut self, x: f64, y: f64) {
         let (dx, dy) = (x - self.mouse.0, y - self.mouse.1);
         self.mouse = (x, y);
+        // The scene under the pointer is picked out, and plays.
+        let over = self.scene_at(x, y);
+        if over != self.scene_over {
+            self.scene_over = over;
+            self.redraw();
+        }
 
         // In the delete confirmation the button under the pointer is the
         // one picked out, Delete turning red as it is.
@@ -6795,8 +6800,13 @@ impl App {
         files::is_video(&self.files[id]).then_some(id)
     }
 
-    /// The video the grid plays a trailer of: the one under its cursor.
+    /// What a trailer is played of: in the grid, the video under its cursor.
     fn trailer_subject(&self) -> Option<usize> {
+        // With the strip of scenes up, the scene under the pointer: it goes
+        // by a number no file has, counted down from the largest there is.
+        if self.scenes_shown() {
+            return self.scene_at(self.mouse.0, self.mouse.1).map(|index| usize::MAX - index);
+        }
         let grid = self.grid.as_ref().filter(|grid| grid.moved && self.palette.is_none() && self.overview.is_none())?;
         let id = self.list[grid.cursor];
         files::is_video(&self.files[id]).then_some(id)
@@ -6809,7 +6819,9 @@ impl App {
     /// of a trailer: waited for, skipped, started, showing or stopped.
     fn trailer_note(&self, what: &str, id: usize, more: &str) {
         if self.options.verbose || self.options.debug {
-            eprintln!("jog: [trailer] {what:<8} {}{more}", self.name_of(id));
+            // A scene of the video on view goes by its place in the strip.
+            let name = if id < self.files.len() { self.name_of(id) } else { format!("scene {}", usize::MAX - id + 1) };
+            eprintln!("jog: [trailer] {what:<8} {name}{more}");
         }
     }
 
@@ -6842,9 +6854,20 @@ impl App {
         }
         let proxy = self.proxy.clone();
         let window = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
-        let bounds = self.grid_layout(window).thumb_size();
+        // A scene of the video on view plays on from where it starts, in
+        // its cell of the strip; a video in the grid as a trailer of the
+        // whole of it, in its cell there.
+        let scene = self.scenes_now().and_then(|(_, starts, _)| starts.get(usize::MAX - id).copied()).zip(self.video.as_ref().map(|video| video.id));
+        let (file, bounds, from) = match scene {
+            Some((start, file)) => {
+                let strip = Strip::for_height(window.1);
+                (file, (strip.cell_w as u32, strip.cell_h as u32), Some(start))
+            }
+            None if id < self.files.len() => (id, self.grid_layout(window).thumb_size(), None),
+            None => return,
+        };
         let trailers = self.trailers.get_or_insert_with(|| Trailers::new(move |note| proxy.send_event(Event::Trailer(note)).is_ok()));
-        trailers.play(id, self.files[id].clone(), bounds);
+        trailers.play(id, self.files[file].clone(), bounds, from);
         self.trailer = Some(Trailer { id, frame: None, since: None, asked: Instant::now() });
         self.trailer_note("started", id, "");
     }
@@ -7432,12 +7455,11 @@ fn clock(seconds: f64) -> String {
     }
 }
 
-/// The scenes of one video: when each starts, once that is known, the
-/// names of those that are chapters with one, and a frame from each as
+/// The scenes of one video: when each of its equal parts starts, and a
+/// frame from each as
 /// they come in.
 struct SceneList {
     starts: Option<Vec<f64>>,
-    titles: Vec<Option<String>>,
     frames: Vec<Option<Arc<Frame>>>,
 }
 
@@ -7589,14 +7611,7 @@ impl ApplicationHandler<Event> for App {
                 self.durations.insert(id, seconds);
                 self.redraw();
             }
-            Event::Scenes(scenes::Found::Starts(id, starts)) => {
-                if let Some(list) = self.scenes.get_mut(&id) {
-                    list.frames = vec![None; starts.len()];
-                    list.starts = Some(starts);
-                }
-                self.redraw();
-            }
-            Event::Scenes(scenes::Found::Frame(id, index, frame)) => {
+            Event::Scenes(scenes::Found(id, index, frame)) => {
                 if let Some(place) = self.scenes.get_mut(&id).and_then(|list| list.frames.get_mut(index)) {
                     *place = Some(Arc::new(frame));
                 }

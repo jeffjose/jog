@@ -398,6 +398,13 @@ impl Player {
         }
     }
 
+    /// Whether a frame not yet drawn is waiting: the player also asks to
+    /// be drawn again for other reasons, with the frame it had before.
+    pub fn frame_waiting(&self) -> bool {
+        // SAFETY: the render context lives as long as the player.
+        unsafe { (self.api.render_context_update)(self.render) & 1 != 0 }
+    }
+
     /// Draws the current frame, scaled and letterboxed to fill a
     /// `width` x `height` buffer of `0RGB` pixels. Waits for the frame's
     /// display time if it is not due yet.

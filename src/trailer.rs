@@ -25,8 +25,9 @@ pub enum Note {
 }
 
 enum Message {
-    /// Play this video, in frames fitting these bounds.
-    Play(usize, PathBuf, (u32, u32)),
+    /// Play this video, in frames fitting these bounds: as a trailer, or
+    /// straight on from a number of seconds in.
+    Play(usize, PathBuf, (u32, u32), Option<f64>),
     Stop,
     Player(Signal),
 }
@@ -35,6 +36,8 @@ enum Message {
 struct Playing {
     id: usize,
     bounds: (u32, u32),
+    /// Where it is played on from, when it is not a trailer of the whole.
+    from: Option<f64>,
     length: Option<f64>,
     stretch: usize,
     next_at: Option<Instant>,
@@ -110,11 +113,18 @@ impl Trailers {
                         // video before.
                         heed(&player, &mut opening, &mut playing);
                         playing = match newest {
-                            Some(Message::Play(id, path, bounds)) => {
+                            Some(Message::Play(id, path, bounds, from)) => {
                                 opening += 1;
-                                player.open(&path);
+                                match from {
+                                    Some(start) => {
+                                        use std::os::unix::ffi::OsStrExt;
+                                        let start = format!("start={start:.3}");
+                                        player.command_later(&[b"loadfile", path.as_os_str().as_bytes(), b"replace", start.as_bytes()]);
+                                    }
+                                    None => player.open(&path),
+                                }
                                 player.set("pause", "no");
-                                Some(Playing { id, bounds, length: None, stretch: 0, next_at: None, restarts: 0, showing: false })
+                                Some(Playing { id, bounds, from, length: None, stretch: 0, next_at: None, restarts: 0, showing: false })
                             }
                             _ => {
                                 player.set("pause", "yes");
@@ -155,6 +165,12 @@ impl Trailers {
                 if playing.restarts == 0 {
                     continue;
                 }
+                // Played on from somewhere, it has nothing more to do: the
+                // player opened it there.
+                if playing.from.is_some() {
+                    playing.showing = true;
+                    continue;
+                }
                 if playing.length.is_none() {
                     playing.length = player.number("duration");
                     if let Some(length) = playing.length {
@@ -177,9 +193,10 @@ impl Trailers {
         Trailers { messages, latest }
     }
 
-    /// Plays video `id`, dropping whatever was playing.
-    pub fn play(&self, id: usize, path: PathBuf, bounds: (u32, u32)) {
-        let _ = self.messages.send(Message::Play(id, path, bounds));
+    /// Plays video `id`, dropping whatever was playing: as a trailer, or
+    /// with `from` straight on from that many seconds in.
+    pub fn play(&self, id: usize, path: PathBuf, bounds: (u32, u32), from: Option<f64>) {
+        let _ = self.messages.send(Message::Play(id, path, bounds, from));
     }
 
     pub fn stop(&self) {
