@@ -26,6 +26,7 @@ use crate::mpv::{Player, PlayerEvent, Role, Signal};
 use crate::ops;
 use crate::options::{LastSlide, Options, Start, SubtitleStyle};
 use crate::positions::Positions;
+use crate::scenes;
 use crate::seen::Seen;
 use crate::render;
 use crate::rng::Rng;
@@ -84,6 +85,8 @@ const VIDEO_END: f64 = 0.25;
 const VIDEO_START: f64 = 0.5;
 /// How long a video has to have been playing to count as watched.
 const SEEN_AFTER: Duration = Duration::from_secs(5);
+/// How far into a scene, in seconds, going back still means the one before.
+const SCENE_RESTART: f64 = 1.5;
 /// The usual size of subtitles and how far off the bottom edge they sit,
 /// in pixels of a picture 720 high.
 const SUBTITLE_SIZE: f64 = 44.0;
@@ -161,6 +164,8 @@ pub enum Event {
     Duration(usize, Option<f64>),
     /// A frame from along a video, or word about fetching them.
     Story(Found),
+    /// The scenes of a video, found on another thread.
+    Scenes(scenes::Found),
     /// Word from the thread playing the grid's trailer.
     Trailer(Note),
     /// The files of a workspace not yet gone to, listed for the overview.
@@ -843,6 +848,11 @@ pub struct App {
     /// What a video that has played to its end does, kept from one video
     /// to the next.
     looping: Looping,
+    /// Whether the strip of scenes is up, the scenes of the videos looked
+    /// at so far, and the thread that finds them.
+    scenes_on: bool,
+    scenes: HashMap<usize, SceneList>,
+    scene_finder: Option<scenes::Finder>,
     /// Whether subtitles show, kept from one video to the next, their size
     /// as a percentage, and how far off the bottom edge they sit.
     subtitles: bool,
@@ -1229,6 +1239,9 @@ impl App {
             speed: 1.0,
             muted: false,
             looping: Looping::Off,
+            scenes_on: false,
+            scenes: HashMap::new(),
+            scene_finder: None,
             subtitles: options.subtitles,
             subtitle_size: options.subtitle_size,
             subtitle_margin: SUBTITLE_MARGIN,
@@ -1315,6 +1328,10 @@ impl App {
     }
 
     fn strip_visible(&self) -> bool {
+        // The strip of scenes stands where it would.
+        if self.scenes_shown() {
+            return false;
+        }
         self.strip_pinned || self.strip_hover
     }
 
@@ -1598,7 +1615,7 @@ impl App {
     fn seek_bar(&self) -> SeekBar {
         let (width, height) = self.window_size();
         let unit = ui_px(height) as i32;
-        let base = if self.strip_pinned { Strip::for_height(height).top } else { height as i32 };
+        let base = if self.strip_pinned || self.scenes_shown() { Strip::for_height(height).top } else { height as i32 };
         // Room on the left for the three buttons and the elapsed time, and
         // on the right for the duration and the buttons there.
         let (end, buttons) = (width as i32, self.bar_buttons().len() as i32);
@@ -2049,6 +2066,17 @@ impl App {
         let modifiers = self.modifiers;
         if self.player.is_none() || modifiers.alt_key() {
             return false;
+        }
+        // With the scenes up, the arrows go from one of them to the next.
+        if self.scenes_shown() && !modifiers.control_key() && !modifiers.shift_key() {
+            let way = match key {
+                Key::Named(NamedKey::ArrowRight) => Some(true),
+                Key::Named(NamedKey::ArrowLeft) => Some(false),
+                _ => None,
+            };
+            if way.is_some_and(|forward| self.scene_jump(forward)) {
+                return true;
+            }
         }
         // Holding a seek key down covers ground faster the longer it is held.
         self.held = if repeat { self.held + 1 } else { 0 };
@@ -2690,6 +2718,12 @@ impl App {
             VolumeDown => self.video_action(VideoAction::Volume(-5)),
             Restart => self.restart_video(),
             CycleLoop => self.cycle_loop(),
+            ToggleScenes => {
+                self.scenes_on = !self.scenes_on;
+                if self.scenes_on && self.video.is_none() {
+                    self.toast("Scenes are of a video: there are none to show here");
+                }
+            }
             CycleSubtitles => self.cycle_subtitles(),
             CycleAudio => self.cycle_audio(),
             SubtitlesLarger => self.size_subtitles(true),
@@ -2735,6 +2769,7 @@ impl App {
             ToggleGridTitles => self.grid_titles,
             ToggleMute => self.muted,
             CycleLoop => self.looping != Looping::Off,
+            ToggleScenes => self.scenes_on,
             CycleSubtitles => self.subtitles,
             SortBy(sort) => self.sort == Some(sort),
             ReverseOrder => self.reversed,
@@ -3099,6 +3134,149 @@ impl App {
             key => drop(prompt.field.key(key, self.modifiers)),
         }
         self.redraw();
+    }
+
+    // ---- Scenes --------------------------------------------------------
+
+    /// Whether the strip of the video's scenes is up, in place of the
+    /// filmstrip of files.
+    fn scenes_shown(&self) -> bool {
+        self.scenes_on && self.grid.is_none() && self.overview.is_none() && self.video.is_some()
+    }
+
+    /// Whether anything stands along the bottom of the window.
+    fn band_shown(&self) -> bool {
+        self.strip_visible() || self.scenes_shown()
+    }
+
+    /// Asks for the scenes of the video on view, once it is showing and
+    /// unless they have been asked for before. Its chapters are its scenes
+    /// if it has any.
+    fn want_scenes(&mut self) {
+        let (Some(player), Some(video)) = (&self.player, &self.video) else { return };
+        let id = video.id;
+        if !video.showing || self.scenes.contains_key(&id) {
+            return;
+        }
+        let count = player.number("chapter-list/count").unwrap_or(0.0) as usize;
+        let chapters: Vec<f64> = (0..count).filter_map(|n| player.number(&format!("chapter-list/{n}/time"))).collect();
+        let titles = (0..count).map(|n| player.text(&format!("chapter-list/{n}/title"))).collect();
+        self.scenes.insert(id, SceneList { starts: None, titles: if chapters.len() > 1 { titles } else { Vec::new() }, frames: Vec::new() });
+        let proxy = self.proxy.clone();
+        let finder = self.scene_finder.get_or_insert_with(|| scenes::Finder::new(move |found| proxy.send_event(Event::Scenes(found)).is_ok()));
+        finder.want(id, self.files[id].clone(), chapters);
+    }
+
+    /// The scenes of the video on view, once they are known, and which of
+    /// them is playing.
+    fn scenes_now(&self) -> Option<(&SceneList, &[f64], usize)> {
+        let list = self.scenes.get(&self.video.as_ref()?.id)?;
+        let starts = list.starts.as_deref()?;
+        let (position, _) = self.video_time()?;
+        // A hair early, so that the scene just jumped to is the one playing.
+        let playing = starts.iter().rposition(|start| *start <= position + 0.05).unwrap_or(0);
+        Some((list, starts, playing))
+    }
+
+    /// Goes to the scene after the one playing, or back to the start of
+    /// this one and from there to the one before. Past the last scene is
+    /// the next file. Returns whether there were scenes to go by.
+    fn scene_jump(&mut self, forward: bool) -> bool {
+        let Some((_, starts, playing)) = self.scenes_now() else { return false };
+        let Some((position, length)) = self.video_time() else { return false };
+        let to = match forward {
+            true => starts.get(playing + 1).copied(),
+            // A moment into a scene, back is to where it began.
+            false if position - starts[playing] > SCENE_RESTART || playing == 0 => Some(starts[playing]),
+            false => Some(starts[playing - 1]),
+        };
+        match to {
+            Some(start) => {
+                self.seek_to(start / length, true);
+                self.time_until = Some(Instant::now() + TOAST);
+            }
+            None => self.step(true),
+        }
+        true
+    }
+
+    /// Where the cell of a scene is along the strip, which keeps the one
+    /// playing in the middle.
+    fn scene_left(&self, strip: &Strip, index: usize, playing: usize, window_width: i32) -> i32 {
+        (window_width - strip.cell_w) / 2 + (index as i32 - playing as i32) * strip.pitch()
+    }
+
+    /// The scene whose cell a window position is on.
+    fn scene_at(&self, x: f64, y: f64) -> Option<usize> {
+        let (width, height) = self.window_size();
+        let strip = Strip::for_height(height);
+        let (_, starts, playing) = self.scenes_now().filter(|_| self.scenes_shown() && y >= f64::from(strip.top))?;
+        (0..starts.len()).find(|&index| {
+            let left = self.scene_left(&strip, index, playing, width as i32);
+            (left..left + strip.cell_w).contains(&(x as i32))
+        })
+    }
+
+    fn draw_scenes(&self, canvas: &mut Canvas, strip: Strip) {
+        canvas.shade(0, strip.top, canvas.width, strip.height, 64);
+        let Some((list, starts, playing)) = self.scenes_now() else { return };
+        let top = strip.top + strip.pad;
+        let (round, edge) = ((strip.pad * 2 / 3).max(3), (strip.pad / 4).max(2));
+        let over = self.scene_at(self.mouse.0, self.mouse.1);
+        for index in 0..starts.len() {
+            let left = self.scene_left(&strip, index, playing, canvas.width);
+            if left + strip.cell_w < 0 || left > canvas.width {
+                continue;
+            }
+            let [x, y, w, h] = match list.frames.get(index).and_then(Option::as_ref) {
+                Some(frame) => {
+                    let (w, h) = fit_size((frame.width, frame.height), (strip.cell_w as u32, strip.cell_h as u32), false);
+                    let (w, h) = (w as i32, h as i32);
+                    let place = [left + (strip.cell_w - w) / 2, top + (strip.cell_h - h) / 2, w, h];
+                    canvas.image_rounded(frame, place[0], place[1], w, h, round);
+                    place
+                }
+                None => {
+                    canvas.round_fill(left, top, strip.cell_w, strip.cell_h, round, PLACEHOLDER_COLOR, 256);
+                    [left, top, strip.cell_w, strip.cell_h]
+                }
+            };
+            // The scene playing is ringed brightly, the one under the
+            // pointer quietly.
+            let ring = if index == playing { Some(TEXT_COLOR) } else { (over == Some(index)).then_some(accent_soft()) };
+            if let Some(color) = ring {
+                canvas.round_outline(x - edge, y - edge, w + 2 * edge, h + 2 * edge, round + edge, edge, color);
+            }
+        }
+    }
+
+    /// The words on the strip of scenes: in the corner of each when it
+    /// starts, and across its top the name of a chapter that has one.
+    /// Until the scenes are found, that they are being looked for.
+    fn draw_scene_labels(&self, canvas: &mut Canvas, text: &mut Text, strip: &Strip, px: u32) {
+        let small = (px * 3 / 4).max(10);
+        let (top, pad, line) = (strip.top + strip.pad, (small as i32 / 4).max(2), Text::line_height(small));
+        let Some((list, starts, playing)) = self.scenes_now() else {
+            let words = "Finding the scenes…";
+            let left = (canvas.width - text.width(words, px)) / 2;
+            return text.draw(canvas, left, strip.top + (strip.height - Text::line_height(px)) / 2, px, DIM_TEXT_COLOR, words);
+        };
+        for (index, start) in starts.iter().enumerate() {
+            let left = self.scene_left(strip, index, playing, canvas.width);
+            if left + strip.cell_w < 0 || left > canvas.width {
+                continue;
+            }
+            let at = clock(*start);
+            let (badge_w, badge_x) = (text.width(&at, small) + 2 * pad, left + pad);
+            let badge_y = top + strip.cell_h - line - pad;
+            canvas.round_fill(badge_x, badge_y, badge_w, line, pad, 0x000000, 190);
+            text.draw(canvas, badge_x + pad, badge_y, small, TEXT_COLOR, &at);
+            if let Some(title) = list.titles.get(index).and_then(Option::as_ref).filter(|title| !title.is_empty()) {
+                let title = clipped(text, title, strip.cell_w - 4 * pad, small);
+                canvas.round_fill(left + pad, top + pad, text.width(&title, small) + 2 * pad, line, pad, 0x000000, 190);
+                text.draw(canvas, left + 2 * pad, top + pad, small, TEXT_COLOR, &title);
+            }
+        }
     }
 
     // ---- Search --------------------------------------------------------
@@ -4777,7 +4955,7 @@ impl App {
                 // open, it stays while the pointer is anywhere over it.
                 // The button that closes it sits just above it.
                 let reach = ui_px(height) as i32 * 2;
-                let zone = if self.strip_visible() { Strip::for_height(height).height + reach } else { (height as i32 / 50).max(6) };
+                let zone = if self.band_shown() { Strip::for_height(height).height + reach } else { (height as i32 / 50).max(6) };
                 self.set_strip_hover(y >= f64::from(height as i32 - zone));
             }
         }
@@ -4948,6 +5126,12 @@ impl App {
                 } else if self.strip_close().is_some_and(|place| (place.x..place.x + place.width).contains(&(x as i32)) && (place.y..place.y + place.height).contains(&(y as i32))) {
                     (self.strip_pinned, self.strip_hover, self.strip_over) = (false, false, None);
                     self.redraw();
+                } else if self.scenes_shown() && y >= f64::from(strip.top) {
+                    // A click on a scene plays from where it starts.
+                    let start = self.scene_at(x, y).and_then(|index| Some(self.scenes_now()?.1[index]));
+                    if let (Some(start), Some((_, length))) = (start, self.video_time()) {
+                        self.seek_to(start / length, true);
+                    }
                 } else if self.strip_visible() && y >= f64::from(strip.top) {
                     if let Some(pos) = self.strip_cell_at(x, y) {
                         self.go_to(pos, pos > self.pos);
@@ -5320,7 +5504,13 @@ impl App {
         if let Some(strip) = strip {
             self.draw_strip(canvas, strip);
         }
-        let bottom = strip.map_or(height, |s| s.top) - margin;
+        // The scenes of the video on view stand there instead, when asked for.
+        let scene_strip = self.scenes_shown().then(|| Strip::for_height(height as u32));
+        if let Some(strip) = scene_strip {
+            self.want_scenes();
+            self.draw_scenes(canvas, strip);
+        }
+        let bottom = strip.or(scene_strip).map_or(height, |s| s.top) - margin;
 
         let marked = viewing && self.marks.contains(&self.id());
         if marked {
@@ -5396,6 +5586,13 @@ impl App {
             let done = (f64::from(bar.width) * position / length) as i32;
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 72, bar.width);
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 256, done.max(thickness / 2));
+            // A notch in the bar where each scene starts, while they are up.
+            if let Some((_, starts, _)) = self.scenes_now().filter(|_| self.scenes_shown()) {
+                for start in &starts[1..] {
+                    let at = bar.x + (f64::from(bar.width) * start / length) as i32;
+                    canvas.fill(at - 1, top, 2, thickness, 0x000000);
+                }
+            }
             let handle = unit * 5 / 4;
             canvas.pill(bar.x + done - handle / 2, bar.middle - handle / 2, handle, handle, TEXT_COLOR, 256, handle);
             // The symbol shows the state: a triangle while playing, two bars
@@ -5476,7 +5673,7 @@ impl App {
         let panel = if viewing { self.list_panel() } else { None };
         let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some();
         // The filmstrip has words of its own: the lengths of its videos.
-        let boxes = boxes || self.palette.is_some() || strip.is_some() || self.overview.is_some();
+        let boxes = boxes || self.palette.is_some() || strip.is_some() || scene_strip.is_some() || self.overview.is_some();
         if nothing_to_write && !boxes && !self.help {
             // Nothing drawn means no debug overlay, and none of its buttons.
             self.debug_buttons.clear();
@@ -5488,6 +5685,9 @@ impl App {
         self.draw_grid_footer(canvas, &mut text, &footer, px);
         // What sits on the left moves over to make room for the file list.
         let left = margin + panel.as_ref().map_or(0, |panel| panel.width);
+        if let Some(strip) = &scene_strip {
+            self.draw_scene_labels(canvas, &mut text, strip, px);
+        }
         if let Some(strip) = &strip {
             self.draw_strip_lengths(canvas, &mut text, strip, px);
             // A cross above its right end closes it.
@@ -6157,7 +6357,7 @@ impl App {
         }
         let (width, height) = self.window_size();
         let px = ui_px(height);
-        let bottom = if self.strip_visible() { Strip::for_height(height).top } else { height as i32 };
+        let bottom = if self.band_shown() { Strip::for_height(height).top } else { height as i32 };
         let row_height = Text::line_height(px) + px as i32 / 2;
         // Above the rows: a heading, and under it the buttons for the order.
         let top = Text::line_height(px) * 2 + px as i32 * 3;
@@ -6830,6 +7030,15 @@ fn clock(seconds: f64) -> String {
     }
 }
 
+/// The scenes of one video: when each starts, once that is known, the
+/// names of those that are chapters with one, and a frame from each as
+/// they come in.
+struct SceneList {
+    starts: Option<Vec<f64>>,
+    titles: Vec<Option<String>>,
+    frames: Vec<Option<Arc<Frame>>>,
+}
+
 /// One of a video's audio or subtitle tracks.
 struct Track {
     id: i64,
@@ -6976,6 +7185,19 @@ impl ApplicationHandler<Event> for App {
             }
             Event::Duration(id, seconds) => {
                 self.durations.insert(id, seconds);
+                self.redraw();
+            }
+            Event::Scenes(scenes::Found::Starts(id, starts)) => {
+                if let Some(list) = self.scenes.get_mut(&id) {
+                    list.frames = vec![None; starts.len()];
+                    list.starts = Some(starts);
+                }
+                self.redraw();
+            }
+            Event::Scenes(scenes::Found::Frame(id, index, frame)) => {
+                if let Some(place) = self.scenes.get_mut(&id).and_then(|list| list.frames.get_mut(index)) {
+                    *place = Some(Arc::new(frame));
+                }
                 self.redraw();
             }
             Event::Story(Found::Length(id, seconds)) => drop(self.durations.insert(id, seconds)),

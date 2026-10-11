@@ -152,6 +152,8 @@ where they were left unless --no-resume is given. While one is up:
   Shift+Left / Shift+Right   step one frame      Up / Down     volume (m mutes)
   b                          back to the start of the video
   l                          loop: this video, then the whole list, then off
+  T                          scenes of this video along the bottom: Left / Right
+                             then go from scene to scene, and a click plays one
   j / J                      next subtitles, or none / next audio track
   Ctrl+Left / Ctrl+Right, or , . < > n           previous / next file
   Seeking past the end of a video starts the next file, and seeking back

@@ -120,7 +120,7 @@ pub fn bmp_frames(mut bytes: &[u8]) -> Vec<Frame> {
 /// The keyframe nearest before `seconds` into the video, shrunk; nothing
 /// if there is none. Stopping at a keyframe saves decoding up to the exact
 /// moment, which matters little here and can take most of a second.
-fn segment_at(path: &Path, seconds: f64) -> Vec<Frame> {
+pub fn segment_at(path: &Path, seconds: f64) -> Vec<Frame> {
     let filter = format!("scale={}:{}:force_original_aspect_ratio=decrease", BOUNDS.0, BOUNDS.1);
     let output = Command::new("ffmpeg")
         .args(["-v", "error", "-threads", "1", "-noaccurate_seek", "-ss", &format!("{seconds:.3}"), "-i"])

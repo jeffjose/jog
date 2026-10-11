@@ -48,6 +48,8 @@ pub enum Command {
     /// Step through no looping, this video over and over, and the whole
     /// list over and over.
     CycleLoop,
+    /// Show the scenes of the video on view along the bottom, or stop.
+    ToggleScenes,
     /// Step through a video's subtitle tracks, and after the last none.
     CycleSubtitles,
     /// Step through a video's audio tracks.
@@ -229,6 +231,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "s" => SortMenu,
             "m" => ToggleMute,
             "l" => CycleLoop,
+            "T" => ToggleScenes,
             "j" => CycleSubtitles,
             "J" => CycleAudio,
             "b" => Restart,
@@ -302,6 +305,7 @@ pub mod icons {
     pub const VOLUME_X: &str = "\u{e1ab}";
     pub const REPEAT: &str = "\u{e149}";
     pub const REPEAT_1: &str = "\u{e1fc}";
+    pub const CLAPPERBOARD: &str = "\u{e29a}";
     pub const CAPTIONS: &str = "\u{e3a7}";
     pub const CAPTIONS_OFF: &str = "\u{e5c5}";
     pub const AUDIO_LINES: &str = "\u{e55e}";
@@ -407,6 +411,7 @@ pub fn command_icon(command: Command) -> &'static str {
         VolumeDown => VOLUME_1,
         ToggleMute => VOLUME_X,
         CycleLoop => REPEAT,
+        ToggleScenes => CLAPPERBOARD,
         CycleSubtitles => CAPTIONS,
         CycleAudio => AUDIO_LINES,
         SubtitlesLarger | SubtitlesSmaller => A_LARGE_SMALL,
@@ -497,6 +502,7 @@ const PLAYBACK: &[Option<MenuItem>] = &[
     video_item("Mute", "m", Command::ToggleMute),
     None,
     video_item("Loop: off, this video, all", "l", Command::CycleLoop),
+    video_item("Scenes", "T", Command::ToggleScenes),
     None,
     video_item("Next subtitles, or none", "j", Command::CycleSubtitles),
     video_item("Larger subtitles", "", Command::SubtitlesLarger),
@@ -727,6 +733,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("]  [  \\", "Faster / slower / normal speed"),
                 ("Up  Down  m", "Volume, mute"),
                 ("l", "Loop: this video, the whole list, off"),
+                ("T", "Scenes of this video along the bottom; Left / Right then go by scene"),
                 ("j  J", "Next subtitles, or none / next audio track"),
                 ("Ctrl+Left  Ctrl+Right", "Previous / next file"),
                 ("Pointer at the bottom", "Seek bar with previews"),

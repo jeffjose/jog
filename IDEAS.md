@@ -22,7 +22,7 @@ here exists in the code.
 
 - Save or copy the current frame, named with its timestamp
 - In / out points, lossless clip export, loop between them
-- Chapter marks and bookmarks on the seek bar; scene-change ticks
+- Bookmarks on the seek bar
 - Storyboard view: a grid of frames across one video
 - Brightness, contrast, saturation; deinterlace; crop
 - GPU rendering as an option for files too heavy for CPU decoding

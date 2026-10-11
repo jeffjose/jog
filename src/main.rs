@@ -13,6 +13,7 @@ mod options;
 mod positions;
 mod render;
 mod rng;
+mod scenes;
 mod search;
 mod seen;
 mod story;
