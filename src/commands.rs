@@ -51,6 +51,8 @@ pub enum Command {
     /// Go to a workspace by its number, counted from 0, or to the one after
     /// or before; list them to pick from; save the folder on view as one.
     Workspace(usize),
+    /// Go to the workspace that has this digit for its key.
+    WorkspaceKey(usize),
     NextWorkspace,
     PrevWorkspace,
     /// Back to where jog was started: what was named on the command line.
@@ -220,7 +222,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "L" => SaveFilelist,
             "q" => Quit,
             // Ctrl with a digit is a workspace; a digit alone, an action.
-            digit if modifiers.control_key() => Workspace(digit.parse::<usize>().ok().filter(|n| (1..=9).contains(n))? - 1),
+            digit if modifiers.control_key() => WorkspaceKey(digit.parse::<usize>().ok().filter(|n| (1..=9).contains(n))?),
             digit => Action(digit.parse().ok().filter(|n| *n <= 9)?),
         },
         _ => return None,
@@ -367,7 +369,7 @@ pub fn command_icon(command: Command) -> &'static str {
         Next => ARROW_RIGHT,
         Previous => ARROW_LEFT,
         Search | Palette => SEARCH,
-        WorkspaceList | Overview | Workspace(_) | NextWorkspace | PrevWorkspace | HomeWorkspace => FOLDERS,
+        WorkspaceList | Overview | Workspace(_) | WorkspaceKey(_) | NextWorkspace | PrevWorkspace | HomeWorkspace => FOLDERS,
         SaveWorkspace => FOLDER_PLUS,
         ClearFilter => LIST_X,
         ClearMarks => STAR_OFF,
@@ -502,8 +504,10 @@ const VIEW: &[Option<MenuItem>] = &[
 pub const SORT: &[Option<MenuItem>] = &[
     item("Name", "", Command::SortBy(Sort::Name)),
     item("File name, ignoring folders", "", Command::SortBy(Sort::Filename)),
-    item("Newest first", "", Command::SortBy(Sort::Mtime)),
-    item("Smallest first", "", Command::SortBy(Sort::Size)),
+    item("Newest first", "", Command::SortBy(Sort::Newest)),
+    item("Oldest first", "", Command::SortBy(Sort::Oldest)),
+    item("Largest first", "", Command::SortBy(Sort::Largest)),
+    item("Smallest first", "", Command::SortBy(Sort::Smallest)),
     item("Shuffle", "z", Command::Shuffle),
     None,
     item("Reverse", "", Command::ReverseOrder),

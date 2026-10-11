@@ -537,6 +537,8 @@ struct Space {
     recursive: bool,
     sort: Option<Sort>,
     reverse: bool,
+    /// The digit that goes to it with Ctrl, if it has one.
+    key: Option<usize>,
     /// Listed again, and begun at its start, each time it is gone to.
     start: Start,
     filelist: Option<PathBuf>,
@@ -1005,6 +1007,7 @@ impl App {
                 recursive: workspace.recursive.unwrap_or(options.listing.recursive),
                 sort: workspace.sort,
                 reverse: workspace.reverse,
+                key: workspace.key,
                 start: workspace.start,
                 filelist: None,
                 saved: true,
@@ -1025,6 +1028,7 @@ impl App {
                 recursive: options.listing.recursive,
                 sort: options.listing.sort,
                 reverse: options.listing.reverse,
+                key: None,
                 start: options.start.unwrap_or(Start::Resume),
                 filelist: options.listing.filelist.clone(),
                 saved: false,
@@ -2181,6 +2185,10 @@ impl App {
             MarkMenu => self.open_mark_menu(),
             SortMenu => self.open_palette_with(">sort "),
             Workspace(to) => self.switch_space(to),
+            WorkspaceKey(key) => match self.spaces.iter().position(|space| space.key == Some(key)) {
+                Some(to) => self.switch_space(to),
+                None => self.toast(format!("No workspace is on Ctrl+{key}")),
+            },
             HomeWorkspace => self.switch_space(self.home),
             NextWorkspace => self.switch_space((self.space + 1) % self.spaces.len()),
             PrevWorkspace => self.switch_space((self.space + self.spaces.len() - 1) % self.spaces.len()),
@@ -3113,8 +3121,7 @@ impl App {
             Some(kept) => kept,
             None => {
                 let space = &self.spaces[to];
-                // The newest first, for one that starts on the latest.
-                let sort = if start == Start::Latest { Some(Sort::Mtime) } else { space.sort };
+                let sort = space.sort;
                 let listing = files::Listing { recursive: space.recursive, sort, reverse: space.reverse, filelist: space.filelist.clone(), ..files::Listing::default() };
                 let found = files::collect(&space.paths, &listing).files;
                 if found.is_empty() {
@@ -3179,7 +3186,7 @@ impl App {
     /// by its path.
     fn space_key(&self, which: usize) -> &'static str {
         match self.spaces[which].saved {
-            true => SPACE_KEYS.get(which).copied().unwrap_or(""),
+            true => self.spaces[which].key.and_then(|key| SPACE_KEYS.get(key - 1)).copied().unwrap_or(""),
             false if which == self.home => "Ctrl+`",
             false => "",
         }
@@ -3243,6 +3250,9 @@ impl App {
             Ok(file) => {
                 let space = &mut self.spaces[self.space];
                 (space.name, space.saved) = (name.to_string(), true);
+                // It takes the first digit that no other has.
+                let taken: Vec<usize> = self.spaces.iter().filter_map(|space| space.key).collect();
+                self.spaces[self.space].key = (1..=9).find(|key| !taken.contains(key));
                 self.toast(format!("Saved as @{name} in {}", short_dir(&file)));
             }
             Err(error) => self.toast(format!("Could not save it: {error}")),
@@ -3323,8 +3333,9 @@ impl App {
                 return true;
             }
             // A digit goes straight to that workspace.
-            Key::Character(digit) if !self.modifiers.control_key() && digit.parse::<usize>().is_ok_and(|n| (1..=last + 1).contains(&n)) => {
-                let picked = digit.parse::<usize>().unwrap_or(1) - 1;
+            Key::Character(digit) if !self.modifiers.control_key() && digit.parse::<usize>().is_ok_and(|n| self.spaces.iter().any(|space| space.key == Some(n))) => {
+                let wanted = digit.parse::<usize>().ok();
+                let picked = self.spaces.iter().position(|space| space.key == wanted).unwrap_or(0);
                 self.leave_overview(Some(picked));
                 return true;
             }
@@ -3577,7 +3588,7 @@ impl App {
         if watching && self.grid.is_none() {
             if was_last && is_new(last) {
                 pos = last;
-            } else if was_first && is_new(0) && sort == Some(Sort::Mtime) && !reversed {
+            } else if was_first && is_new(0) && sort == Some(Sort::Newest) && !reversed {
                 pos = 0;
             }
         }
@@ -4090,7 +4101,7 @@ impl App {
         }
         // Going to another workspace works from anywhere but a text box.
         let to_space = commands::for_key(key.clone(), self.modifiers, numpad);
-        if let Some(command @ (Command::Workspace(_) | Command::NextWorkspace | Command::PrevWorkspace | Command::HomeWorkspace)) = to_space {
+        if let Some(command @ (Command::WorkspaceKey(_) | Command::NextWorkspace | Command::PrevWorkspace | Command::HomeWorkspace)) = to_space {
             self.menu = None;
             return self.execute(command, event_loop);
         }
@@ -5680,7 +5691,7 @@ impl App {
         let side = px * 3 / 2;
         let mut buttons = vec![Button { x: panel.width - side - px / 2, y: px / 2, width: side, height: side, command: Command::ToggleList }];
         // The orders, sharing the width of the row under the heading.
-        let orders = [Command::SortBy(Sort::Name), Command::SortBy(Sort::Mtime), Command::SortBy(Sort::Size), Command::Shuffle, Command::ReverseOrder];
+        let orders = [Command::SortBy(Sort::Name), Command::SortBy(Sort::Newest), Command::SortBy(Sort::Smallest), Command::Shuffle, Command::ReverseOrder];
         let (gap, height) = (px / 3, Text::line_height(panel.px) + px / 4);
         let width = (panel.width - px - gap * (orders.len() as i32 - 1)) / orders.len() as i32;
         let top = panel.top - px / 2 - px / 2 - height;
@@ -5731,8 +5742,8 @@ impl App {
             canvas.round_fill(button.x, button.y, button.width, button.height, button.height / 2, if lit { accent() } else { PLACEHOLDER_COLOR }, if over && !on { 200 } else { 256 });
             canvas.round_outline(button.x, button.y, button.width, button.height, button.height / 2, 1, if lit { accent() } else { MENU_EDGE_COLOR });
             let (icon, word) = match button.command {
-                Command::SortBy(Sort::Mtime) => (commands::icons::CLOCK, "Newest"),
-                Command::SortBy(Sort::Size) => (commands::icons::WEIGHT, "Size"),
+                Command::SortBy(Sort::Newest) => (commands::icons::CLOCK, "Newest"),
+                Command::SortBy(Sort::Smallest) => (commands::icons::WEIGHT, "Size"),
                 Command::SortBy(_) => (commands::icons::A_TO_Z, "Name"),
                 Command::Shuffle => (commands::icons::SHUFFLE, "Shuffle"),
                 _ => (commands::icons::ARROW_UP_DOWN, "Reverse"),

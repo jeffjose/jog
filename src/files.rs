@@ -53,10 +53,12 @@ pub enum Sort {
     Filename,
     /// Grouped by directory, then by file name.
     Dirname,
-    /// Most recently modified first.
-    Mtime,
-    /// Smallest first.
-    Size,
+    /// Most recently changed first, or last.
+    Newest,
+    Oldest,
+    /// By how many bytes it is.
+    Smallest,
+    Largest,
 }
 
 /// How the command line asked for the playlist to be built.
@@ -191,10 +193,11 @@ pub fn sort_ids(ids: &mut [usize], files: &[PathBuf], sort: Sort) {
             let dirs = (a_path.parent().unwrap_or(a_path), b_path.parent().unwrap_or(b_path));
             natural_cmp(&dirs.0.to_string_lossy(), &dirs.1.to_string_lossy()).then_with(|| by_filename(a, b))
         }),
-        Sort::Mtime => ids.sort_by_cached_key(|item| {
-            std::cmp::Reverse(std::fs::metadata(path(item)).and_then(|m| m.modified()).ok())
-        }),
-        Sort::Size => ids.sort_by_cached_key(|item| std::fs::metadata(path(item)).map_or(0, |m| m.len())),
+        // By when it was last changed, or by how large it is, either way.
+        Sort::Newest => ids.sort_by_cached_key(|item| std::cmp::Reverse(std::fs::metadata(path(item)).and_then(|m| m.modified()).ok())),
+        Sort::Oldest => ids.sort_by_cached_key(|item| std::fs::metadata(path(item)).and_then(|m| m.modified()).ok()),
+        Sort::Smallest => ids.sort_by_cached_key(|item| std::fs::metadata(path(item)).map_or(0, |m| m.len())),
+        Sort::Largest => ids.sort_by_cached_key(|item| std::cmp::Reverse(std::fs::metadata(path(item)).map_or(0, |m| m.len()))),
     }
 }
 
