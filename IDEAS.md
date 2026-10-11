@@ -41,5 +41,4 @@ here exists in the code.
 ## Viewing
 
 - Faster JPEG loading by decoding at reduced size
-- AVIF and HEIC
 - User-defined menu commands and key bindings in `config.toml`

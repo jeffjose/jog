@@ -4,6 +4,7 @@ mod convert;
 mod decode;
 mod files;
 mod frame;
+mod heif;
 mod loader;
 mod meta;
 mod mpv;

@@ -11,7 +11,10 @@ const RASTER_EXTS: &[&str] = &[
 
 /// Formats left to ffmpeg, which decodes them when it was built with the
 /// right libraries.
-const FFMPEG_EXTS: &[&str] = &["svg", "svgz", "avif", "heic", "heif", "jxl", "psd"];
+const FFMPEG_EXTS: &[&str] = &["svg", "svgz", "jxl", "psd"];
+
+/// HEIC and AVIF: libheif's where it is installed, and ffmpeg's otherwise.
+const HEIF_EXTS: &[&str] = &["heic", "heif", "hif", "avif"];
 
 const RAW_EXTS: &[&str] = &[
     "cr2", "cr3", "crw", "nef", "nrw", "arw", "srf", "sr2", "dng", "raf", "orf", "rw2", "pef",
@@ -41,8 +44,12 @@ pub fn needs_ffmpeg(path: &Path) -> bool {
     has_ext(path, FFMPEG_EXTS)
 }
 
+pub fn is_heif(path: &Path) -> bool {
+    has_ext(path, HEIF_EXTS)
+}
+
 fn is_supported(path: &Path) -> bool {
-    has_ext(path, RASTER_EXTS) || needs_ffmpeg(path) || is_raw(path) || is_video(path)
+    has_ext(path, RASTER_EXTS) || needs_ffmpeg(path) || is_heif(path) || is_raw(path) || is_video(path)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

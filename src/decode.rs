@@ -10,6 +10,7 @@ use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageReader, RgbImage,
 use memchr::memmem;
 
 use crate::files;
+use crate::heif;
 use crate::story;
 use crate::frame::{fit_size, Animation, Frame, Transform};
 
@@ -99,6 +100,11 @@ fn decode_file(path: &Path, target: Option<(u32, u32)>, thumbnail: bool) -> Resu
         return decode(&ffmpeg_image(path)?).map(Decoded::still);
     }
     let bytes = std::fs::read(path)?;
+    if files::is_heif(path) {
+        // An ffmpeg new enough reads these too, where libheif is missing.
+        let image = heif::decode(&bytes).map(|image| (image, Orientation::NoTransforms));
+        return image.or_else(|error| ffmpeg_image(path).and_then(|bmp| decode(&bmp)).map_err(|_| error)).map(Decoded::still);
+    }
     if files::is_raw(path) {
         return decode_raw_preview(&bytes, target).map(Decoded::still);
     }
