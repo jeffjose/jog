@@ -195,6 +195,11 @@ pub struct Workspace {
     pub path: PathBuf,
     pub recursive: Option<bool>,
     pub sort: Option<Sort>,
+    /// That order backwards.
+    pub reverse: bool,
+    /// Whether to list it again, and start at its first file, each time
+    /// it is gone to, rather than pick up where it was left.
+    pub fresh: bool,
 }
 
 /// Reads the `[workspaces]` table: each entry a path, or a table of a
@@ -203,13 +208,15 @@ fn parse_workspaces(value: &toml::Value) -> Result<Vec<Workspace>, String> {
     let table = value.as_table().ok_or("workspaces: expected a table of names and folders")?;
     let mut workspaces = Vec::new();
     for (name, entry) in table {
-        let plain = |path: &str| Workspace { name: name.clone(), path: expand_home(path), recursive: None, sort: None };
+        let plain = |path: &str| Workspace { name: name.clone(), path: expand_home(path), recursive: None, sort: None, reverse: false, fresh: false };
         let workspace = match entry {
             toml::Value::String(path) => plain(path),
             toml::Value::Table(details) => {
                 let path = details.get("path").and_then(toml::Value::as_str);
                 let mut workspace = plain(path.ok_or_else(|| format!("workspace {name}: needs a path"))?);
                 workspace.recursive = details.get("recursive").and_then(toml::Value::as_bool);
+                workspace.reverse = details.get("reverse").and_then(toml::Value::as_bool).unwrap_or(false);
+                workspace.fresh = details.get("fresh").and_then(toml::Value::as_bool).unwrap_or(false);
                 if let Some(order) = details.get("sort").and_then(toml::Value::as_str) {
                     workspace.sort = Some(parse_sort(order)?);
                 }
@@ -430,6 +437,7 @@ fn parse_with(
     if let Some(space) = options.workspace.map(|found| options.workspaces[found].clone()) {
         options.listing.recursive |= space.recursive.unwrap_or(false);
         options.listing.sort = options.listing.sort.or(space.sort);
+        options.listing.reverse |= space.reverse;
     }
     Ok(Parsed::Run(Box::new(options)))
 }
@@ -616,6 +624,13 @@ const STARTER_CONFIG: &str = r##"# jog: settings.
 # [workspaces]
 # pictures = "~/Pictures"
 # clips = { path = "~/Videos/clips", recursive = true, sort = "mtime" }
+#
+# A workspace given as a table can also say:
+#   sort = "mtime"     newest first (or name, filename, dirname, size)
+#   reverse = true     that order backwards: with mtime, oldest first
+#   recursive = true   look in the folders inside it too
+#   fresh = true       list it again each time it is gone to, and start
+#                      at its first file: with sort = "mtime", the newest
 "##;
 
 /// Applies a config file. Its keys are the long option names: switches take
@@ -752,7 +767,7 @@ mod tests {
         // With the # taken off every setting, it is still a config file.
         let setting = |line: &str| {
             let rest = line.strip_prefix("# ")?;
-            let named = rest.split_once('=').is_some_and(|(key, _)| !key.trim().is_empty() && key.trim().chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+            let named = !rest.starts_with(char::is_whitespace) && rest.split_once('=').is_some_and(|(key, _)| !key.trim().is_empty() && key.trim().chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
             (named || rest.starts_with('[')).then(|| rest.to_string())
         };
         let used: Vec<String> = STARTER_CONFIG.lines().map(|line| setting(line).unwrap_or_else(|| line.to_string())).collect();

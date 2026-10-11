@@ -147,6 +147,8 @@ pub enum Event {
     Story(Found),
     /// Word from the thread playing the grid's trailer.
     Trailer(Note),
+    /// The files of a workspace not yet gone to, listed for the overview.
+    SpaceListed(usize, Vec<PathBuf>),
 }
 
 /// A file operation that `u` can take back.
@@ -534,11 +536,16 @@ struct Space {
     paths: Vec<PathBuf>,
     recursive: bool,
     sort: Option<Sort>,
+    reverse: bool,
+    /// Listed again, and begun at its start, each time it is gone to.
+    fresh: bool,
     filelist: Option<PathBuf>,
     /// Whether it is in the config file, rather than only opened this once.
     saved: bool,
     /// `None` until it has been gone to.
     kept: Option<Kept>,
+    /// Whether its files have been asked for, to show in the overview.
+    asked: bool,
 }
 
 /// What a workspace was showing when it was left, to come back to.
@@ -551,6 +558,16 @@ struct Kept {
     reversed: bool,
     shuffled: bool,
 }
+
+/// The overview of workspaces: which card is picked out, and how far its
+/// slideshow has got.
+struct Overview {
+    cursor: usize,
+    tick: usize,
+}
+
+/// How long each picture of the overview's slideshow stays up.
+const OVERVIEW_STEP: Duration = Duration::from_millis(1100);
 
 /// The keys that go to the first nine workspaces, as a menu shows them.
 const SPACE_KEYS: [&str; 9] = ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9"];
@@ -586,6 +603,10 @@ pub struct App {
     /// which one is on show.
     spaces: Vec<Space>,
     space: usize,
+    /// The overview of the workspaces, when it is up, and when its
+    /// slideshow is to move on.
+    overview: Option<Overview>,
+    overview_due: Option<Instant>,
     prompt: Option<Prompt>,
     palette: Option<Palette>,
     /// A command picked in the find box, to be run now that it has closed.
@@ -981,9 +1002,12 @@ impl App {
                 paths: vec![workspace.path.clone()],
                 recursive: workspace.recursive.unwrap_or(options.listing.recursive),
                 sort: workspace.sort,
+                reverse: workspace.reverse,
+                fresh: workspace.fresh,
                 filelist: None,
                 saved: true,
                 kept: None,
+                asked: false,
             })
             .collect();
         let space = options.workspace.unwrap_or_else(|| {
@@ -998,9 +1022,12 @@ impl App {
                 paths,
                 recursive: options.listing.recursive,
                 sort: options.listing.sort,
+                reverse: options.listing.reverse,
+                fresh: false,
                 filelist: options.listing.filelist.clone(),
                 saved: false,
                 kept: None,
+                asked: false,
             });
             spaces.len() - 1
         });
@@ -1106,6 +1133,8 @@ impl App {
             surface: None,
             spaces,
             space,
+            overview: None,
+            overview_due: None,
             options,
             files,
         }
@@ -1212,6 +1241,18 @@ impl App {
                     }
                 }
             }
+        }
+        // The overview shows a few pictures of every workspace, and runs
+        // through those of the one picked out.
+        if let Some(overview) = &self.overview {
+            thumbs.clear();
+            for which in 0..self.spaces.len() {
+                let ids = self.space_ids(which);
+                let from = if which == overview.cursor { overview.tick } else { 0 };
+                thumbs.extend((0..ids.len().min(6)).map(|step| ids[(from + step) % ids.len()]));
+                thumbs.extend(ids.iter().take(4));
+            }
+            thumbs.dedup();
         }
         // The go-to box shows a small picture beside each match.
         {
@@ -1326,7 +1367,7 @@ impl App {
     fn sync_video(&mut self) {
         let id = self.id();
         let playing = self.video.as_ref().map(|video| video.id);
-        let wanted = self.grid.is_none() && files::is_video(&self.files[id]);
+        let wanted = self.grid.is_none() && self.overview.is_none() && files::is_video(&self.files[id]);
         if wanted && playing != Some(id) {
             self.start_video(id);
         } else if !wanted && playing.is_some() {
@@ -2140,6 +2181,7 @@ impl App {
             NextWorkspace => self.switch_space((self.space + 1) % self.spaces.len()),
             PrevWorkspace => self.switch_space((self.space + self.spaces.len() - 1) % self.spaces.len()),
             WorkspaceList => self.open_palette_with("@"),
+            Overview => self.open_overview(),
             SaveWorkspace => self.ask_workspace_name(),
             SortBy(sort) => self.sort_by(sort),
             Shuffle => {
@@ -3060,26 +3102,20 @@ impl App {
         if to == self.space {
             return self.toast(format!("@{name}"));
         }
-        let incoming = match self.spaces[to].kept.take().filter(|kept| !kept.list.is_empty()) {
+        // One marked fresh is listed anew each time, and begun at its start.
+        let fresh = self.spaces[to].fresh;
+        let incoming = match self.spaces[to].kept.take().filter(|kept| !kept.list.is_empty() && !fresh) {
             Some(kept) => kept,
             None => {
                 let space = &self.spaces[to];
-                let listing = files::Listing { recursive: space.recursive, sort: space.sort, filelist: space.filelist.clone(), ..files::Listing::default() };
+                let listing = files::Listing { recursive: space.recursive, sort: space.sort, reverse: space.reverse, filelist: space.filelist.clone(), ..files::Listing::default() };
                 let found = files::collect(&space.paths, &listing).files;
                 if found.is_empty() {
                     return self.toast(format!("@{name} has nothing to show"));
                 }
                 // Files seen before, in whatever workspace, keep their ids.
-                let known: HashMap<PathBuf, usize> = self.files.iter().cloned().enumerate().map(|(id, path)| (path, id)).collect();
-                let mut list = Vec::with_capacity(found.len());
-                for path in found {
-                    list.push(known.get(&path).copied().unwrap_or_else(|| {
-                        self.loader.add_file(path.clone());
-                        self.files.push(path);
-                        self.files.len() - 1
-                    }));
-                }
-                Kept { list, pos: 0, cursor: 0, filter: None, sort: self.spaces[to].sort, reversed: false, shuffled: false }
+                let list = self.ids_for(found);
+                Kept { list, pos: 0, cursor: 0, filter: None, sort: self.spaces[to].sort, reversed: self.spaces[to].reverse, shuffled: false }
             }
         };
         let leaving = Kept {
@@ -3097,14 +3133,14 @@ impl App {
         // Refreshing and watching go by where the options point.
         let space = &self.spaces[to];
         self.options.paths = space.paths.clone();
-        (self.options.listing.recursive, self.options.listing.sort) = (space.recursive, space.sort);
+        (self.options.listing.recursive, self.options.listing.sort, self.options.listing.reverse) = (space.recursive, space.sort, space.reverse);
         self.options.listing.filelist = space.filelist.clone();
 
         let last = incoming.list.len() - 1;
         let count = incoming.list.len();
         (self.filter, self.sort, self.reversed, self.shuffled) = (incoming.filter, incoming.sort, incoming.reversed, incoming.shuffled);
         (self.list, self.pos) = (incoming.list, incoming.pos.min(last));
-        (self.palette, self.menu, self.prompt) = (None, None, None);
+        (self.palette, self.menu, self.prompt, self.overview) = (None, None, None, None);
         (self.strip_scroll, self.strip_over, self.list_scroll, self.list_hover) = (0, None, None, None);
         let layout = self.grid_layout(self.window_size());
         if let Some(grid) = &mut self.grid {
@@ -3187,6 +3223,215 @@ impl App {
                 self.toast(format!("Saved as @{name} in {}", short_dir(&file)));
             }
             Err(error) => self.toast(format!("Could not save it: {error}")),
+        }
+    }
+
+    /// The ids of some files, those not seen before being taken on. Files
+    /// seen before, in whatever workspace, keep the ids they have.
+    fn ids_for(&mut self, found: Vec<PathBuf>) -> Vec<usize> {
+        let known: HashMap<PathBuf, usize> = self.files.iter().cloned().enumerate().map(|(id, path)| (path, id)).collect();
+        let mut list = Vec::with_capacity(found.len());
+        for path in found {
+            list.push(known.get(&path).copied().unwrap_or_else(|| {
+                self.loader.add_file(path.clone());
+                self.files.push(path);
+                self.files.len() - 1
+            }));
+        }
+        list
+    }
+
+    /// The files of a workspace, so far as they are known: of the one on
+    /// show, the list; of another, what it was showing when it was left
+    /// or, not yet gone to, what the overview has had listed.
+    fn space_ids(&self, which: usize) -> &[usize] {
+        match which == self.space {
+            true => &self.list,
+            false => self.spaces[which].kept.as_ref().map_or(&[], |kept| &kept.list),
+        }
+    }
+
+    /// Brings up the overview: every workspace as a card. Those not yet
+    /// gone to are listed on other threads, so that their cards have
+    /// pictures to show; a large folder may take a moment.
+    fn open_overview(&mut self) {
+        self.overview = Some(Overview { cursor: self.space, tick: 0 });
+        (self.menu, self.palette, self.overview_due) = (None, None, None);
+        for which in 0..self.spaces.len() {
+            let space = &mut self.spaces[which];
+            if which == self.space || space.kept.is_some() || std::mem::replace(&mut space.asked, true) {
+                continue;
+            }
+            let listing = files::Listing { recursive: space.recursive, sort: space.sort, reverse: space.reverse, filelist: space.filelist.clone(), ..files::Listing::default() };
+            let (paths, proxy) = (space.paths.clone(), self.proxy.clone());
+            std::thread::spawn(move || drop(proxy.send_event(Event::SpaceListed(which, files::collect(&paths, &listing).files))));
+        }
+        self.sync_video();
+        self.request();
+        self.redraw();
+    }
+
+    /// Closes the overview, going to a workspace if one was picked.
+    fn leave_overview(&mut self, to: Option<usize>) {
+        (self.overview, self.overview_due) = (None, None);
+        match to.filter(|to| *to != self.space) {
+            Some(to) => self.switch_space(to),
+            None => {
+                self.sync_video();
+                self.request();
+                self.redraw();
+            }
+        }
+    }
+
+    /// Handles a key in the overview. Returns whether it was one of its.
+    fn overview_key(&mut self, key: Key<&str>) -> bool {
+        let columns = self.overview_layout().0;
+        let last = self.spaces.len() - 1;
+        let Some(overview) = &mut self.overview else { return false };
+        let to = match key {
+            Key::Named(NamedKey::Escape) | Key::Character("G" | "g" | "q") => {
+                self.leave_overview(None);
+                return true;
+            }
+            Key::Named(NamedKey::Enter | NamedKey::Space) => {
+                let picked = overview.cursor;
+                self.leave_overview(Some(picked));
+                return true;
+            }
+            // A digit goes straight to that workspace.
+            Key::Character(digit) if !self.modifiers.control_key() && digit.parse::<usize>().is_ok_and(|n| (1..=last + 1).contains(&n)) => {
+                let picked = digit.parse::<usize>().unwrap_or(1) - 1;
+                self.leave_overview(Some(picked));
+                return true;
+            }
+            Key::Named(NamedKey::ArrowRight) => (overview.cursor + 1).min(last),
+            Key::Named(NamedKey::ArrowLeft) => overview.cursor.saturating_sub(1),
+            Key::Named(NamedKey::ArrowDown) => (overview.cursor + columns).min(last),
+            Key::Named(NamedKey::ArrowUp) => overview.cursor.checked_sub(columns).unwrap_or(overview.cursor),
+            Key::Named(NamedKey::Home) => 0,
+            Key::Named(NamedKey::End) => last,
+            _ => return false,
+        };
+        if to != overview.cursor {
+            (overview.cursor, overview.tick) = (to, 0);
+            self.overview_due = None;
+            self.request();
+        }
+        self.redraw();
+        true
+    }
+
+    /// How the overview's cards are laid out: how many across, and for
+    /// each workspace where its picture goes: left, top, width, height.
+    /// Under each picture there is room for its name and a line about it.
+    fn overview_layout(&self) -> (usize, Vec<[i32; 4]>) {
+        let (width, height) = self.window_size();
+        let (width, height, px) = (width as i32, height as i32, ui_px(height) as i32);
+        let count = self.spaces.len() as i32;
+        let columns = if count <= 3 { count } else { (f64::from(count).sqrt().ceil() as i32).max(1) };
+        let rows = (count + columns - 1) / columns;
+        let (gap, words) = (px * 3, Text::line_height(px as u32) * 3);
+        // As large as the window allows, both ways, up to a size that
+        // still reads as a card.
+        let across = (width * 85 / 100 - gap * (columns - 1)) / columns;
+        let down = ((height * 80 / 100 - gap * (rows - 1)) / rows - words) * 16 / 10;
+        let card_w = across.min(down).min(px * 40).max(px * 6);
+        let card_h = card_w * 10 / 16;
+        let left = (width - columns * card_w - (columns - 1) * gap) / 2;
+        let top = (height - rows * (card_h + words) - (rows - 1) * gap) / 2 + px;
+        let place = |which: i32| {
+            // A last row that is not full sits in the middle.
+            let (column, row) = (which % columns, which / columns);
+            let in_row = if row == rows - 1 { count - row * columns } else { columns };
+            let indent = (columns - in_row) * (card_w + gap) / 2;
+            [left + indent + column * (card_w + gap), top + row * (card_h + words + gap), card_w, card_h]
+        };
+        (columns as usize, (0..count).map(place).collect())
+    }
+
+    /// Which workspace's card is at a window position.
+    fn overview_card_at(&self, x: f64, y: f64) -> Option<usize> {
+        let words = Text::line_height(ui_px(self.window_size().1)) * 3;
+        let (_, cards) = self.overview_layout();
+        cards.iter().position(|[left, top, width, height]| (*left..left + width).contains(&(x as i32)) && (*top..top + height + words).contains(&(y as i32)))
+    }
+
+    /// Draws the overview: each workspace as a card of four of its
+    /// pictures, with its name, its key and how many files it has. The
+    /// card picked out shows one picture at a time instead, going through
+    /// what is in it.
+    fn draw_overview(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
+        let Some((cursor, tick)) = self.overview.as_ref().map(|overview| (overview.cursor, overview.tick)) else { return };
+        let (_, cards) = self.overview_layout();
+        let (pad, line) = (px as i32, Text::line_height(px));
+        let round = pad;
+
+        let heading = format!("{}  Workspaces", commands::icons::FOLDERS);
+        let big = px * 3 / 2;
+        let first_top = cards.iter().map(|card| card[1]).min().unwrap_or(0);
+        let heading_left = (canvas.width - text.width(&heading, big)) / 2;
+        text.draw(canvas, heading_left, (first_top - Text::line_height(big) - 2 * pad).max(pad), big, TEXT_COLOR, &heading);
+
+        for (which, &[left, top, width, height]) in cards.iter().enumerate() {
+            let ids = self.space_ids(which).to_vec();
+            canvas.round_fill(left, top, width, height, round, PLACEHOLDER_COLOR, 256);
+            // Scaled to fit its place, in the middle of it.
+            let mut picture = |canvas: &mut Canvas, id: usize, [x, y, w, h]: [i32; 4]| {
+                let Some(thumb) = self.loader.thumb(id) else { return false };
+                let (fit_w, fit_h) = fit_size((thumb.width, thumb.height), (w as u32, h as u32), true);
+                canvas.image(&thumb, x + (w - fit_w as i32) / 2, y + (h - fit_h as i32) / 2, fit_w as i32, fit_h as i32);
+                true
+            };
+            if which == cursor && !ids.is_empty() {
+                // The one picked out runs through its pictures; one not
+                // yet decoded leaves the one before it up.
+                let shown = (0..ids.len().min(6)).map(|back| ids[(tick + ids.len() - back) % ids.len()]).any(|id| picture(canvas, id, [left, top, width, height]));
+                if !shown {
+                    picture(canvas, ids[0], [left, top, width, height]);
+                }
+            } else {
+                // Four of them, two by two.
+                let gap = (pad / 3).max(2);
+                let (cell_w, cell_h) = ((width - gap) / 2, (height - gap) / 2);
+                for (at, id) in ids.iter().take(4).enumerate() {
+                    let (column, row) = (at as i32 % 2, at as i32 / 2);
+                    picture(canvas, *id, [left + column * (cell_w + gap), top + row * (cell_h + gap), cell_w, cell_h]);
+                }
+            }
+            canvas.round_off(left, top, width, height, round, GRID_COLOR);
+            // Ringed brightly when picked out; quietly, in the accent,
+            // when it is the workspace that was on show.
+            if which == cursor || which == self.space {
+                let edge = (pad / 5).max(2);
+                let color = if which == cursor { TEXT_COLOR } else { accent() };
+                canvas.round_outline(left - 2 * edge, top - 2 * edge, width + 4 * edge, height + 4 * edge, round + 2 * edge, edge, color);
+            }
+
+            let space = &self.spaces[which];
+            let name = clipped(text, &space.name, width, px * 5 / 4);
+            let name_top = top + height + pad / 2;
+            let name_left = left + (width - text.width(&name, px * 5 / 4)) / 2;
+            text.draw(canvas, name_left, name_top, px * 5 / 4, if which == cursor { TEXT_COLOR } else { DIM_TEXT_COLOR }, &name);
+            let files = match ids.len() {
+                0 if which != self.space => "listing\u{2026}".to_string(),
+                1 => "1 file".to_string(),
+                count => format!("{count} files"),
+            };
+            let key = SPACE_KEYS.get(which).map(|key| format!("{key}   ")).unwrap_or_default();
+            let about = format!("{key}{files}{}", if space.saved { "" } else { "   not saved" });
+            let about = clipped(text, &about, width, px);
+            let about_left = left + (width - text.width(&about, px)) / 2;
+            text.draw(canvas, about_left, name_top + line * 5 / 4, px, DIM_TEXT_COLOR, &about);
+        }
+        let hint = "Arrows or the pointer to look, Enter or a click to open, Esc to close";
+        let small = (px * 5 / 6).max(11);
+        let hint_left = (canvas.width - text.width(hint, small)) / 2;
+        text.draw(canvas, hint_left, canvas.height - Text::line_height(small) - pad, small, DIM_TEXT_COLOR, hint);
+
+        // The slideshow moves on while there is more than one to show.
+        if self.space_ids(cursor).len() > 1 && self.overview_due.is_none() {
+            self.overview_due = Some(Instant::now() + OVERVIEW_STEP);
         }
     }
 
@@ -3809,6 +4054,9 @@ impl App {
         if self.prompt.is_some() {
             return self.prompt_key(key, event_loop);
         }
+        if self.overview.is_some() && self.palette.is_none() && self.overview_key(key.clone()) {
+            return;
+        }
         if self.palette.is_some() {
             self.palette_key(key);
             // A command picked in the box is run once the box has closed.
@@ -3863,6 +4111,20 @@ impl App {
         // In the find box the match under the pointer is picked out, as
         // Up and Down would pick it. Only when the pointer has really
         // moved: a list scrolling under a still pointer picks nothing.
+        // In the overview the card under the pointer is the one picked
+        // out, and so the one running through its pictures.
+        if self.overview.is_some() && self.palette.is_none() {
+            let over = self.overview_card_at(x, y).filter(|_| (dx, dy) != (0.0, 0.0));
+            if let (Some(overview), Some(which)) = (&mut self.overview, over) {
+                if overview.cursor != which {
+                    (overview.cursor, overview.tick) = (which, 0);
+                    self.overview_due = None;
+                    self.request();
+                    self.redraw();
+                }
+            }
+            return;
+        }
         if self.palette.is_some() {
             let row = self.palette_row_at(x, y).filter(|_| (dx, dy) != (0.0, 0.0));
             if let (Some(palette), Some(row)) = (&mut self.palette, row) {
@@ -3997,6 +4259,15 @@ impl App {
                     None => {}
                 }
                 self.redraw();
+            }
+            return;
+        }
+        if self.overview.is_some() && self.palette.is_none() {
+            // A click on a card goes to that workspace.
+            if button == MouseButton::Left && pressed {
+                if let Some(which) = self.overview_card_at(x, y) {
+                    self.leave_overview(Some(which));
+                }
             }
             return;
         }
@@ -4164,6 +4435,9 @@ impl App {
         // In the find box it scrolls the list of matches, and what then
         // lies under the pointer is the one picked out. It does not step
         // through them one at a time: the pointer and the arrows do that.
+        if self.overview.is_some() && self.palette.is_none() {
+            return;
+        }
         if self.palette.is_some() {
             let rows = self.palette_layout().map_or(1, |layout| layout.rows.max(1));
             if let Some(palette) = &mut self.palette {
@@ -4403,6 +4677,11 @@ impl App {
     }
 
     fn paint(&mut self, pixels: &mut [u32], window: (u32, u32)) {
+        // The overview of workspaces takes the whole window.
+        if self.overview.is_some() {
+            pixels.fill(GRID_COLOR);
+            return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
+        }
         let playing = self.grid.is_none() && self.video.as_ref().is_some_and(|video| video.showing);
         let player = self.player.as_ref().filter(|_| playing);
         let started = Instant::now();
@@ -4479,7 +4758,7 @@ impl App {
         self.tend_story();
         self.tend_trailer();
         // The grid replaces the image and everything describing it.
-        let viewing = self.grid.is_none();
+        let viewing = self.grid.is_none() && self.overview.is_none();
         let strip = (viewing && self.strip_visible()).then(|| Strip::for_height(height as u32));
         if let Some(strip) = strip {
             self.draw_strip(canvas, strip);
@@ -4612,13 +4891,14 @@ impl App {
         let panel = if viewing { self.list_panel() } else { None };
         let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some();
         // The filmstrip has words of its own: the lengths of its videos.
-        let boxes = boxes || self.palette.is_some() || strip.is_some();
+        let boxes = boxes || self.palette.is_some() || strip.is_some() || self.overview.is_some();
         if nothing_to_write && !boxes && !self.help {
             // Nothing drawn means no debug overlay, and none of its buttons.
             self.debug_buttons.clear();
             return;
         }
         let mut text = self.text.take().unwrap_or_else(Text::load);
+        self.draw_overview(canvas, &mut text, px);
         self.draw_grid_labels(canvas, &mut text, px);
         self.draw_grid_footer(canvas, &mut text, &footer, px);
         // What sits on the left moves over to make room for the file list.
@@ -4844,7 +5124,7 @@ impl App {
     /// The words on the grid: under each picture its title, when those are
     /// on, and in the corner of each video how long it is.
     fn draw_grid_labels(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
-        let Some(cursor) = self.grid.as_ref().map(|grid| grid.cursor) else { return };
+        let Some(cursor) = self.grid.as_ref().filter(|_| self.overview.is_none()).map(|grid| grid.cursor) else { return };
         let layout = self.grid_layout((canvas.width as u32, canvas.height as u32));
         let line = Text::line_height(px);
         for pos in self.grid_shown(&layout) {
@@ -4959,7 +5239,7 @@ impl App {
 
     /// The line under the grid: the image under the cursor and the page.
     fn grid_footer(&self) -> Option<String> {
-        let grid = self.grid.as_ref()?;
+        let grid = self.grid.as_ref().filter(|_| self.overview.is_none())?;
         let path = &self.files[self.list[grid.cursor]];
         let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
         let layout = self.grid_layout(self.window_size());
@@ -5285,7 +5565,7 @@ impl App {
 
     /// The video the grid plays a trailer of: the one under its cursor.
     fn trailer_subject(&self) -> Option<usize> {
-        let grid = self.grid.as_ref().filter(|grid| grid.moved && self.palette.is_none())?;
+        let grid = self.grid.as_ref().filter(|grid| grid.moved && self.palette.is_none() && self.overview.is_none())?;
         let id = self.list[grid.cursor];
         files::is_video(&self.files[id]).then_some(id)
     }
@@ -6011,6 +6291,16 @@ impl ApplicationHandler<Event> for App {
                 self.preview_signal(Signal::Events);
             }
             Event::Listed(listed) => self.take_listing(listed, true),
+            Event::SpaceListed(which, found) => {
+                // For the overview: what an unvisited workspace holds.
+                let list = self.ids_for(found);
+                if which != self.space && self.spaces[which].kept.is_none() && !list.is_empty() {
+                    let sort = self.spaces[which].sort;
+                    self.spaces[which].kept = Some(Kept { list, pos: 0, cursor: 0, filter: None, sort, reversed: false, shuffled: false });
+                }
+                self.request();
+                self.redraw();
+            }
             Event::Duration(id, seconds) => {
                 self.durations.insert(id, seconds);
                 self.redraw();
@@ -6123,6 +6413,15 @@ impl ApplicationHandler<Event> for App {
             self.redraw();
         }
         // A trailer waiting for the cursor to settle may now begin.
+        // The overview's slideshow moves on to its next picture.
+        if self.overview_due.is_some_and(|due| due <= now) {
+            self.overview_due = None;
+            if let Some(overview) = &mut self.overview {
+                overview.tick += 1;
+            }
+            self.request();
+            self.redraw();
+        }
         if self.trailer_due.is_some_and(|(_, at)| at <= now) {
             self.tend_trailer();
         }
@@ -6136,7 +6435,7 @@ impl ApplicationHandler<Event> for App {
         }
 
         let toast_until = self.toast.as_ref().map(|(_, until)| *until);
-        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.font_due, self.grid_due, self.trailer_due.map(|(_, at)| at)];
+        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.font_due, self.grid_due, self.trailer_due.map(|(_, at)| at), self.overview_due];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
