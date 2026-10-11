@@ -3411,7 +3411,7 @@ impl App {
             let ids = self.space_ids(which).to_vec();
             canvas.round_fill(left, top, width, height, round, PLACEHOLDER_COLOR, 256);
             // Scaled to fit its place, in the middle of it.
-            let mut picture = |canvas: &mut Canvas, id: usize, [x, y, w, h]: [i32; 4]| {
+            let picture = |canvas: &mut Canvas, id: usize, [x, y, w, h]: [i32; 4]| {
                 let Some(thumb) = self.loader.thumb(id) else { return false };
                 let (fit_w, fit_h) = fit_size((thumb.width, thumb.height), (w as u32, h as u32), true);
                 canvas.image(&thumb, x + (w - fit_w as i32) / 2, y + (h - fit_h as i32) / 2, fit_w as i32, fit_h as i32);

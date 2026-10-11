@@ -134,13 +134,6 @@ impl<'a> Canvas<'a> {
         self.fill(x + size - bar, y, bar, size, color);
     }
 
-    pub fn outline(&mut self, x: i32, y: i32, w: i32, h: i32, thickness: i32, color: u32) {
-        self.fill(x, y, w, thickness, color);
-        self.fill(x, y + h - thickness, w, thickness, color);
-        self.fill(x, y, thickness, h, color);
-        self.fill(x + w - thickness, y, thickness, h, color);
-    }
-
     /// Paints `color` over the corners of a rectangle, outside a curve of
     /// `radius`, so that what was drawn in it has rounded corners. `color`
     /// is whatever lies behind it.
