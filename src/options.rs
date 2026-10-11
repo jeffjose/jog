@@ -153,7 +153,7 @@ Keys:
 
 Videos (mp4, mkv, webm and so on; needs libmpv) play in place, picking up
 where they were left unless --no-resume is given. While one is up:
-  Space                      play / pause        Left / Right  seek about 5 seconds (faster held)
+  Space                      play / pause        Left / Right  seek about 5 seconds
   PgUp / PgDn                seek about 1 minute pointer at the bottom: seek bar with previews
   Shift+Left / Shift+Right   step one frame      Up / Down     volume (m mutes)
   b                          back to the start of the video

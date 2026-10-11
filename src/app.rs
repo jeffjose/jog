@@ -782,11 +782,10 @@ pub struct App {
     grid_columns: Option<i32>,
     grid_due: Option<Instant>,
     /// Things on their way: a toast sliding in, the seek bar and the strip
-    /// of scenes rising, the seek bar's handle, and the middles of the
+    /// of scenes rising, and the middles of the
     /// filmstrip and of the strip of scenes.
     toast_slide: Cell<Glide>,
     bar_rise: Cell<Glide>,
-    bar_at: Cell<Glide>,
     scenes_rise: Cell<Glide>,
     strip_slide: Cell<Glide>,
     scene_slide: Cell<Glide>,
@@ -945,8 +944,6 @@ pub struct App {
     preview_want: Option<f64>,
     preview_sent: Option<f64>,
     preview_busy: Option<Instant>,
-    /// How many times in a row a seek key has repeated from being held.
-    held: u32,
     /// Where the next video started is to begin, when a seek carried over
     /// from the file beside it: seconds in, or negative, from its end.
     enter_at: Option<f64>,
@@ -1276,7 +1273,6 @@ impl App {
             grid_due: None,
             toast_slide: Cell::new(Glide::at(1.0)),
             bar_rise: Cell::new(Glide::at(0.0)),
-            bar_at: Cell::new(Glide::at(0.0)),
             scenes_rise: Cell::new(Glide::at(0.0)),
             strip_slide: Cell::new(Glide::at(start as f64)),
             scene_slide: Cell::new(Glide::at(0.0)),
@@ -1369,7 +1365,6 @@ impl App {
             preview_want: None,
             preview_sent: None,
             preview_busy: None,
-            held: 0,
             enter_at: None,
             speed: 1.0,
             muted: false,
@@ -1742,7 +1737,8 @@ impl App {
         let how: &[u8] = if exact { b"absolute+exact" } else { b"absolute+keyframes" };
         player.command_later(&[b"seek", target.to_string().as_bytes(), how]);
         if let Some(video) = &mut self.video {
-            video.seeking = Some((Instant::now(), target));
+            // Where it lands is only known beforehand when that is exact.
+            video.seeking = exact.then(|| (Instant::now(), target));
             video.seek_asked.get_or_insert_with(Instant::now);
             video.to_end = (target >= length - VIDEO_END).then(Instant::now);
         }
@@ -2234,13 +2230,8 @@ impl App {
                 return true;
             }
         }
-        // Holding a seek key down covers ground faster the longer it is held.
-        self.held = if repeat { self.held + 1 } else { 0 };
-        let step = match self.held {
-            0..=7 => SEEK_STEP,
-            8..=23 => SEEK_STEP * 3.0,
-            _ => SEEK_STEP * 12.0,
-        };
+        // A held key goes in the same strides as a pressed one.
+        let step = SEEK_STEP;
         let arrow = |forward: bool| {
             if modifiers.control_key() {
                 VideoAction::File(forward)
@@ -2262,14 +2253,20 @@ impl App {
             Key::Named(NamedKey::ArrowDown) => VideoAction::Volume(-5),
             _ => return false,
         };
+        // A held key seeks only as fast as the seeks land. A repeat that
+        // comes while one is still on its way, or while a file just gone
+        // on to has yet to show, is let go: nothing is left over to play
+        // out once the key is released, and each jump is one stride.
+        let busy = self.video.as_ref().is_some_and(|video| !video.showing || video.seek_asked.is_some_and(|asked| asked.elapsed() < SEEK_SETTLE));
+        if repeat && busy && matches!(action, VideoAction::Seek(_)) {
+            return true;
+        }
         // The files lie end to end as one timeline: a seek that would run
         // off the end of this video starts the next, and one that would run
         // off its start lands that far from the end of the one before,
         // however the key came to be pressed.
         if let VideoAction::Seek(seconds) = action {
             if let Some(enter) = self.seek_across(seconds) {
-                // A held key starts again from its slowest in the new file.
-                self.held = 0;
                 self.enter_at = Some(enter);
                 self.step(seconds > 0.0);
                 self.enter_at = None;
@@ -2323,7 +2320,10 @@ impl App {
                 };
                 let length = player.number("duration").unwrap_or(0.0);
                 let target = (from + seconds).clamp(0.0, length);
-                video.seeking = Some((Instant::now(), target));
+                // Where it lands is only known beforehand when that is
+                // exact: a keyframe may be seconds either side, and the
+                // seek bar is to show where the video is, not a guess.
+                video.seeking = self.precise.then(|| (Instant::now(), target));
                 video.to_end = (target >= length - VIDEO_END).then(Instant::now);
                 video.seek_asked.get_or_insert_with(Instant::now);
             }
@@ -5506,14 +5506,18 @@ impl App {
         // press the named key.
         let mut rest = keys;
         while let Some(c) = rest.chars().next() {
+            let mut repeating = false;
             let named = rest.strip_prefix('{').and_then(|inner| inner.split_once('}'));
             let key = match named {
                 Some((name, after)) => {
                     rest = after;
-                    // `{Shift+Right}` and `{Ctrl+Right}` hold a modifier.
+                    // `{Shift+Right}` and `{Ctrl+Right}` hold a modifier, and
+                    // `{Held+Right}` is the key repeating from being held.
+                    repeating = name.starts_with("Held+");
                     let (held, name) = match name.split_once('+') {
                         Some(("Shift", name)) => (ModifiersState::SHIFT, name),
                         Some(("Ctrl", name)) => (ModifiersState::CONTROL, name),
+                        Some(("Held", name)) => (ModifiersState::empty(), name),
                         _ => (ModifiersState::empty(), name),
                     };
                     self.modifiers = held;
@@ -5560,7 +5564,7 @@ impl App {
                     Key::Character(typed)
                 }
             };
-            self.key_pressed(key, false, false, event_loop);
+            self.key_pressed(key, repeating, false, event_loop);
             self.modifiers = ModifiersState::empty();
         }
         self.mouse_moved(self.mouse.0, self.mouse.1);
@@ -5925,22 +5929,8 @@ impl App {
             // bottom edge.
             let shade_top = bar.middle - unit * 6;
             canvas.fade_down(0, shade_top, width, height - shade_top, 70);
-            // The handle eases over to where a jump has taken it; playing
-            // along, it is simply where the video is.
-            let mut handle = self.bar_at.get();
-            let fraction = position / length;
-            if (fraction - handle.to).abs() > 0.02 && bar_level > 0.5 && self.options.animations {
-                handle.head_for(fraction, EASE);
-            } else if handle.moving(EASE) {
-                handle.to = fraction;
-            } else {
-                handle = Glide::at(fraction);
-            }
-            self.bar_at.set(handle);
-            if handle.moving(EASE) {
-                self.animating.set(true);
-            }
-            let done = (f64::from(bar.width) * handle.now(EASE)) as i32;
+            // The handle is where the video is, and jumps with it.
+            let done = (f64::from(bar.width) * position / length) as i32;
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 72, bar.width);
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 256, done.max(thickness / 2));
             // A notch in the bar where each scene starts, while they are up.
