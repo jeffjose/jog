@@ -45,26 +45,42 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Draws `frame` scaled to a rectangle by taking the nearest pixel for
-    /// each, on every core. Rougher than `image` and several times as
-    /// quick, which is the right trade for a picture on the move.
+    /// Draws `frame` scaled to a rectangle, on every core: made larger, by
+    /// blending the pixels either side, which blurs where the nearest alone
+    /// would show as blocks; made smaller, by the nearest. Rougher than
+    /// `image` and several times as quick, which is the right trade for a
+    /// picture on the move.
     pub fn image_fast(&mut self, frame: &Frame, x: i32, y: i32, w: i32, h: i32) {
         let (sw, sh) = (frame.width as usize, frame.height as usize);
         let (x0, x1) = (x.max(0), (x + w).min(self.width));
-        if w <= 0 || h <= 0 || x0 >= x1 || sw == 0 || frame.pixels.len() < sw * sh {
+        if w <= 0 || h <= 0 || x0 >= x1 || sw == 0 || sh == 0 || frame.pixels.len() < sw * sh {
             return;
         }
-        let columns: Vec<usize> = (x0..x1).map(|px| (i64::from(px - x) * sw as i64 / i64::from(w)) as usize).collect();
+        let larger = w as usize > sw;
+        // For each column drawn, the two source columns it lies between and
+        // how far towards the second, out of 256.
+        let columns: Vec<(usize, usize, u32)> = (x0..x1)
+            .map(|px| {
+                let at = i64::from(px - x) * 256 * sw as i64 / i64::from(w);
+                let first = ((at >> 8) as usize).min(sw - 1);
+                (first, (first + 1).min(sw - 1), if larger { (at & 255) as u32 } else { 0 })
+            })
+            .collect();
         let width = self.width as usize;
         self.pixels.par_chunks_exact_mut(width).enumerate().for_each(|(py, row)| {
             let dy = py as i32 - y;
             if dy < 0 || dy >= h {
                 return;
             }
-            let sy = (i64::from(dy) * sh as i64 / i64::from(h)) as usize;
-            let source = &frame.pixels[sy * sw..(sy + 1) * sw];
-            for (pixel, &column) in row[x0 as usize..x1 as usize].iter_mut().zip(&columns) {
-                *pixel = source[column];
+            let at = i64::from(dy) * 256 * sh as i64 / i64::from(h);
+            let first = ((at >> 8) as usize).min(sh - 1);
+            let (second, down) = ((first + 1).min(sh - 1), if larger { (at & 255) as u32 } else { 0 });
+            let (upper, lower) = (&frame.pixels[first * sw..(first + 1) * sw], &frame.pixels[second * sw..(second + 1) * sw]);
+            for (pixel, &(left, right, across)) in row[x0 as usize..x1 as usize].iter_mut().zip(&columns) {
+                *pixel = match larger {
+                    true => mix(mix(upper[left], upper[right], across), mix(lower[left], lower[right], across), down),
+                    false => upper[left],
+                };
             }
         });
     }

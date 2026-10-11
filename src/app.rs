@@ -971,10 +971,10 @@ pub struct App {
     looping: Looping,
     /// What is being held down over a video, and how strong the loupe is
     /// while `v` is held for one.
-    /// Whether the video that was on view plays on in a corner while the
-    /// grid is up, and room for its picture there.
+    /// Whether the video that was on view plays on in its cell while the
+    /// grid is up, and its picture there.
     pip: bool,
-    pip_frame: Vec<u32>,
+    pip_live: Option<Frame>,
     hold: Option<Hold>,
     loupe: Option<f64>,
     /// Whether seeking lands on the very moment asked for or on the
@@ -1395,7 +1395,7 @@ impl App {
             muted: false,
             looping: Looping::Off,
             pip: false,
-            pip_frame: Vec::new(),
+            pip_live: None,
             hold: None,
             loupe: None,
             precise: options.precise_seeking,
@@ -3355,39 +3355,28 @@ impl App {
         self.redraw();
     }
 
-    // ---- A video in the corner ----------------------------------------
+    // ---- A video playing on in the grid --------------------------------
 
     /// Where the video that was on view goes on playing while the grid is
-    /// up: a small picture in the bottom right corner, over the cells.
+    /// up: in its own cell there, when that is on the page showing.
     fn pip_place(&self, window: (u32, u32)) -> Option<[i32; 4]> {
         let video = self.video.as_ref().filter(|_| self.pip && self.grid.is_some())?;
         let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map_or((16, 9), |(_, frame)| frame.native);
-        let unit = ui_px(window.1) as i32;
-        let (w, h) = fit_size(native, ((window.0 / 4).max(320), (window.1 / 3).max(180)), true);
-        let (w, h) = (w as i32, h as i32);
-        let bottom = window.1 as i32 - GridLayout::footer_height(window.1) - unit * 2;
-        Some([window.0 as i32 - w - unit * 2, bottom - h, w, h])
+        let area = self.grid_area(&self.grid_layout(window), self.pos, window.1);
+        let place = Self::grid_picture(area, native, true);
+        (place[0] >= 0 && place[0] + place[2] <= window.0 as i32).then_some(place)
     }
 
-    /// Draws the video in its corner of the grid.
-    fn draw_pip(&mut self, pixels: &mut [u32], window: (u32, u32)) {
-        let Some([x, y, w, h]) = self.pip_place(window) else { return };
-        let showing = self.video.as_ref().is_some_and(|video| video.showing);
-        let Some(player) = self.player.as_ref().filter(|_| showing && x >= 0 && y >= 0) else { return };
-        self.pip_frame.resize((w * h) as usize, 0);
-        if !player.render(&mut self.pip_frame, w as u32, h as u32) {
-            return;
+    /// Takes the video's frame at the size of its cell, for the grid to
+    /// draw there in place of its thumbnail.
+    fn render_pip(&mut self, window: (u32, u32)) {
+        let place = self.pip_place(window).filter(|_| self.video.as_ref().is_some_and(|video| video.showing));
+        let (Some([_, _, w, h]), Some(player)) = (place, &self.player) else { return self.pip_live = None };
+        let mut pixels = self.pip_live.take().map(|frame| frame.pixels).unwrap_or_default();
+        pixels.resize((w * h) as usize, 0);
+        if player.render(&mut pixels, w as u32, h as u32) {
+            self.pip_live = Some(Frame::still(w as u32, h as u32, (w as u32, h as u32), pixels));
         }
-        let mut canvas = Canvas::new(pixels, window.0, window.1);
-        let (edge, round) = ((ui_px(window.1) as i32 / 6).max(2), (ui_px(window.1) as i32 / 2).max(4));
-        // A dark surround lifts it off the cells it lies over.
-        canvas.round_fill(x - 3 * edge, y - 3 * edge, w + 6 * edge, h + 6 * edge, round + 3 * edge, 0x000000, 150);
-        let stride = window.0 as usize;
-        for (row, line) in self.pip_frame.chunks_exact(w as usize).enumerate() {
-            let at = (y as usize + row) * stride + x as usize;
-            canvas.all()[at..at + w as usize].copy_from_slice(line);
-        }
-        canvas.round_outline(x - edge, y - edge, w + 2 * edge, h + 2 * edge, round, edge, TEXT_COLOR);
     }
 
     // ---- Held keys -----------------------------------------------------
@@ -4087,8 +4076,8 @@ impl App {
         let layout = self.grid_layout(window);
         let id = self.id();
         // Out of the grid, the picture on view grows from its cell, or from
-        // the corner it was playing in; into the grid it shrinks to its
-        // cell, unless it is a video, which plays on in a corner instead.
+        // where it was playing there; into the grid it shrinks to its
+        // cell, unless it is a video, which plays on in its cell instead.
         let corner = self.pip_place(window);
         let stays = self.grid.is_none() && self.video.is_some();
         self.grow = match &self.grid {
@@ -5551,14 +5540,6 @@ impl App {
             }
             return;
         }
-        // A click on the video in the corner of the grid goes back to it.
-        let on_pip = self.pip_place(self.window_size()).is_some_and(|[px, py, w, h]| (px..px + w).contains(&(x as i32)) && (py..py + h).contains(&(y as i32)));
-        if on_pip && self.menu.is_none() && button == MouseButton::Left {
-            if pressed {
-                self.toggle_grid();
-            }
-            return;
-        }
         if self.grid.is_some() && self.menu.is_none() {
             let hit = |b: &&Button| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32));
             match (button, pressed) {
@@ -6086,9 +6067,9 @@ impl App {
                 }
                 pixels.fill(GRID_COLOR);
                 self.scene_live = false;
+                self.render_pip(window);
                 self.draw_grid(&mut Canvas::new(pixels, window.0, window.1));
                 self.draw_shrinking(&mut Canvas::new(pixels, window.0, window.1), &layout);
-                self.draw_pip(pixels, window);
                 if self.options.debug {
                     eprintln!("jog: {:>7.1?} draw  grid", started.elapsed());
                 }
@@ -6528,8 +6509,10 @@ impl App {
             let area = self.grid_area(&layout, pos, canvas.height as u32);
             // A video under the cursor plays as a trailer.
             let trailer = self.trailer.as_ref().filter(|trailer| trailer.id == id && pos == grid.cursor);
-            let since = trailer.and_then(|trailer| trailer.since);
-            let trailer = trailer.and_then(|trailer| trailer.frame.as_ref()).filter(|frame| !frame.pixels.is_empty());
+            // The video that was on view plays on in its cell, sound and all.
+            let live = self.pip_live.as_ref().filter(|_| self.pip && pos == self.pos);
+            let since = trailer.filter(|_| live.is_none()).and_then(|trailer| trailer.since);
+            let trailer = live.or(trailer.and_then(|trailer| trailer.frame.as_ref()).filter(|frame| !frame.pixels.is_empty()));
             let thumb = self.loader.thumb(id);
             let [x, y, w, h] = match (trailer, &thumb) {
                 (Some(frame), _) => {
@@ -7154,7 +7137,9 @@ impl App {
         }
         let grid = self.grid.as_ref().filter(|grid| grid.moved && self.palette.is_none() && self.overview.is_none())?;
         let id = self.list[grid.cursor];
-        files::is_video(&self.files[id]).then_some(id)
+        // Not of the one that is playing in its cell as it is.
+        let playing = self.pip && self.video.as_ref().is_some_and(|video| video.id == id);
+        (files::is_video(&self.files[id]) && !playing).then_some(id)
     }
 
     /// Has the trailer thread play the video under the grid's cursor, and
