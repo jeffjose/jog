@@ -46,7 +46,11 @@ fn main() -> ExitCode {
     let started = std::time::Instant::now();
     let playlist = files::collect(&options.paths, &options.listing);
     if playlist.files.is_empty() {
-        eprintln!("jog: no images or videos to show\nTry 'jog --help' for the options.");
+        // A path that is not there has been said to be missing already;
+        // that is the whole of the matter.
+        if options.paths.iter().all(|path| path.exists()) {
+            eprintln!("jog: no images or videos to show");
+        }
         return ExitCode::FAILURE;
     }
     if options.verbose {
