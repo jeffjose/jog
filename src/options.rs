@@ -90,7 +90,7 @@ Keys:
                              is:image is:gif is:marked, and sizes such as
                              >10mb or <1gb (b, kb, mb, gb)
   Ctrl+arrows, Alt+arrows    scroll, by a page   Z  small images: fit screen / actual size
-  S                          sort: name, newest, size, shuffle, reverse
+  s                          sort: name, newest, size, shuffle, reverse
   ( / )                      rotate              _ |           flip, mirror
   [ / ]                      slower / faster     \\             normal speed
   f fullscreen  t filmstrip  i info  e EXIF  a actions  o pointer
@@ -107,7 +107,7 @@ Keys:
   F2                         rename              r F5          refresh: look for
                              new and deleted files, and read this one again
   W                          watch: refresh by itself as files come and go
-  s save copy  L save file list (marked ones if any)  w size window to image
+  S save copy  L save file list (marked ones if any)  w size window to image
   Delete                     remove from list    Ctrl+Delete   move to trash
   Enter, 1-9                 run action          q Esc         quit
 

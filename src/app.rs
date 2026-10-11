@@ -92,6 +92,26 @@ fn accent() -> u32 {
     ACCENT.load(atomic::Ordering::Relaxed)
 }
 
+/// The colour for words on the accent: white, or near black on an accent
+/// light enough that white would be lost on it.
+fn on_accent() -> u32 {
+    let channel = |shift: u32| f64::from(accent() >> shift & 0xFF);
+    let brightness = 0.299 * channel(16) + 0.587 * channel(8) + 0.114 * channel(0);
+    if brightness > 160.0 { 0x161616 } else { 0xFFFFFF }
+}
+
+/// The colours for the main and the lesser words of a row: on one that is
+/// picked out, ones that read on the accent, the lesser a little towards
+/// it; elsewhere the usual white and grey. Grey on the accent is mud.
+fn row_text(selected: bool) -> (u32, u32) {
+    if !selected {
+        return (TEXT_COLOR, DIM_TEXT_COLOR);
+    }
+    let (on, accent) = (on_accent(), accent());
+    let blend = |shift: u32| ((on >> shift & 0xFF) * 72 + (accent >> shift & 0xFF) * 28) / 100 << shift;
+    (on, blend(16) | blend(8) | blend(0))
+}
+
 /// A lighter tint of the accent, for words and thin lines on the dark
 /// panels, where the accent itself would be hard to read.
 fn accent_soft() -> u32 {
@@ -420,6 +440,8 @@ struct Trailer {
     /// first one came.
     frame: Option<Frame>,
     since: Option<Instant>,
+    /// When the thread was asked to play it.
+    asked: Instant,
 }
 
 /// How the box for finding files is brought to a close.
@@ -3208,7 +3230,7 @@ impl App {
             let fill = if focused { accent() } else { PLACEHOLDER_COLOR };
             canvas.round_fill(button_x, button_y, button_w, button_h, pad / 3, fill, 256);
             canvas.round_outline(button_x, button_y, button_w, button_h, pad / 3, 1, if focused { TEXT_COLOR } else { MENU_EDGE_COLOR });
-            text.draw(canvas, button_x + pad / 2, y, px, TEXT_COLOR, label);
+            text.draw(canvas, button_x + pad / 2, y, px, if focused { on_accent() } else { TEXT_COLOR }, label);
             drawn.push((*end, [button_x, button_y, button_w, button_h]));
             right = button_x - pad / 2;
         }
@@ -3223,16 +3245,18 @@ impl App {
             if at == palette.selected {
                 canvas.round_fill(layout.left + pad / 3, top, layout.width - 2 * (pad / 3), layout.row_height, pad / 2, accent(), 256);
             }
+            // Words on the row picked out are in colours that read on it.
+            let (main, dim) = row_text(at == palette.selected);
             // A command: what it is called, a mark if it is on, and its key.
             if let Some((name, keys, command)) = palette.commands.get(at) {
                 let text_top = top + (layout.row_height - line) / 2;
                 if self.is_checked(*command) {
                     let mark = pad / 2;
-                    canvas.round_fill(layout.left + pad, top + (layout.row_height - mark) / 2, mark, mark, mark / 4, TEXT_COLOR, 256);
+                    canvas.round_fill(layout.left + pad, top + (layout.row_height - mark) / 2, mark, mark, mark / 4, main, 256);
                 }
-                text.draw(canvas, layout.left + 2 * pad, text_top, px, TEXT_COLOR, name);
+                text.draw(canvas, layout.left + 2 * pad, text_top, px, main, name);
                 let keys_left = layout.left + layout.width - pad - text.width(keys, px);
-                text.draw(canvas, keys_left, text_top, px, DIM_TEXT_COLOR, keys);
+                text.draw(canvas, keys_left, text_top, px, dim, keys);
                 continue;
             }
             let id = palette.matches[at];
@@ -3248,10 +3272,10 @@ impl App {
             let length = self.durations.get(&id).copied().flatten().map(clock).unwrap_or_default();
             let length_width = text.width(&length, px);
             let right = layout.left + layout.width - pad;
-            text.draw(canvas, right - length_width, text_top, px, DIM_TEXT_COLOR, &length);
+            text.draw(canvas, right - length_width, text_top, px, dim, &length);
             let name_left = cell_left + thumb.0 + pad;
             let name = clipped(text, &self.name_of(id), right - length_width - pad - name_left, px);
-            let color = if self.marks.contains(&id) { MARK_COLOR } else { TEXT_COLOR };
+            let color = if self.marks.contains(&id) && at != palette.selected { MARK_COLOR } else { main };
             text.draw(canvas, name_left, text_top, px, color, &name);
         }
         drawn
@@ -4220,7 +4244,7 @@ impl App {
             canvas.round_outline(place.x, place.y, place.width, place.height, place.width / 2, 1, MENU_EDGE_COLOR);
             let (arrow, big) = (if forward { commands::icons::CHEVRON_RIGHT } else { commands::icons::CHEVRON_LEFT }, px * 3 / 2);
             let inset = ((place.width - text.width(arrow, big)) / 2, (place.height - Text::line_height(big)) / 2);
-            text.draw(canvas, place.x + inset.0, place.y + inset.1, big, TEXT_COLOR, arrow);
+            text.draw(canvas, place.x + inset.0, place.y + inset.1, big, if over { on_accent() } else { TEXT_COLOR }, arrow);
         }
     }
 
@@ -4271,12 +4295,13 @@ impl App {
             canvas.round_fill(x, y, width, height, height / 2, fill, 256);
             canvas.round_outline(x, y, width, height, height / 2, 1, if over { fill } else { MENU_EDGE_COLOR });
             let mut at = x + pad;
-            text.draw(canvas, at, y + pad / 2, px, if danger && !over { DANGER_COLOR } else { TEXT_COLOR }, icon);
+            let (main, dim) = row_text(over && !danger);
+            text.draw(canvas, at, y + pad / 2, px, if danger && !over { DANGER_COLOR } else { main }, icon);
             at += widths.0 + pad / 2;
-            text.draw(canvas, at, y + pad / 2, px, TEXT_COLOR, name);
+            text.draw(canvas, at, y + pad / 2, px, main, name);
             at += widths.1 + pad;
             let key_top = y + (height - Text::line_height(small)) / 2;
-            text.draw(canvas, at, key_top, small, if over { TEXT_COLOR } else { DIM_TEXT_COLOR }, key);
+            text.draw(canvas, at, key_top, small, if over && danger { TEXT_COLOR } else { dim }, key);
             self.grid_buttons.push(Button { x, y, width, height, command });
             x += width + pad;
         }
@@ -4561,16 +4586,29 @@ impl App {
     /// Has the trailer thread play the video under the grid's cursor, and
     /// stop when the cursor leaves it. Called on each redraw. Nothing here
     /// waits on the player: the thread does all of that.
+    /// With `--verbose` or `--debug`, says on the terminal what has become
+    /// of a trailer: waited for, skipped, started, showing or stopped.
+    fn trailer_note(&self, what: &str, id: usize, more: &str) {
+        if self.options.verbose || self.options.debug {
+            eprintln!("jog: [trailer] {what:<8} {}{more}", self.name_of(id));
+        }
+    }
+
     fn tend_trailer(&mut self) {
         let subject = self.trailer_subject();
         if self.trailer.as_ref().map(|trailer| trailer.id) == subject {
             self.trailer_due = None;
             return;
         }
-        if self.trailer.take().is_some() {
+        if let Some(was) = self.trailer.take() {
             if let Some(trailers) = &self.trailers {
                 trailers.stop();
             }
+            self.trailer_note("stopped", was.id, "");
+        }
+        // The cursor left a video it had not rested on long enough.
+        if let Some((due, _)) = self.trailer_due.filter(|(due, _)| Some(*due) != subject) {
+            self.trailer_note("skipped", due, " (the cursor moved on)");
         }
         let Some(id) = subject else { return self.trailer_due = None };
         // Not for a video the cursor is only passing over: opening one
@@ -4578,14 +4616,18 @@ impl App {
         match self.trailer_due {
             Some((due, at)) if due == id && at <= Instant::now() => self.trailer_due = None,
             Some((due, _)) if due == id => return,
-            _ => return self.trailer_due = Some((id, Instant::now() + TRAILER_DELAY)),
+            _ => {
+                self.trailer_note("waiting", id, &format!(" {} for the cursor to rest", ms(TRAILER_DELAY)));
+                return self.trailer_due = Some((id, Instant::now() + TRAILER_DELAY));
+            }
         }
         let proxy = self.proxy.clone();
         let window = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
         let bounds = self.grid_layout(window).thumb_size();
         let trailers = self.trailers.get_or_insert_with(|| Trailers::new(move |note| proxy.send_event(Event::Trailer(note)).is_ok()));
         trailers.play(id, self.files[id].clone(), bounds);
-        self.trailer = Some(Trailer { id, frame: None, since: None });
+        self.trailer = Some(Trailer { id, frame: None, since: None, asked: Instant::now() });
+        self.trailer_note("started", id, "");
     }
 
     /// Sees to it that the frames of the video picked out in the go-to box
@@ -4644,9 +4686,10 @@ impl App {
             // A video's length sits at the right, once it is known.
             let length = self.durations.get(&id).copied().flatten().map(clock).unwrap_or_default();
             let length_width = if length.is_empty() { 0 } else { text.width(&length, px) + pad };
-            text.draw(canvas, panel.width - length_width, line, px, DIM_TEXT_COLOR, &length);
+            let (main, dim) = row_text(pos == self.pos);
+            text.draw(canvas, panel.width - length_width, line, px, dim, &length);
             let name = clipped(text, &self.name_of(id), panel.width - 3 * pad - length_width, px);
-            text.draw(canvas, pad * 2, line, px, TEXT_COLOR, &name);
+            text.draw(canvas, pad * 2, line, px, main, &name);
         }
     }
 
@@ -4670,13 +4713,14 @@ impl App {
             let line = top + (row.height - Text::line_height(px)) / 2;
             // In the gutter: a tick on what is switched on, otherwise the
             // item's own small picture.
-            let (sign, color) = if self.is_checked(item.command) { (commands::icons::CHECK, TEXT_COLOR) } else { (commands::icon(item), DIM_TEXT_COLOR) };
+            let (main, dim) = row_text(menu.selected == Some(index));
+            let (sign, color) = if self.is_checked(item.command) { (commands::icons::CHECK, main) } else { (commands::icon(item), dim) };
             let gutter = px as i32 * 2;
             let sign_left = menu.x + pad + (gutter - pad - text.width(sign, px)) / 2;
             text.draw(canvas, sign_left, line, px, color, sign);
-            text.draw(canvas, menu.x + pad + gutter, line, px, TEXT_COLOR, item.label);
+            text.draw(canvas, menu.x + pad + gutter, line, px, main, item.label);
             let keys_left = menu.x + menu.width - pad - text.width(item.keys, px);
-            text.draw(canvas, keys_left, line, px, DIM_TEXT_COLOR, item.keys);
+            text.draw(canvas, keys_left, line, px, dim, item.keys);
         }
         if let Some(sub) = &menu.sub {
             self.draw_menu(canvas, text, sub);
@@ -4797,7 +4841,7 @@ fn draw_confirm(canvas: &mut Canvas, text: &mut Text, confirm: &Confirm, px: u32
             canvas.round_outline(button_left, buttons_top, button_width, button_height, round, 1, MENU_EDGE_COLOR);
         }
         let label_left = button_left + (button_width - text.width(label, px)) / 2;
-        text.draw(canvas, label_left, buttons_top + pad / 2, px, TEXT_COLOR, label);
+        text.draw(canvas, label_left, buttons_top + pad / 2, px, if selected && index == 0 { on_accent() } else { TEXT_COLOR }, label);
     }
 }
 
@@ -4858,7 +4902,7 @@ fn draw_prompt(
         let focused = focus == at + 1;
         canvas.fill(x, top, button_width, height, if focused { accent() } else { MENU_COLOR });
         canvas.outline(x, top, button_width, height, 1, if focused { TEXT_COLOR } else { MENU_EDGE_COLOR });
-        text.draw(canvas, x + pad, top + pad, px, TEXT_COLOR, button);
+        text.draw(canvas, x + pad, top + pad, px, if focused { on_accent() } else { TEXT_COLOR }, button);
         drawn.push([x, top, button_width, height]);
         x += button_width + gap;
     }
@@ -5078,7 +5122,11 @@ impl ApplicationHandler<Event> for App {
                 if let (Some(trailer), Some((id, frame))) = (&mut self.trailer, taken) {
                     if trailer.id == id {
                         trailer.frame = Some(frame);
-                        trailer.since.get_or_insert_with(Instant::now);
+                        if trailer.since.is_none() {
+                            trailer.since = Some(Instant::now());
+                            let (id, took) = (trailer.id, trailer.asked.elapsed());
+                            self.trailer_note("showing", id, &format!(" after {}", ms(took)));
+                        }
                         self.redraw();
                     }
                 }
