@@ -48,6 +48,8 @@ pub enum Command {
     /// Step through no looping, this video over and over, and the whole
     /// list over and over.
     CycleLoop,
+    /// Seek to the exact moment asked for, or to the nearest keyframe.
+    TogglePrecise,
     /// Show the scenes of the video on view along the bottom, or stop.
     ToggleScenes,
     /// Step through a video's subtitle tracks, and after the last none.
@@ -411,6 +413,7 @@ pub fn command_icon(command: Command) -> &'static str {
         VolumeDown => VOLUME_1,
         ToggleMute => VOLUME_X,
         CycleLoop => REPEAT,
+        TogglePrecise => SCAN,
         ToggleScenes => CLAPPERBOARD,
         CycleSubtitles => CAPTIONS,
         CycleAudio => AUDIO_LINES,
@@ -503,6 +506,7 @@ const PLAYBACK: &[Option<MenuItem>] = &[
     None,
     video_item("Loop: off, this video, all", "l", Command::CycleLoop),
     video_item("Scenes", "T", Command::ToggleScenes),
+    video_item("Precise seeking", "", Command::TogglePrecise),
     None,
     video_item("Next subtitles, or none", "j", Command::CycleSubtitles),
     video_item("Larger subtitles", "", Command::SubtitlesLarger),
@@ -726,7 +730,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             "Video",
             &[
                 ("Space", "Play / pause"),
-                ("Left  Right", "Seek 5 seconds, faster held, on into the next file or back into the one before"),
+                ("Left  Right", "Seek about 5 seconds, faster held, on into the next file or back into the one before"),
                 ("PgUp  PgDn", "Seek 1 minute"),
                 ("Shift+Left  Shift+Right", "Step one frame"),
                 ("b", "Back to the start"),

@@ -67,6 +67,10 @@ Slideshow and actions:
       --no-resume            start videos from the beginning, and do not
                              remember where they were left (--resume undoes it)
 
+      --precise-seeking      seek to the exact moment asked for. The usual is
+                             the nearest keyframe, which is much quicker and
+                             may be a few seconds off (config: precise-seeking
+                             = true; Precise seeking in the menu toggles)
       --no-seen              do not remember which videos have been watched, or
                              mark the rest as new (config: seen = false)
 
@@ -149,8 +153,8 @@ Keys:
 
 Videos (mp4, mkv, webm and so on; needs libmpv) play in place, picking up
 where they were left unless --no-resume is given. While one is up:
-  Space                      play / pause        Left / Right  seek 5 seconds (faster held)
-  PgUp / PgDn                seek 1 minute       pointer at the bottom: seek bar with previews
+  Space                      play / pause        Left / Right  seek about 5 seconds (faster held)
+  PgUp / PgDn                seek about 1 minute pointer at the bottom: seek bar with previews
   Shift+Left / Shift+Right   step one frame      Up / Down     volume (m mutes)
   b                          back to the start of the video
   l                          loop: this video, then the whole list, then off
@@ -202,6 +206,8 @@ pub struct Options {
     pub on_last_slide: LastSlide,
     /// Whether the next file comes up when a video ends.
     pub autoplay: bool,
+    /// Whether seeking lands on the exact moment or the nearest keyframe.
+    pub precise_seeking: bool,
     /// Whether things move into place or are simply there.
     pub animations: bool,
     /// Whether the videos watched are remembered and the rest marked new.
@@ -417,7 +423,7 @@ fn is_switch(name: &str) -> bool {
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
-        "debug", "verbose", "watch", "resume", "no-resume", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations",
+        "debug", "verbose", "watch", "resume", "no-resume", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking",
     ];
     switches.contains(&name)
 }
@@ -448,6 +454,7 @@ fn parse_with(
         slideshow_delay: None,
         on_last_slide: LastSlide::Resume,
         autoplay: true,
+        precise_seeking: false,
         animations: true,
         seen: true,
         subtitles: true,
@@ -600,6 +607,8 @@ fn apply(
         "cycle-once" => options.on_last_slide = LastSlide::Quit,
         "autoplay" => options.autoplay = true,
         "no-autoplay" => options.autoplay = false,
+        "precise-seeking" => options.precise_seeking = true,
+        "no-precise-seeking" => options.precise_seeking = false,
         "animations" => options.animations = true,
         "no-animations" => options.animations = false,
         "seen" => options.seen = true,

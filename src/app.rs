@@ -956,6 +956,9 @@ pub struct App {
     /// What a video that has played to its end does, kept from one video
     /// to the next.
     looping: Looping,
+    /// Whether seeking lands on the very moment asked for or on the
+    /// nearest keyframe.
+    precise: bool,
     /// Whether the strip of scenes is up, the scenes of the videos looked
     /// at so far, and the thread that finds them.
     scenes_on: bool,
@@ -1371,6 +1374,7 @@ impl App {
             speed: 1.0,
             muted: false,
             looping: Looping::Off,
+            precise: options.precise_seeking,
             scenes_on: false,
             scenes: HashMap::new(),
             scene_finder: None,
@@ -1956,6 +1960,9 @@ impl App {
                 // Every seek ends with the player announcing frames again.
                 if let Some(asked) = video.seek_asked.take() {
                     video.seek_took = Some(asked.elapsed());
+                    if self.options.debug {
+                        eprintln!("jog: {:>7.1?} seek", asked.elapsed());
+                    }
                     video.to_end = video.to_end.map(|_| Instant::now());
                 }
             }
@@ -2303,7 +2310,11 @@ impl App {
             VideoAction::File(forward) => return self.step(forward),
             VideoAction::Pause => player.command(&[b"cycle", b"pause"]),
             VideoAction::Seek(seconds) => {
-                player.command(&[b"seek", seconds.to_string().as_bytes(), b"relative+exact"]);
+                // To the nearest keyframe, which the player can show at
+                // once, unless the very moment asked for is wanted: getting
+                // there means decoding every frame from the keyframe before.
+                let how: &[u8] = if self.precise { b"relative+exact" } else { b"relative+keyframes" };
+                player.command(&[b"seek", seconds.to_string().as_bytes(), how]);
                 // mpv has not moved yet when asked straight after a seek, so
                 // quick presses build on where the last one was heading.
                 let from = match video.seeking {
@@ -2867,6 +2878,10 @@ impl App {
             VolumeDown => self.video_action(VideoAction::Volume(-5)),
             Restart => self.restart_video(),
             CycleLoop => self.cycle_loop(),
+            TogglePrecise => {
+                self.precise = !self.precise;
+                self.toast(if self.precise { "Seeking to the exact moment" } else { "Seeking to the nearest keyframe, which is quicker" });
+            }
             ToggleScenes => {
                 self.scenes_on = !self.scenes_on;
                 if self.scenes_on && self.video.is_none() {
@@ -2918,6 +2933,7 @@ impl App {
             ToggleGridTitles => self.grid_titles,
             ToggleMute => self.muted,
             CycleLoop => self.looping != Looping::Off,
+            TogglePrecise => self.precise,
             ToggleScenes => self.scenes_on,
             CycleSubtitles => self.subtitles,
             SortBy(sort) => self.sort == Some(sort),
@@ -5319,7 +5335,7 @@ impl App {
                     self.video_action(VideoAction::Pause);
                 } else if bar.on_track(x) {
                     // Click to jump there; keep the button down to scrub.
-                    self.seek_to(self.hover.unwrap_or(0.0), true);
+                    self.seek_to(self.hover.unwrap_or(0.0), self.precise);
                     self.drag = Some(Drag::Scrub);
                 }
             }
