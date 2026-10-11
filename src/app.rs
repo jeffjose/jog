@@ -3883,17 +3883,29 @@ impl App {
         (place[0] >= 0 && place[0] + place[2] <= window.0 as i32).then_some(place)
     }
 
-    /// Where a picture that is growing out of its cell has got to on its
-    /// way to `full`, its place in the window; nothing once it is there.
-    fn growing(&mut self, id: usize, full: [i32; 4]) -> Option<[i32; 4]> {
-        let grow = self.grow.as_ref().filter(|grow| grow.opening && grow.id == id && self.options.animations)?;
-        if grow.since.elapsed() >= GROW {
+    /// The picture that grows out of a cell of the grid or shrinks into
+    /// one: for a video the frame its cell shows, since the frame it opens
+    /// on is as often as not black, and otherwise the picture as it is on
+    /// view, or failing that the one from its cell.
+    fn grow_picture(&self, id: usize) -> Option<Arc<Frame>> {
+        let shown = self.shown.as_ref().filter(|(shown, _)| *shown == id && !files::is_video(&self.files[id]));
+        shown.map(|(_, frame)| frame.clone()).or_else(|| self.loader.thumb(id))
+    }
+
+    /// The picture growing out of its cell, and where it has got to on its
+    /// way to its place in the window; nothing once it is there.
+    fn growing(&mut self, window: (u32, u32)) -> Option<(Arc<Frame>, [i32; 4])> {
+        let grow = self.grow.as_ref().filter(|grow| grow.opening && self.options.animations)?;
+        let picture = self.grow_picture(grow.id).filter(|_| grow.since.elapsed() < GROW && grow.id == self.id());
+        let Some(picture) = picture else {
             self.grow = None;
             return None;
-        }
+        };
+        let full = self.view.layout(picture.native, window);
+        let full = [full.x, full.y, full.width as i32, full.height as i32];
         let part = Glide { from: 0.0, to: 1.0, since: grow.since }.part(GROW);
         self.animating.set(true);
-        Some(std::array::from_fn(|side| (f64::from(grow.cell[side]) + f64::from(full[side] - grow.cell[side]) * part).round() as i32))
+        Some((picture, std::array::from_fn(|side| (f64::from(grow.cell[side]) + f64::from(full[side] - grow.cell[side]) * part).round() as i32)))
     }
 
     /// Draws the picture that was on view shrinking into its cell, over
@@ -3902,7 +3914,7 @@ impl App {
         let Some(grow) = self.grow.as_ref().filter(|grow| !grow.opening && self.options.animations) else { return };
         let window = (canvas.width as u32, canvas.height as u32);
         let pos = self.list.iter().position(|id| *id == grow.id);
-        let frame = self.shown.as_ref().filter(|(id, _)| *id == grow.id).map(|(_, frame)| frame.clone());
+        let frame = self.grow_picture(grow.id);
         let (Some(pos), Some(frame), true) = (pos, frame, grow.since.elapsed() < GROW) else {
             self.grow = None;
             return;
@@ -5375,7 +5387,13 @@ impl App {
                 } else if panel.is_some() {
                     // A click on a name goes to that file.
                     if let Some(pos) = self.list_row_at(x, y) {
+                        // The list and the strip stay as they are: the one
+                        // clicked is not brought to the middle.
+                        let first = self.list_panel().map(|panel| panel.first);
+                        let centre = self.strip_centre();
                         self.go_to(pos, pos > self.pos);
+                        self.list_scroll = first.map(|first| (self.pos, self.list.len(), first));
+                        self.strip_scroll = centre - self.pos as i64;
                     }
                 } else if self.strip_close().is_some_and(|place| (place.x..place.x + place.width).contains(&(x as i32)) && (place.y..place.y + place.height).contains(&(y as i32))) {
                     (self.strip_pinned, self.strip_hover, self.strip_over) = (false, false, None);
@@ -5390,7 +5408,13 @@ impl App {
                     }
                 } else if self.strip_visible() && y >= f64::from(strip.top) {
                     if let Some(pos) = self.strip_cell_at(x, y) {
+                        // The list and the strip stay as they are: the one
+                        // clicked is not brought to the middle.
+                        let first = self.list_panel().map(|panel| panel.first);
+                        let centre = self.strip_centre();
                         self.go_to(pos, pos > self.pos);
+                        self.list_scroll = first.map(|first| (self.pos, self.list.len(), first));
+                        self.strip_scroll = centre - self.pos as i64;
                     }
                 } else {
                     // A second click in the same spot does what `f` does.
@@ -5738,6 +5762,16 @@ impl App {
             pixels.fill(GRID_COLOR);
             return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
         }
+        // Fresh out of the grid, the picture grows from the cell it had
+        // there before anything else of it is drawn.
+        if self.grid.is_none() {
+            if let Some((picture, [x, y, w, h])) = self.growing(window) {
+                pixels.fill(self.options.background);
+                Canvas::new(pixels, window.0, window.1).image_fast(&picture, x, y, w, h);
+                self.scene_live = false;
+                return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
+            }
+        }
         let playing = self.grid.is_none() && self.video.as_ref().is_some_and(|video| video.showing);
         let player = self.player.as_ref().filter(|_| playing);
         let started = Instant::now();
@@ -5776,15 +5810,7 @@ impl App {
             }
             Some(frame) => {
                 let layout = self.view.layout(frame.native, window);
-                // Fresh out of the grid, it grows from the cell it had there.
                 let shown = self.shown.as_ref().map(|(id, _)| *id);
-                let full = [layout.x, layout.y, layout.width as i32, layout.height as i32];
-                if let Some([x, y, w, h]) = shown.and_then(|id| self.growing(id, full)) {
-                    pixels.fill(self.options.background);
-                    Canvas::new(pixels, window.0, window.1).image_fast(&frame, x, y, w, h);
-                    self.scene_live = false;
-                    return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
-                }
                 // Big sources are scaled crudely while zooming or panning,
                 // then smoothly once the view has settled.
                 let settled = self.settle_at.is_none() || frame.pixels.len() <= SMOOTH_ALWAYS;
@@ -5932,7 +5958,11 @@ impl App {
         let bar_level = self.glide(&self.bar_rise, if bar_wanted { 1.0 } else { 0.0 }, EASE);
         if let Some((position, length)) = (bar_level > 0.01).then(|| self.video_time()).flatten() {
             let mut bar = self.seek_bar();
-            bar.middle += ((1.0 - bar_level) * f64::from(bar.unit * 6)) as i32;
+            // From the bottom edge; or, where it stands on a strip, down
+            // onto it from a little above: it does not come up across one.
+            let onto = self.strip_pinned || self.scenes_shown();
+            let travel = if onto { -bar.unit * 2 } else { bar.unit * 6 };
+            bar.middle += ((1.0 - bar_level) * f64::from(travel)) as i32;
             let unit = bar.unit;
             let line = Text::line_height(px);
             let thickness = unit * 2 / 3;
@@ -5956,8 +5986,6 @@ impl App {
             }
             let handle = unit * 5 / 4;
             canvas.pill(bar.x + done - handle / 2, bar.middle - handle / 2, handle, handle, TEXT_COLOR, 256, handle);
-            // The symbol shows the state: a triangle while playing, two bars
-            // while paused.
             let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
             // Either side of it: the file before and the file after.
             for (control, icon) in [(0, commands::icons::SKIP_BACK), (2, commands::icons::SKIP_FORWARD)] {
@@ -5965,7 +5993,9 @@ impl App {
                 labels.push((left + side / 2, top + (side - line) / 2, Ordering::Equal, icon.to_string()));
             }
             let (symbol_left, symbol_top, side) = bar.symbol();
-            if paused {
+            // The symbol is what a press on it does: pause while playing,
+            // and play while paused.
+            if !paused {
                 canvas.pause_symbol(symbol_left, symbol_top, side, TEXT_COLOR);
             } else {
                 canvas.play_symbol(symbol_left, symbol_top, side, TEXT_COLOR);
