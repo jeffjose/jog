@@ -77,6 +77,16 @@ Config file:
       auto-zoom = false
   Options on the command line override it.
 
+Workspaces are folders with names, set in the config file:
+      [workspaces]
+      pictures = \"~/Downloads/Pictures\"
+      clips = { path = \"~/Videos/clips\", recursive = true, sort = \"mtime\" }
+  jog @pictures starts in one. Ctrl+1 to Ctrl+9 go to them in the order
+  they are written, Ctrl+Tab to the next, and @ in the find box lists
+  them; there too a folder opened by its path can be saved as one. Each
+  keeps its place, its marks and its order while jog runs. In the box for
+  a folder to copy or move into, @pictures means that workspace.
+
   -h, --help                 show this help
   -v, --version              show the version
 
@@ -169,8 +179,87 @@ pub struct Options {
     pub watch: bool,
     /// What to narrow the list to from the start, as typed in the find box.
     pub filter: Option<String>,
+    /// The named folders of the config file, in its order, and which of
+    /// them, if any, was asked for by name to start in.
+    pub workspaces: Vec<Workspace>,
+    pub workspace: Option<usize>,
     /// Whether videos pick up where they were left.
     pub resume: bool,
+}
+
+/// A folder with a name, to switch to by it. It may say how it is to be
+/// listed; left unsaid, that is as the options have it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Workspace {
+    pub name: String,
+    pub path: PathBuf,
+    pub recursive: Option<bool>,
+    pub sort: Option<Sort>,
+}
+
+/// Reads the `[workspaces]` table: each entry a path, or a table of a
+/// path and how to list it.
+fn parse_workspaces(value: &toml::Value) -> Result<Vec<Workspace>, String> {
+    let table = value.as_table().ok_or("workspaces: expected a table of names and folders")?;
+    let mut workspaces = Vec::new();
+    for (name, entry) in table {
+        let plain = |path: &str| Workspace { name: name.clone(), path: expand_home(path), recursive: None, sort: None };
+        let workspace = match entry {
+            toml::Value::String(path) => plain(path),
+            toml::Value::Table(details) => {
+                let path = details.get("path").and_then(toml::Value::as_str);
+                let mut workspace = plain(path.ok_or_else(|| format!("workspace {name}: needs a path"))?);
+                workspace.recursive = details.get("recursive").and_then(toml::Value::as_bool);
+                if let Some(order) = details.get("sort").and_then(toml::Value::as_str) {
+                    workspace.sort = Some(parse_sort(order)?);
+                }
+                workspace
+            }
+            _ => return Err(format!("workspace {name}: expected a folder, or a table with a path")),
+        };
+        workspaces.push(workspace);
+    }
+    Ok(workspaces)
+}
+
+/// Adds a workspace to the config file, which is made if it is not there.
+/// The line goes into the `[workspaces]` table, itself added at the end
+/// if need be; nothing else in the file is touched. Returns the file.
+pub fn save_workspace(name: &str, path: &std::path::Path) -> Result<PathBuf, String> {
+    let file = config_path().ok_or("there is no home directory to keep a config file in")?;
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("cannot read {}: {error}", file.display())),
+    };
+    let quoted = |text: &str| format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
+    // A name of plain letters needs no quotes, as a key.
+    let bare = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let line = format!("{} = {}", if bare { name.to_string() } else { quoted(name) }, quoted(&path.to_string_lossy()));
+    let mut lines: Vec<&str> = text.lines().collect();
+    match lines.iter().position(|existing| existing.trim() == "[workspaces]") {
+        // After the last entry of the table: before the next table, or
+        // the blank lines leading up to it.
+        Some(header) => {
+            let next = lines[header + 1..].iter().position(|existing| existing.trim_start().starts_with('['));
+            let mut at = next.map_or(lines.len(), |next| header + 1 + next);
+            while at > header + 1 && lines[at - 1].trim().is_empty() {
+                at -= 1;
+            }
+            lines.insert(at, &line);
+        }
+        None => {
+            if lines.last().is_some_and(|last| !last.trim().is_empty()) {
+                lines.push("");
+            }
+            lines.extend(["[workspaces]", &line]);
+        }
+    }
+    if let Some(folder) = file.parent() {
+        std::fs::create_dir_all(folder).map_err(|error| format!("cannot make {}: {error}", folder.display()))?;
+    }
+    std::fs::write(&file, lines.join("\n") + "\n").map_err(|error| format!("cannot write {}: {error}", file.display()))?;
+    Ok(file)
 }
 
 pub enum Parsed {
@@ -266,6 +355,8 @@ fn parse_with(
         verbose: false,
         watch: false,
         filter: None,
+        workspaces: Vec::new(),
+        workspace: None,
         resume: true,
     };
     let mut fullscreen = None;
@@ -324,6 +415,22 @@ fn parse_with(
     }
 
     options.fullscreen = fullscreen.unwrap_or(options.geometry.is_none());
+    // `@name` stands for the workspace of that name, and starts in it.
+    for at in 0..options.paths.len() {
+        let Some(name) = options.paths[at].to_str().and_then(|text| text.strip_prefix('@')).map(str::to_string) else { continue };
+        let Some(found) = options.workspaces.iter().position(|space| space.name == name) else {
+            let known: Vec<&str> = options.workspaces.iter().map(|space| space.name.as_str()).collect();
+            let known = if known.is_empty() { "none are set in the config file".to_string() } else { format!("there are: {}", known.join(", ")) };
+            return Err(format!("no workspace named '{name}' ({known})"));
+        };
+        options.paths[at] = options.workspaces[found].path.clone();
+        options.workspace = Some(found);
+    }
+    // One started in brings its own way of listing.
+    if let Some(space) = options.workspace.map(|found| options.workspaces[found].clone()) {
+        options.listing.recursive |= space.recursive.unwrap_or(false);
+        options.listing.sort = options.listing.sort.or(space.sort);
+    }
     Ok(Parsed::Run(Box::new(options)))
 }
 
@@ -402,7 +509,7 @@ fn apply(
 
 /// Where the config file lives: `$JOG_CONFIG`, or `jog/config.toml` under
 /// `$XDG_CONFIG_HOME` or `~/.config`.
-fn config_path() -> Option<PathBuf> {
+pub fn config_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("JOG_CONFIG") {
         return Some(path.into());
     }
@@ -428,6 +535,11 @@ fn read_config() -> Result<Option<(PathBuf, String)>, String> {
 fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>) -> Result<(), String> {
     let table: toml::Table = text.parse().map_err(|error: toml::de::Error| error.to_string())?;
     for (key, value) in &table {
+        // The one table: named folders to switch between.
+        if key == "workspaces" {
+            options.workspaces = parse_workspaces(value)?;
+            continue;
+        }
         let key = key.replace('_', "-");
         let (name, argument) = match value {
             toml::Value::Boolean(true) => (key.as_str(), None),
@@ -542,6 +654,19 @@ mod tests {
 
     fn parse_args(args: &[&str]) -> Result<Options, String> {
         parse_config("", args)
+    }
+
+    #[test]
+    fn workspaces_are_read_in_order_and_started_in_by_name() {
+        let config = "[workspaces]\nzebra = \"/z\"\nclips = { path = \"/c\", recursive = true, sort = \"mtime\" }\n";
+        let options = parse_config(config, &["@clips"]).unwrap();
+        let names: Vec<&str> = options.workspaces.iter().map(|space| space.name.as_str()).collect();
+        assert_eq!(names, ["zebra", "clips"]);
+        assert_eq!(options.workspace, Some(1));
+        assert_eq!(options.paths, [PathBuf::from("/c")]);
+        assert!(options.listing.recursive);
+        assert_eq!(options.listing.sort, Some(Sort::Mtime));
+        assert!(parse_config(config, &["@nope"]).is_err());
     }
 
     fn parse_config(config: &str, args: &[&str]) -> Result<Options, String> {

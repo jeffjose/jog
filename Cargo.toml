@@ -13,7 +13,7 @@ memchr = "2"
 fontdue = "0.9"
 kamadak-exif = "0.6"
 bytemuck = "1"
-toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std", "preserve_order"] }
 libloading = "0.9"
 
 [profile.release]

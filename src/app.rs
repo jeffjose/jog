@@ -527,6 +527,34 @@ struct PaletteLayout {
     frame: (i32, i32),
 }
 
+/// A workspace: a folder, or what was opened, under a name, with how it
+/// is listed and what it was showing when it was last left.
+struct Space {
+    name: String,
+    paths: Vec<PathBuf>,
+    recursive: bool,
+    sort: Option<Sort>,
+    filelist: Option<PathBuf>,
+    /// Whether it is in the config file, rather than only opened this once.
+    saved: bool,
+    /// `None` until it has been gone to.
+    kept: Option<Kept>,
+}
+
+/// What a workspace was showing when it was left, to come back to.
+struct Kept {
+    list: Vec<usize>,
+    pos: usize,
+    cursor: usize,
+    filter: Option<(String, Vec<usize>)>,
+    sort: Option<Sort>,
+    reversed: bool,
+    shuffled: bool,
+}
+
+/// The keys that go to the first nine workspaces, as a menu shows them.
+const SPACE_KEYS: [&str; 9] = ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9"];
+
 /// The rename box: the file being renamed and the name as typed so far.
 struct Prompt {
     id: usize,
@@ -539,6 +567,8 @@ struct Prompt {
 enum PromptKind {
     /// A new name for file `id`.
     Rename,
+    /// A name to save the folder on view under, as a workspace.
+    SaveWorkspace,
     /// A folder to move the target files into, or to copy them into.
     SendTo { moving: bool },
 }
@@ -551,6 +581,11 @@ pub struct App {
     undo: Vec<Undo>,
     /// The folder last typed to copy or move files into.
     last_folder: Option<String>,
+    /// The workspaces: those of the config file, in its order, and after
+    /// them the folder opened by its path, if it is none of them. And
+    /// which one is on show.
+    spaces: Vec<Space>,
+    space: usize,
     prompt: Option<Prompt>,
     palette: Option<Palette>,
     /// A command picked in the find box, to be run now that it has closed.
@@ -938,6 +973,37 @@ impl App {
     pub fn new(options: Options, files: Vec<PathBuf>, start: usize, loader: Loader, proxy: EventLoopProxy<Event>) -> Self {
         let slide_delay = Duration::from_secs_f64(options.slideshow_delay.unwrap_or(DEFAULT_SLIDE_DELAY));
         ACCENT.store(options.accent, atomic::Ordering::Relaxed);
+        // The workspaces of the config file; and unless one of them was
+        // asked for by name, what was opened by its path as one more.
+        let mut spaces: Vec<Space> = (options.workspaces.iter())
+            .map(|workspace| Space {
+                name: workspace.name.clone(),
+                paths: vec![workspace.path.clone()],
+                recursive: workspace.recursive.unwrap_or(options.listing.recursive),
+                sort: workspace.sort,
+                filelist: None,
+                saved: true,
+                kept: None,
+            })
+            .collect();
+        let space = options.workspace.unwrap_or_else(|| {
+            let paths = if options.paths.is_empty() { vec![PathBuf::from(".")] } else { options.paths.clone() };
+            // Named after the folder, when it is one folder.
+            let folder = match paths.as_slice() {
+                [only] if only.is_dir() => only.canonicalize().ok().and_then(|full| Some(full.file_name()?.to_string_lossy().into_owned())),
+                _ => None,
+            };
+            spaces.push(Space {
+                name: folder.unwrap_or_else(|| "opened".to_string()),
+                paths,
+                recursive: options.listing.recursive,
+                sort: options.listing.sort,
+                filelist: options.listing.filelist.clone(),
+                saved: false,
+                kept: None,
+            });
+            spaces.len() - 1
+        });
         App {
             marks: HashSet::new(),
             undo: Vec::new(),
@@ -1038,6 +1104,8 @@ impl App {
             rng: Rng::from_clock(),
             window: None,
             surface: None,
+            spaces,
+            space,
             options,
             files,
         }
@@ -2068,6 +2136,11 @@ impl App {
             Mark => self.toggle_mark(),
             MarkMenu => self.open_mark_menu(),
             SortMenu => self.open_palette_with(">sort "),
+            Workspace(to) => self.switch_space(to),
+            NextWorkspace => self.switch_space((self.space + 1) % self.spaces.len()),
+            PrevWorkspace => self.switch_space((self.space + self.spaces.len() - 1) % self.spaces.len()),
+            WorkspaceList => self.open_palette_with("@"),
+            SaveWorkspace => self.ask_workspace_name(),
             SortBy(sort) => self.sort_by(sort),
             Shuffle => {
                 self.shuffle();
@@ -2165,11 +2238,13 @@ impl App {
             ToggleInfo => self.show_info,
             ToggleDebug => self.show_debug,
             ToggleWatch => self.watch.is_some(),
+            Workspace(which) => which == self.space,
             ToggleList => self.show_list,
             ToggleGridTitles => self.grid_titles,
             ToggleMute => self.muted,
             SortBy(sort) => self.sort == Some(sort),
             ReverseOrder => self.reversed,
+            Shuffle => self.shuffled,
             ToggleVerbose => self.options.verbose,
             ToggleDebugLog => self.options.debug,
             ToggleExif => self.show_exif,
@@ -2505,12 +2580,25 @@ impl App {
             Key::Named(NamedKey::Escape) => self.prompt = None,
             Key::Named(NamedKey::Enter) => match prompt.kind {
                 PromptKind::Rename => self.finish_rename(),
+                PromptKind::SaveWorkspace => {
+                    let typed = prompt.field.string().trim().to_string();
+                    self.prompt = None;
+                    self.save_space(&typed);
+                }
                 PromptKind::SendTo { moving } => {
                     let typed = prompt.field.string().trim().to_string();
                     self.prompt = None;
                     if !typed.is_empty() {
                         self.last_folder = Some(typed.clone());
-                        self.send_to(crate::options::expand_home(&typed), moving, event_loop);
+                        // `@name` is the folder of that workspace.
+                        let folder = match typed.strip_prefix('@') {
+                            Some(name) => self.spaces.iter().find(|space| space.name == name).and_then(|space| space.paths.first().cloned()),
+                            None => Some(crate::options::expand_home(&typed)),
+                        };
+                        match folder {
+                            Some(folder) => self.send_to(folder, moving, event_loop),
+                            None => self.toast(format!("There is no workspace named {}", &typed[1..])),
+                        }
                     }
                 }
             },
@@ -2959,6 +3047,149 @@ impl App {
         self.redraw();
     }
 
+    // ---- Workspaces ----------------------------------------------------
+
+    /// Goes to another workspace. What this one was showing is kept for
+    /// coming back to: its place, its order, a kept search. The other is
+    /// listed the first time it is gone to, and picked up where it was
+    /// left after that.
+    fn switch_space(&mut self, to: usize) {
+        let Some(name) = self.spaces.get(to).map(|space| space.name.clone()) else {
+            return self.toast(format!("There is no workspace {}", to + 1));
+        };
+        if to == self.space {
+            return self.toast(format!("@{name}"));
+        }
+        let incoming = match self.spaces[to].kept.take().filter(|kept| !kept.list.is_empty()) {
+            Some(kept) => kept,
+            None => {
+                let space = &self.spaces[to];
+                let listing = files::Listing { recursive: space.recursive, sort: space.sort, filelist: space.filelist.clone(), ..files::Listing::default() };
+                let found = files::collect(&space.paths, &listing).files;
+                if found.is_empty() {
+                    return self.toast(format!("@{name} has nothing to show"));
+                }
+                // Files seen before, in whatever workspace, keep their ids.
+                let known: HashMap<PathBuf, usize> = self.files.iter().cloned().enumerate().map(|(id, path)| (path, id)).collect();
+                let mut list = Vec::with_capacity(found.len());
+                for path in found {
+                    list.push(known.get(&path).copied().unwrap_or_else(|| {
+                        self.loader.add_file(path.clone());
+                        self.files.push(path);
+                        self.files.len() - 1
+                    }));
+                }
+                Kept { list, pos: 0, cursor: 0, filter: None, sort: self.spaces[to].sort, reversed: false, shuffled: false }
+            }
+        };
+        let leaving = Kept {
+            cursor: self.focus(),
+            list: std::mem::take(&mut self.list),
+            pos: self.pos,
+            filter: self.filter.take(),
+            sort: self.sort,
+            reversed: self.reversed,
+            shuffled: self.shuffled,
+        };
+        self.spaces[self.space].kept = Some(leaving);
+        self.space = to;
+
+        // Refreshing and watching go by where the options point.
+        let space = &self.spaces[to];
+        self.options.paths = space.paths.clone();
+        (self.options.listing.recursive, self.options.listing.sort) = (space.recursive, space.sort);
+        self.options.listing.filelist = space.filelist.clone();
+
+        let last = incoming.list.len() - 1;
+        let count = incoming.list.len();
+        (self.filter, self.sort, self.reversed, self.shuffled) = (incoming.filter, incoming.sort, incoming.reversed, incoming.shuffled);
+        (self.list, self.pos) = (incoming.list, incoming.pos.min(last));
+        (self.palette, self.menu, self.prompt) = (None, None, None);
+        (self.strip_scroll, self.strip_over, self.list_scroll, self.list_hover) = (0, None, None, None);
+        let layout = self.grid_layout(self.window_size());
+        if let Some(grid) = &mut self.grid {
+            *grid = Grid::at(incoming.cursor.min(last), &layout);
+        }
+        self.error = None;
+        self.reset_view();
+        self.request();
+        self.refresh();
+        self.sync_video();
+        // A watch goes on, now on this workspace's folders.
+        if self.watch.is_some() {
+            self.set_watch(true);
+        }
+        self.toast(format!("@{name}   {count} files"));
+        if self.options.verbose {
+            eprintln!("jog: workspace @{name}: {count} files");
+        }
+        self.redraw();
+    }
+
+    /// The workspaces whose names match what follows an `@` in the find
+    /// box, as rows to pick from: each with its folder and its key, the
+    /// one on show ticked. And, for a folder that was opened by its path,
+    /// a row to save it as one.
+    fn spaces_matching(&mut self, typed: &str) -> Vec<(String, &'static str, Command)> {
+        let query = Query::parse(typed);
+        let wanted = |name: &str, loose: bool| query.is_empty() || query.score(&Facts { name, video: false, marked: false, size: None }, loose).is_some();
+        let row = |(at, space): (usize, &Space)| {
+            let folder = space.paths.first().map(|path| short_dir(path)).unwrap_or_default();
+            let unsaved = if space.saved { "" } else { "   (not saved)" };
+            (format!("{}   {folder}{unsaved}", space.name), SPACE_KEYS.get(at).copied().unwrap_or(""), Command::Workspace(at))
+        };
+        let pass = |loose: bool| -> Vec<(String, &'static str, Command)> {
+            self.spaces.iter().enumerate().filter(|(_, space)| wanted(&space.name, loose)).map(row).collect()
+        };
+        let mut rows = pass(false);
+        if rows.is_empty() {
+            rows = pass(true);
+        }
+        let here = &self.spaces[self.space];
+        if !here.saved && query.is_empty() {
+            rows.push((format!("Save {} as a workspace...", here.name), "", Command::SaveWorkspace));
+        }
+        rows
+    }
+
+    /// Opens a box for the name to save the folder on view under, as a
+    /// workspace. Only a single folder can be one.
+    fn ask_workspace_name(&mut self) {
+        let here = &self.spaces[self.space];
+        if here.saved {
+            return self.toast(format!("@{} is a workspace already", here.name));
+        }
+        if !matches!(here.paths.as_slice(), [only] if only.is_dir()) {
+            return self.toast("Only a single folder can be saved as a workspace");
+        }
+        let text: Vec<char> = here.name.chars().collect();
+        let id = self.list[self.focus()];
+        self.prompt = Some(Prompt { id, kind: PromptKind::SaveWorkspace, field: TextField::new(text.clone(), text.len()) });
+        (self.menu, self.palette) = (None, None);
+        self.redraw();
+    }
+
+    /// Writes the folder on view into the config file as a workspace.
+    fn save_space(&mut self, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        if self.spaces.iter().any(|space| space.saved && space.name == name) {
+            return self.toast(format!("There is a workspace named {name} already"));
+        }
+        let Some(folder) = self.spaces[self.space].paths.first().and_then(|path| path.canonicalize().ok()) else {
+            return self.toast("Cannot tell where this folder is");
+        };
+        match crate::options::save_workspace(name, &folder) {
+            Ok(file) => {
+                let space = &mut self.spaces[self.space];
+                (space.name, space.saved) = (name.to_string(), true);
+                self.toast(format!("Saved as @{name} in {}", short_dir(&file)));
+            }
+            Err(error) => self.toast(format!("Could not save it: {error}")),
+        }
+    }
+
     // ---- Refresh and watch ---------------------------------------------
 
     /// Starts or stops watching the directories. A thread lists them once
@@ -3150,6 +3381,7 @@ impl App {
             // `>` and then a number is a size to find files by.
             Some('>') if !typed[1..].starts_with(|c: char| c.is_ascii_digit()) => (Vec::new(), false, self.commands_matching(&typed[1..])),
             Some(':') => self.place_named(&typed[1..]),
+            Some('@') => (Vec::new(), false, self.spaces_matching(&typed[1..])),
             _ => {
                 let (matches, narrowed) = self.matching(&typed);
                 (matches, narrowed, Vec::new())
@@ -3405,6 +3637,7 @@ impl App {
             _ if !palette.commands.is_empty() && palette.field.text.first() == Some(&':') => "Go to:   ",
             Some('>') if palette.matches.is_empty() => "Run:   ",
             Some(':') => "Go to:   ",
+            Some('@') => "Workspace:   ",
             _ => "Find:   ",
         };
         let typed = palette.field.string();
@@ -3583,6 +3816,12 @@ impl App {
                 self.execute(command, event_loop);
             }
             return;
+        }
+        // Going to another workspace works from anywhere but a text box.
+        let to_space = commands::for_key(key.clone(), self.modifiers, numpad);
+        if let Some(command @ (Command::Workspace(_) | Command::NextWorkspace | Command::PrevWorkspace)) = to_space {
+            self.menu = None;
+            return self.execute(command, event_loop);
         }
         if self.menu.is_some() {
             return self.menu_key(key, event_loop);
@@ -4266,7 +4505,12 @@ impl App {
             top_left.push(line);
         }
         if viewing && self.show_info {
-            top_left.push(vec![(self.name(), TEXT_COLOR), (format!("   {} / {}", self.pos + 1, self.list.len()), soft)]);
+            let mut line = vec![(self.name(), TEXT_COLOR), (format!("   {} / {}", self.pos + 1, self.list.len()), soft)];
+            // Which workspace this is, when there are several to be in.
+            if self.spaces.len() > 1 {
+                line.insert(0, (format!("@{}   ", self.spaces[self.space].name), soft));
+            }
+            top_left.push(line);
             top_left.push(vec![(self.info_line(), dim)]);
             if let Some((position, length)) = self.video_time() {
                 let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
@@ -4424,6 +4668,7 @@ impl App {
             let files = if count == 1 { self.name_of(prompt.id) } else { format!("{count} files") };
             let (icon, title, hint) = match prompt.kind {
                 PromptKind::Rename => (commands::icons::PENCIL, "Rename".to_string(), "Enter to rename"),
+                PromptKind::SaveWorkspace => (commands::icons::FOLDER_PLUS, "Save this folder as a workspace named".to_string(), "Enter to add it to the config file"),
                 PromptKind::SendTo { moving: true } => (commands::icons::FOLDER_INPUT, format!("Move {files} to"), "Enter to move, the folder is made if need be"),
                 PromptKind::SendTo { moving: false } => (commands::icons::FOLDER_PLUS, format!("Copy {files} to"), "Enter to copy, the folder is made if need be"),
             };
@@ -4998,8 +5243,8 @@ impl App {
         let px = ui_px(height);
         let bottom = if self.strip_visible() { Strip::for_height(height).top } else { height as i32 };
         let row_height = Text::line_height(px) + px as i32 / 2;
-        // Above the rows, a heading with the buttons at its right.
-        let top = Text::line_height(px) + px as i32 * 2;
+        // Above the rows: a heading, and under it the buttons for the order.
+        let top = Text::line_height(px) * 2 + px as i32 * 3;
         let rows = (((bottom - top) / row_height).max(1) as usize).min(self.list.len());
         let scrolled = self.list_scroll.filter(|(pos, len, _)| (*pos, *len) == (self.pos, self.list.len()));
         let first = scrolled.map_or(self.pos.saturating_sub(rows / 2), |(_, _, first)| first).min(self.list.len() - rows);
@@ -5127,11 +5372,17 @@ impl App {
     /// and close.
     fn list_buttons(&self) -> Vec<Button> {
         let Some(panel) = self.list_panel() else { return Vec::new() };
-        let (px, side) = (panel.px as i32, panel.px as i32 * 2);
-        let commands = [Command::SortMenu, Command::Shuffle, Command::ToggleList];
-        let left = panel.width - px / 2 - commands.len() as i32 * side;
-        let place = |(at, command): (usize, Command)| Button { x: left + at as i32 * side, y: (panel.top - side) / 2, width: side, height: side, command };
-        commands.into_iter().enumerate().map(place).collect()
+        let px = panel.px as i32;
+        // The cross, at the right of the heading.
+        let side = px * 3 / 2;
+        let mut buttons = vec![Button { x: panel.width - side - px / 2, y: px / 2, width: side, height: side, command: Command::ToggleList }];
+        // The orders, sharing the width of the row under the heading.
+        let orders = [Command::SortBy(Sort::Name), Command::SortBy(Sort::Mtime), Command::SortBy(Sort::Size), Command::Shuffle, Command::ReverseOrder];
+        let (gap, height) = (px / 3, Text::line_height(panel.px) + px / 4);
+        let width = (panel.width - px - gap * (orders.len() as i32 - 1)) / orders.len() as i32;
+        let top = panel.top - px / 2 - px / 2 - height;
+        buttons.extend(orders.into_iter().enumerate().map(|(at, command)| Button { x: px / 2 + at as i32 * (width + gap), y: top, width, height, command }));
+        buttons
     }
 
     /// The list position whose star, at the right end of its row, is at a
@@ -5150,26 +5401,49 @@ impl App {
         canvas.fill(panel.width - 1, 0, 1, panel.bottom, MENU_EDGE_COLOR);
 
         // The heading: how many files, and what they are narrowed to, with
-        // the buttons at its right lighting up under the pointer.
+        // a cross at its right to close the list. Under it a row of
+        // buttons for the order: the one in force filled in, like the
+        // buttons under the grid in look, and lighting up under the pointer.
         let buttons = self.list_buttons();
         let heading = match &self.filter {
             Some((typed, all)) => format!("{} of {}   {typed}", self.list.len(), all.len()),
             None => format!("{} files", self.list.len()),
         };
-        let room = buttons.first().map_or(panel.width, |button| button.x) - 3 * pad;
-        let heading = clipped(text, &heading, room, px);
-        let heading_top = (panel.top - Text::line_height(px)) / 2;
-        text.draw(canvas, pad * 2, heading_top, px, TEXT_COLOR, &heading);
+        let heading = clipped(text, &heading, panel.width - px as i32 * 4, px);
+        text.draw(canvas, pad * 2, px as i32 * 3 / 4, px, TEXT_COLOR, &heading);
         canvas.fill(pad, panel.top - pad / 2, panel.width - 2 * pad, 1, MENU_EDGE_COLOR);
+        let small = (px * 5 / 6).max(11);
         for button in &buttons {
             let over = (button.x..button.x + button.width).contains(&mouse.0) && (button.y..button.y + button.height).contains(&mouse.1);
-            if over {
-                canvas.round_fill(button.x, button.y, button.width, button.height, pad, accent(), 256);
+            let on = self.is_checked(button.command);
+            if button.command == Command::ToggleList {
+                // The cross is a round button, as the grid's is.
+                canvas.round_fill(button.x, button.y, button.width, button.height, button.width / 2, if over { accent() } else { PLACEHOLDER_COLOR }, 256);
+                let cross = commands::icons::X;
+                let inset = ((button.width - text.width(cross, small)) / 2, (button.height - Text::line_height(small)) / 2);
+                text.draw(canvas, button.x + inset.0, button.y + inset.1, small, if over { on_accent() } else { TEXT_COLOR }, cross);
+                continue;
             }
-            let icon = if button.command == Command::ToggleList { commands::icons::X } else { commands::command_icon(button.command) };
-            let inset = ((button.width - text.width(icon, px)) / 2, (button.height - Text::line_height(px)) / 2);
-            text.draw(canvas, button.x + inset.0, button.y + inset.1, px, if over { on_accent() } else { DIM_TEXT_COLOR }, icon);
+            let lit = over || on;
+            canvas.round_fill(button.x, button.y, button.width, button.height, button.height / 2, if lit { accent() } else { PLACEHOLDER_COLOR }, if over && !on { 200 } else { 256 });
+            canvas.round_outline(button.x, button.y, button.width, button.height, button.height / 2, 1, if lit { accent() } else { MENU_EDGE_COLOR });
+            let (icon, word) = match button.command {
+                Command::SortBy(Sort::Mtime) => (commands::icons::CLOCK, "Newest"),
+                Command::SortBy(Sort::Size) => (commands::icons::WEIGHT, "Size"),
+                Command::SortBy(_) => (commands::icons::A_TO_Z, "Name"),
+                Command::Shuffle => (commands::icons::SHUFFLE, "Shuffle"),
+                _ => (commands::icons::ARROW_UP_DOWN, "Reverse"),
+            };
+            // The word goes when there is no room for it beside the icon.
+            let icon_width = text.width(icon, small);
+            let word = if icon_width + pad / 2 + text.width(word, small) + pad <= button.width { word } else { "" };
+            let content = icon_width + if word.is_empty() { 0 } else { pad / 2 + text.width(word, small) };
+            let (left, top) = (button.x + (button.width - content) / 2, button.y + (button.height - Text::line_height(small)) / 2);
+            let color = if lit { on_accent() } else { TEXT_COLOR };
+            text.draw(canvas, left, top, small, color, icon);
+            text.draw(canvas, left + icon_width + pad / 2, top, small, color, word);
         }
+
 
         let numbers = text.width(&self.list.len().to_string(), px);
         let star_room = px as i32 * 2;

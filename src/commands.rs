@@ -48,6 +48,13 @@ pub enum Command {
     /// Put the debug overlay's figures on the clipboard, plainly or as JSON.
     CopyDebug,
     CopyDebugJson,
+    /// Go to a workspace by its number, counted from 0, or to the one after
+    /// or before; list them to pick from; save the folder on view as one.
+    Workspace(usize),
+    NextWorkspace,
+    PrevWorkspace,
+    WorkspaceList,
+    SaveWorkspace,
     ToggleInfo,
     ToggleDebug,
     /// What `--verbose` and `--debug` print on the terminal.
@@ -146,6 +153,8 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             NamedKey::Delete => Remove,
             NamedKey::Enter => Action(0),
             NamedKey::Escape => Quit,
+            NamedKey::Tab if modifiers.control_key() && modifiers.shift_key() => PrevWorkspace,
+            NamedKey::Tab if modifiers.control_key() => NextWorkspace,
             NamedKey::Tab => ToggleMenu,
             NamedKey::F2 => Rename,
             NamedKey::F5 => Reload,
@@ -163,6 +172,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "*" => ZoomActual,
             "0" => ZoomFit,
             "/" => Search,
+            "@" => WorkspaceList,
             "!" => ZoomFill,
             "Z" => ToggleEnlarge,
             "k" if modifiers.control_key() || modifiers.super_key() => Palette,
@@ -203,6 +213,8 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "W" => ToggleWatch,
             "L" => SaveFilelist,
             "q" => Quit,
+            // Ctrl with a digit is a workspace; a digit alone, an action.
+            digit if modifiers.control_key() => Workspace(digit.parse::<usize>().ok().filter(|n| (1..=9).contains(n))? - 1),
             digit => Action(digit.parse().ok().filter(|n| *n <= 9)?),
         },
         _ => return None,
@@ -253,6 +265,9 @@ pub mod icons {
     pub const SEARCH: &str = "\u{e154}";
     pub const X: &str = "\u{e1b1}";
     pub const SHUFFLE: &str = "\u{e161}";
+    pub const A_TO_Z: &str = "\u{e419}";
+    pub const CLOCK: &str = "\u{e08b}";
+    pub const WEIGHT: &str = "\u{e534}";
     pub const PLAY: &str = "\u{e13f}";
     pub const PAUSE: &str = "\u{e131}";
     pub const ROTATE_CCW: &str = "\u{e14b}";
@@ -288,6 +303,7 @@ pub mod icons {
     pub const BRACES: &str = "\u{e36d}";
     pub const FOLDER_INPUT: &str = "\u{e337}";
     pub const FOLDER_PLUS: &str = "\u{e0de}";
+    pub const FOLDERS: &str = "\u{e342}";
     pub const PENCIL: &str = "\u{e1f8}";
     pub const REFRESH: &str = "\u{e148}";
     pub const UNDO: &str = "\u{e2a0}";
@@ -345,6 +361,8 @@ pub fn command_icon(command: Command) -> &'static str {
         Next => ARROW_RIGHT,
         Previous => ARROW_LEFT,
         Search | Palette => SEARCH,
+        WorkspaceList | Workspace(_) | NextWorkspace | PrevWorkspace => FOLDERS,
+        SaveWorkspace => FOLDER_PLUS,
         ClearFilter => LIST_X,
         ClearMarks => STAR_OFF,
         Shuffle => SHUFFLE,
@@ -413,6 +431,7 @@ pub const MENU: &[Option<MenuItem>] = &[
     item("Find...", "/", Command::Search),
     Some(MenuItem { label: "Show all files again", keys: "Esc", command: Command::ClearFilter, applies: Applies::Filtered, sub: &[] }),
     item("Shuffle", "z", Command::Shuffle),
+    item("Workspaces...", "@", Command::WorkspaceList),
     None,
     submenu("Playback", PLAYBACK, Applies::Videos),
     submenu("Zoom", ZOOM, Applies::Always),
@@ -508,6 +527,8 @@ const FILE: &[Option<MenuItem>] = &[
     item("Remove from list", "Del", Command::Remove),
     item("Move to trash", "Ctrl+Del", Command::Trash),
     item("Delete...", "D", Command::Delete),
+    None,
+    item("Save folder as workspace...", "", Command::SaveWorkspace),
 ];
 
 const DEBUG: &[Option<MenuItem>] = &[
@@ -549,6 +570,8 @@ pub const GRID_AROUND_MENU: &[Option<MenuItem>] = &[
     item("Find...", "/", Command::Search),
     submenu("Sort", SORT, Applies::Always),
     item("Shuffle", "z", Command::Shuffle),
+    item("Workspaces...", "@", Command::WorkspaceList),
+    item("Save folder as workspace...", "", Command::SaveWorkspace),
     None,
     item("Mark all", "", Command::MarkAll),
     item("Invert marks", "", Command::InvertMarks),
@@ -627,6 +650,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Enter", "Go to the match picked"),
                 ("Tab  Enter", "To the buttons: show only the matches"),
                 ("Esc", "Show all files again"),
+                ("@  Ctrl+1  Ctrl+Tab", "Workspaces: list, go to, next"),
                 ("word  ^start  !not", "Match names"),
                 ("#video  #marked  >10mb", "Match kinds and sizes"),
                 (">sort", "Find a command and run it"),
