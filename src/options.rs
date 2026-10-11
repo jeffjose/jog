@@ -37,6 +37,8 @@ File list:
   -z, --randomize            shuffle the list
       --start-at FILE        start at this file
   -f, --filelist FILE        read paths from FILE, one per line
+      --filter TEXT          start with only the files the find box would show
+                             for TEXT: jog --filter 'beach #video >10mb'
       --watch                add files as they appear in the directories, and
                              drop those that go (W turns it on and off)
 
@@ -84,10 +86,10 @@ Keys:
   z                          shuffle the rest    { / }         previous / next directory
   + Up / - Down              zoom in / out       * 0 !         100%, fit, fill
   / or Ctrl+K                find: type part of a name, Up / Down to pick among
-                             the matches, Enter to go to the one picked, Tab to
-                             show only the matches, Esc to cancel. Right moves
-                             on to the buttons: Show only the matches, or Show
-                             all once a search has been kept (Esc later, too).
+                             the matches, Enter to go to the one picked, Esc
+                             to cancel. Tab or Right moves on to the buttons:
+                             Show only the matches, or Show all once a search
+                             has been kept (Esc later, too).
                              ^foo starts with, !foo without; also is:video
                              is:image is:gif is:marked, and sizes such as
                              >10mb or <1gb (b, kb, mb, gb)
@@ -165,6 +167,8 @@ pub struct Options {
     pub debug: bool,
     pub verbose: bool,
     pub watch: bool,
+    /// What to narrow the list to from the start, as typed in the find box.
+    pub filter: Option<String>,
     /// Whether videos pick up where they were left.
     pub resume: bool,
 }
@@ -207,7 +211,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
 
 fn takes_value(name: &str) -> bool {
     let valued = [
-        "geometry", "image-bg", "accent", "zoom", "sort", "start-at", "filelist", "slideshow-delay", "on-last-slide",
+        "geometry", "image-bg", "accent", "zoom", "sort", "start-at", "filelist", "filter", "slideshow-delay", "on-last-slide",
         "output-dir",
     ];
     valued.contains(&name) || name.starts_with("action")
@@ -261,6 +265,7 @@ fn parse_with(
         debug: std::env::var_os("JOG_DEBUG").is_some(),
         verbose: false,
         watch: false,
+        filter: None,
         resume: true,
     };
     let mut fullscreen = None;
@@ -350,6 +355,7 @@ fn apply(
         "reverse" => options.listing.reverse = true,
         "randomize" => options.listing.randomize = true,
         "start-at" => options.listing.start_at = Some(value()?.into()),
+        "filter" => options.filter = Some(value()?),
         "filelist" => options.listing.filelist = Some(value()?.into()),
         "slideshow-delay" => {
             let text = value()?;

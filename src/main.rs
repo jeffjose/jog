@@ -68,10 +68,18 @@ fn main() -> ExitCode {
         let _ = loaded.send_event(Event::Loaded(job));
     });
 
-    let watch = options.watch;
+    let (watch, filter) = (options.watch, options.filter.clone());
     let mut app = App::new(options, files, playlist.start, loader, proxy);
     if watch {
         app.set_watch(true);
+    }
+    // --filter narrows the list before anything is shown; with nothing
+    // left there is nothing to open a window for.
+    if let Some(typed) = filter {
+        if !app.start_filter(&typed) {
+            eprintln!("jog: nothing matches --filter '{typed}'");
+            return ExitCode::FAILURE;
+        }
     }
     let result = event_loop.run_app(&mut app);
     app.remember_position();

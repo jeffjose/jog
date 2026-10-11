@@ -80,6 +80,12 @@ pub struct Playlist {
 /// Directories expand to the images inside them; files are taken as given,
 /// so naming one file shows just that file.
 pub fn collect(args: &[PathBuf], listing: &Listing) -> Playlist {
+    gather(args, listing, true)
+}
+
+/// As `collect`; `report` says whether to complain of what cannot be read,
+/// which is for the first time only, not each time the list is refreshed.
+fn gather(args: &[PathBuf], listing: &Listing, report: bool) -> Playlist {
     let mut files = Vec::new();
     let start_at = listing.start_at.clone();
 
@@ -96,8 +102,10 @@ pub fn collect(args: &[PathBuf], listing: &Listing) -> Playlist {
             for arg in args {
                 if arg.is_dir() {
                     list_dir(arg, listing.recursive, &mut files);
-                } else {
+                } else if arg.exists() {
                     files.push(arg.clone());
+                } else if report {
+                    eprintln!("jog: {}: no such file or folder", arg.display());
                 }
             }
         }
@@ -126,7 +134,7 @@ pub fn collect(args: &[PathBuf], listing: &Listing) -> Playlist {
 /// finding out what has appeared since `collect` was called.
 pub fn relist(args: &[PathBuf], listing: &Listing) -> Vec<PathBuf> {
     let plain = Listing { recursive: listing.recursive, filelist: listing.filelist.clone(), ..Listing::default() };
-    collect(args, &plain).files
+    gather(args, &plain, false).files
 }
 
 /// Appends the images in `dir` in natural order, subdirectories last.

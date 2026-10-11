@@ -585,6 +585,11 @@ pub struct App {
     /// Which of the grid's buttons the pointer is over, counting those
     /// under it and then those at its sides.
     grid_over: Option<usize>,
+    /// The debug overlay as last drawn: its buttons, its figures for
+    /// copying, and the sizes it has grown to.
+    debug_buttons: Vec<Button>,
+    debug_last: Vec<Group>,
+    debug_keep: DebugKeep,
     /// Video lengths, found out on another thread as their rows come up.
     /// Asked for but not yet known ones are `None`.
     durations: HashMap<usize, Option<f64>>,
@@ -954,6 +959,9 @@ impl App {
             strip_scroll: 0,
             strip_close_over: false,
             grid_over: None,
+            debug_buttons: Vec::new(),
+            debug_last: Vec::new(),
+            debug_keep: DebugKeep::default(),
             durations: HashMap::new(),
             prober: None,
             stories: None,
@@ -2007,6 +2015,28 @@ impl App {
                     self.menu = Some(self.build_menu(commands::GRID_MENU, None, (left + width / 2, top + height / 2)));
                 }
             }
+            CopyDebug | CopyDebugJson => {
+                // As lines under headings, or as JSON for pasting elsewhere.
+                let quoted = |text: &str| format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
+                let copied = if command == CopyDebug {
+                    let cluster = |(title, figures): &Group| {
+                        let lines: Vec<String> = figures.iter().map(|(name, value)| format!("  {name:<14}{value}")).collect();
+                        format!("{title}\n{}", lines.join("\n"))
+                    };
+                    self.debug_last.iter().map(cluster).collect::<Vec<_>>().join("\n")
+                } else {
+                    let cluster = |(title, figures): &Group| {
+                        let pairs: Vec<String> = figures.iter().map(|(name, value)| format!("{}: {}", quoted(name), quoted(value))).collect();
+                        format!("{}: {{{}}}", quoted(title), pairs.join(", "))
+                    };
+                    format!("{{{}}}", self.debug_last.iter().map(cluster).collect::<Vec<_>>().join(", "))
+                };
+                println!("{copied}");
+                match self.snapshot.is_some() || ops::set_clipboard(&copied) {
+                    true => self.toast("Copied"),
+                    false => self.toast("No clipboard tool found (xclip, xsel or wl-copy); printed to the terminal"),
+                }
+            }
             ToggleMute => {
                 self.muted = !self.muted;
                 if let Some(player) = &self.player {
@@ -2108,7 +2138,11 @@ impl App {
 
     fn run_action(&mut self, slot: usize) {
         let Some(template) = &self.options.actions[slot] else {
-            self.toast(format!("No action {slot} defined"));
+            // Enter and the digits are spare keys until actions are set
+            // for them; only then is an unset one worth a word.
+            if self.options.actions.iter().any(Option::is_some) {
+                self.toast(format!("Nothing is set for key {slot}"));
+            }
             return;
         };
         let command = expand_action(template, self.path());
@@ -2518,6 +2552,18 @@ impl App {
         }
         scored.sort_by_key(|(_, score)| -score);
         (scored.into_iter().map(|(id, _)| id).collect(), true)
+    }
+
+    /// Narrows the list from the start to what `typed` would find in the
+    /// find box, for `--filter`. Returns whether anything is left to show.
+    pub fn start_filter(&mut self, typed: &str) -> bool {
+        let (matches, narrowed) = self.matching(typed);
+        if narrowed && !matches.is_empty() {
+            // The file it would have started on, if that is among them.
+            let start = Some(self.id()).filter(|id| matches.contains(id));
+            self.keep_matches(typed.trim().to_string(), matches, start);
+        }
+        !narrowed || !self.list.is_empty() && self.filter.is_some()
     }
 
     /// Narrows the list to `matches`, in the order the list had them, and
@@ -3219,8 +3265,12 @@ impl App {
                 let end = palette.focus.checked_sub(1).map_or(PaletteEnd::Go, |button| buttons[button].0);
                 self.finish_palette(end);
             }
-            Key::Named(NamedKey::Tab) if buttons.iter().any(|(end, _)| *end == PaletteEnd::Keep) => {
-                self.finish_palette(PaletteEnd::Keep)
+            // Tab goes round: from the text to each button in turn and
+            // back, Shift+Tab the other way. Enter presses the one it is on.
+            Key::Named(NamedKey::Tab) => {
+                let stops = buttons.len() + 1;
+                let back = self.modifiers.shift_key();
+                palette.focus = (palette.focus + if back { stops - 1 } else { 1 }) % stops;
             }
             // Right from the end of the text goes on to the buttons, and
             // left comes back.
@@ -3800,6 +3850,13 @@ impl App {
                     self.drag = Some(Drag::Scrub);
                 }
             }
+            // The buttons on the debug overlay copy its figures.
+            (MouseButton::Left, true) if self.debug_buttons.iter().any(|b| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32))) => {
+                let hit = self.debug_buttons.iter().find(|b| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32)));
+                if let Some(command) = hit.map(|button| button.command) {
+                    self.execute(command, event_loop);
+                }
+            }
             (MouseButton::Left, true) => {
                 let height = self.window_size().1;
                 let strip = Strip::for_height(height);
@@ -4313,6 +4370,8 @@ impl App {
         // The filmstrip has words of its own: the lengths of its videos.
         let boxes = boxes || self.palette.is_some() || strip.is_some();
         if nothing_to_write && !boxes && !self.help {
+            // Nothing drawn means no debug overlay, and none of its buttons.
+            self.debug_buttons.clear();
             return;
         }
         let mut text = self.text.take().unwrap_or_else(Text::load);
@@ -4339,7 +4398,9 @@ impl App {
             self.draw_list(canvas, &mut text, panel);
         }
         let below = rich_block(canvas, &mut text, &top_left, px, (left, margin));
-        draw_debug(canvas, &mut text, &debug, px, (left, below));
+        let pointer = (self.mouse.0 as i32, self.mouse.1 as i32);
+        self.debug_buttons = draw_debug(canvas, &mut text, &debug, px, (left, below), &mut self.debug_keep, pointer);
+        self.debug_last = debug;
         text_block(canvas, &mut text, &exif, px, |_, h| (left, bottom - h));
         text_block(canvas, &mut text, &actions, px, |w, h| (width - margin - w, bottom - h));
         text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w, margin));
@@ -5300,16 +5361,27 @@ fn rich_block(canvas: &mut Canvas, text: &mut Text, lines: &[Vec<(String, u32)>]
     at.1 + height + pad
 }
 
+/// The sizes the debug overlay has grown to: its figures change all the
+/// time, and a panel that changed width with each of them would jitter.
+/// It only ever gets wider or taller, until it shows other clusters.
+#[derive(Default)]
+struct DebugKeep {
+    titles: Vec<&'static str>,
+    columns: Vec<(i32, i32)>,
+    rows: i32,
+}
+
 /// Draws the debug overlay: a panel of clusters side by side, each a
-/// heading over its figures, the names muted and the values bright.
-fn draw_debug(canvas: &mut Canvas, text: &mut Text, groups: &[Group], px: u32, at: (i32, i32)) {
+/// heading over its figures, the names muted and the values bright, and
+/// under them buttons to copy the lot. Returns where the buttons went.
+fn draw_debug(canvas: &mut Canvas, text: &mut Text, groups: &[Group], px: u32, at: (i32, i32), keep: &mut DebugKeep, pointer: (i32, i32)) -> Vec<Button> {
     if groups.is_empty() {
-        return;
+        return Vec::new();
     }
     let small = (px * 5 / 6).max(11);
     let (pad, row) = (px as i32, Text::line_height(small) + px as i32 / 6);
     // Each cluster is as wide as its widest name and its widest value.
-    let columns: Vec<(i32, i32)> = groups
+    let mut columns: Vec<(i32, i32)> = groups
         .iter()
         .map(|(title, figures)| {
             let names = figures.iter().map(|(name, _)| text.width(name, small)).max().unwrap_or(0);
@@ -5317,9 +5389,20 @@ fn draw_debug(canvas: &mut Canvas, text: &mut Text, groups: &[Group], px: u32, a
             (names, values.max(text.width(title, small) - names - pad))
         })
         .collect();
+    let mut rows = groups.iter().map(|(_, figures)| figures.len()).max().unwrap_or(0) as i32 + 1;
+    let titles: Vec<&'static str> = groups.iter().map(|(title, _)| *title).collect();
+    if keep.titles == titles {
+        for (now, was) in columns.iter_mut().zip(&keep.columns) {
+            *now = (now.0.max(was.0), now.1.max(was.1));
+        }
+        rows = rows.max(keep.rows);
+    }
+    (keep.titles, keep.columns, keep.rows) = (titles, columns.clone(), rows);
+
+    let buttons = [(commands::icons::COPY, "Copy", Command::CopyDebug), (commands::icons::BRACES, "Copy as JSON", Command::CopyDebugJson)];
+    let button_height = row + pad / 3;
     let width = columns.iter().map(|(names, values)| names + pad + values).sum::<i32>() + pad * 2 * groups.len() as i32;
-    let rows = groups.iter().map(|(_, figures)| figures.len()).max().unwrap_or(0) as i32 + 1;
-    let height = rows * row + 2 * pad;
+    let height = rows * row + button_height + 3 * pad;
     canvas.round_fill(at.0, at.1, width, height, pad / 2, 0x000000, 190);
     canvas.round_outline(at.0, at.1, width, height, pad / 2, 1, MENU_EDGE_COLOR);
 
@@ -5336,6 +5419,22 @@ fn draw_debug(canvas: &mut Canvas, text: &mut Text, groups: &[Group], px: u32, a
         }
         x += names + pad + values + 2 * pad;
     }
+
+    // The buttons, along the bottom.
+    let mut drawn = Vec::new();
+    let (mut x, y) = (at.0 + pad, at.1 + height - pad - button_height);
+    for (icon, label, command) in buttons {
+        let words = format!("{icon}  {label}");
+        let button_width = text.width(&words, small) + pad;
+        let over = (x..x + button_width).contains(&pointer.0) && (y..y + button_height).contains(&pointer.1);
+        canvas.round_fill(x, y, button_width, button_height, pad / 3, if over { accent() } else { PLACEHOLDER_COLOR }, 256);
+        canvas.round_outline(x, y, button_width, button_height, pad / 3, 1, if over { accent() } else { MENU_EDGE_COLOR });
+        let words_top = y + (button_height - Text::line_height(small)) / 2;
+        text.draw(canvas, x + pad / 2, words_top, small, if over { on_accent() } else { TEXT_COLOR }, &words);
+        drawn.push(Button { x, y, width: button_width, height: button_height, command });
+        x += button_width + pad / 2;
+    }
+    drawn
 }
 
 /// Draws lines of text on a darkened panel. `place` is given the panel size

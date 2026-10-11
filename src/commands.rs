@@ -45,6 +45,9 @@ pub enum Command {
     ToggleGridTitles,
     GridMenu,
     ToggleMute,
+    /// Put the debug overlay's figures on the clipboard, plainly or as JSON.
+    CopyDebug,
+    CopyDebugJson,
     ToggleInfo,
     ToggleDebug,
     /// What `--verbose` and `--debug` print on the terminal.
@@ -282,6 +285,7 @@ pub mod icons {
     pub const STAR_OFF: &str = "\u{e2af}";
     pub const FLAG: &str = "\u{e0d6}";
     pub const COPY: &str = "\u{e0a2}";
+    pub const BRACES: &str = "\u{e36d}";
     pub const FOLDER_INPUT: &str = "\u{e337}";
     pub const FOLDER_PLUS: &str = "\u{e0de}";
     pub const PENCIL: &str = "\u{e1f8}";
@@ -375,7 +379,7 @@ pub fn command_icon(command: Command) -> &'static str {
         ToggleInfo => INFO,
         ToggleExif => CAMERA,
         ToggleGridTitles => TYPE,
-        SortBy(_) => SORT,
+        SortBy(_) | SortMenu => SORT,
         ReverseOrder => ARROW_UP_DOWN,
         Mark | MarkAll => STAR,
         MarkMenu | InvertMarks => FLAG,
@@ -621,7 +625,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             &[
                 ("/  Ctrl+K", "Open the find box"),
                 ("Enter", "Go to the match picked"),
-                ("Tab", "Show only the matches"),
+                ("Tab  Enter", "To the buttons: show only the matches"),
                 ("Esc", "Show all files again"),
                 ("word  ^start  !not", "Match names"),
                 ("#video  #marked  >10mb", "Match kinds and sizes"),
