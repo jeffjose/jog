@@ -1,0 +1,205 @@
+# jog: settings.
+#
+# Nothing here is set until you take the # off the front of a line. Each
+# setting is shown with its usual value, and under it what else it can be.
+# The names are those of the command line options (jog --help), and an
+# option given on the command line wins over this file.
+#
+# A setting that is on or off takes true or false.
+
+# ---- Look -----------------------------------------------------------
+
+# The colour of what is picked out: selections, the grid's cursor.
+# accent = "indigo"
+#   a Radix colour by name:
+#     tomato  red  ruby  crimson  pink  plum  purple  violet  iris  indigo
+#     blue  cyan  teal  jade  green  grass  orange  brown  bronze  gold
+#   or any colour as "RRGGBB", such as "3E63DD"
+
+# What is behind the picture.
+# image-bg = "black"
+#   "black"   "white"   or any colour as "RRGGBB"
+
+# ---- Window ---------------------------------------------------------
+
+# fullscreen = true
+#   true    start fullscreen
+#   false   start in a window
+
+# A window of this size, in pixels, instead of fullscreen.
+# geometry = "1600x900"
+#   "WIDTHxHEIGHT"
+
+# borderless = false
+#   true    no title bar or edges on the window
+
+# hide-pointer = false
+#   true    start with the mouse pointer hidden (o brings it back)
+
+# ---- Starting up ----------------------------------------------------
+
+# grid = false
+#   true    start in the grid, with nothing playing
+
+# recursive = false
+#   true    look in the folders inside a folder too
+
+# The order files are listed in.
+# sort = "name"
+#   "name"       A to Z by the whole path
+#   "filename"   A to Z by file name alone, whatever folder it is in
+#   "dirname"    folder by folder, each A to Z
+#   "newest"     most recently changed first
+#   "oldest"     least recently changed first
+#   "largest"    biggest file first
+#   "smallest"   smallest file first
+#   left out: file names A to Z, the folders inside a folder after it
+
+# reverse = false
+#   true    the order backwards
+
+# randomize = false
+#   true    shuffle the list
+
+# watch = false
+#   true    pick up files as they come and go, without being asked (W)
+
+# What coming back to the folder jog was started on does, after a look
+# at a workspace. (For a workspace, see its own start, further down.)
+# start = "resume"
+#   "resume"   leave it as it was, and pick up where it was left
+#   "fresh"    list it again, and begin at its first file
+#   "random"   list it again, shuffled anew each time
+
+# ---- Viewing --------------------------------------------------------
+
+# How large a picture is shown.
+# zoom = "fit"
+#   "fit"    shrink it to fit the window
+#   "fill"   fill the window, cutting off what does not fit
+#   100      a percentage: 100 is one pixel for one pixel
+
+# auto-zoom = true
+#   true    enlarge a small picture to fit the window
+#   false   show a small picture at its own size
+
+# keep-zoom-vp = false
+#   true    keep the zoom and the place in the picture from file to file
+
+# force-aliasing = false
+#   true    scale pictures without smoothing
+
+# draw-info = false
+#   true    show the name, dimensions, zoom and size at the top left (i)
+
+# draw-exif = false
+#   true    show a photo's EXIF data (e)
+
+# draw-actions = false
+#   true    show the actions that are set (a)
+
+# filmstrip = false
+#   true    keep the filmstrip open along the bottom (t)
+
+# grid-titles = true
+#   false   leave the names out from under the grid's pictures
+
+# ---- Video ----------------------------------------------------------
+
+# autoplay = true
+#   false   stay on a video when it ends, rather than go on to the next
+
+# resume = true
+#   false   start videos from the beginning, and do not remember where
+#           they were left
+
+# ---- Slideshow ------------------------------------------------------
+
+# Start a slideshow, each file staying up this many seconds.
+# slideshow-delay = 5
+
+# What the slideshow does after the last file.
+# on-last-slide = "resume"
+#   "resume"   go round again from the first
+#   "hold"     stop there
+#   "quit"     leave jog
+
+# ---- Copying and moving ---------------------------------------------
+
+# Where V copies files to and M moves them to. Without it they ask for a
+# folder each time.
+# output-dir = "~/Pictures/picks"
+
+# print-marked = false
+#   true    on leaving, print the names of the files that were marked
+
+# ---- Actions --------------------------------------------------------
+
+# Shell commands to run on the file on view: action for Enter, action1
+# to action9 for the keys 1 to 9. In them %f is the file's path and %n
+# its name.
+# action = "xdg-open %f"
+# action1 = "gimp %f"
+# action2 = "cp %f ~/Desktop/"
+
+# ---- Terminal -------------------------------------------------------
+
+# verbose = false
+#   true    print each file as it comes up, and what becomes of trailers
+
+# debug = false
+#   true    print how long each decode and draw took
+
+# ---- Workspaces -----------------------------------------------------
+
+# Folders with names. Each gets a digit for Ctrl: the one its key asks
+# for, or else the first free one, in the order they are written here.
+#
+#   Ctrl+1 .. Ctrl+9   go to one            Ctrl+Tab   go to the next
+#   Ctrl+`             back to what jog was started on
+#   G                  look over them all
+#   @                  list them in the find box; a folder opened by its
+#                      path can be saved as one from there
+#   jog @pictures      start in one
+#
+# An entry is a folder,
+#
+#   pictures = "~/Pictures"
+#
+# or a table that says more about it:
+#
+#   pictures = { path = "~/Pictures", sort = "newest", key = 9 }
+#
+# In a table:
+#
+#   path = "~/Pictures"   the folder: the one thing a table must have
+#
+#   key = 9               the digit that goes to it with Ctrl, 1 to 9
+#                           left out: the first digit no other has taken
+#
+#   recursive = true      look in the folders inside it too
+#                           left out: as recursive, above, has it
+#
+#   sort = "newest"       the order it is listed in
+#                           "name"  "filename"  "dirname"  "newest"
+#                           "oldest"  "largest"  "smallest"
+#                           as for sort, above
+#                           left out: file names A to Z
+#
+#   reverse = true        that order backwards
+#
+#   start = "fresh"       what going to it does
+#                           "fresh"    list it again, and begin at its
+#                                      first file: with sort = "newest",
+#                                      the newest. What a workspace does
+#                                      when it does not say.
+#                           "random"   list it again, shuffled anew each
+#                                      time
+#                           "resume"   leave it as it was, and pick up
+#                                      where it was left
+#
+# [workspaces]
+# pictures = "~/Pictures"
+# incoming = { path = "~/Downloads", sort = "newest", key = 9 }
+# clips = { path = "~/Videos/clips", recursive = true, start = "random" }
+# series = { path = "~/Videos/series", start = "resume" }
