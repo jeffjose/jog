@@ -192,6 +192,10 @@ struct Scaled {
     to: (u32, u32),
 }
 
+/// A cluster of figures in the debug overlay: what it is about, and each
+/// figure's name and value.
+type Group = (&'static str, Vec<(&'static str, String)>);
+
 /// The timings behind the debug overlay.
 struct Perf {
     /// The file on view and when it was gone to.
@@ -208,7 +212,7 @@ struct Perf {
     /// How long the player took to draw its last frame.
     render: Duration,
     /// The player's own figures, and when they were read.
-    video_lines: Option<(Instant, Vec<String>)>,
+    video_lines: Option<(Instant, Vec<Group>)>,
 }
 
 impl Perf {
@@ -279,6 +283,7 @@ impl SeekBar {
 }
 
 /// Something to do to the video on view.
+#[derive(Clone, Copy, PartialEq)]
 enum VideoAction {
     Pause,
     /// Seconds to move by.
@@ -306,6 +311,9 @@ struct Confirm {
     question: String,
     yes: bool,
     ids: Vec<usize>,
+    /// Where its Cancel and its Delete button were last drawn: left, top,
+    /// width and height.
+    drawn: [[i32; 4]; 2],
 }
 
 /// A line of text being typed, and where in it the cursor is.
@@ -473,12 +481,24 @@ struct Palette {
     /// to find, with `>`, or a time to go to, with `:`: what each is called,
     /// its key, and the command itself.
     commands: Vec<(String, &'static str, Command)>,
+    /// The first row on show: the list is scrolled this far down.
+    first: usize,
 }
 
 impl Palette {
     /// How many rows there are to pick among: commands, or else files.
     fn rows(&self) -> usize {
         if self.commands.is_empty() { self.matches.len() } else { self.commands.len() }
+    }
+
+    /// Scrolls the list, of which `rows` show at once, just far enough to
+    /// have the row picked out among them.
+    fn show_selected(&mut self, rows: usize) {
+        if self.selected < self.first {
+            self.first = self.selected;
+        } else if self.selected >= self.first + rows {
+            self.first = self.selected + 1 - rows;
+        }
     }
 }
 
@@ -500,7 +520,17 @@ struct PaletteLayout {
 /// The rename box: the file being renamed and the name as typed so far.
 struct Prompt {
     id: usize,
+    kind: PromptKind,
     field: TextField,
+}
+
+/// What a box for typing into is for.
+#[derive(Clone, Copy)]
+enum PromptKind {
+    /// A new name for file `id`.
+    Rename,
+    /// A folder to move the target files into, or to copy them into.
+    SendTo { moving: bool },
 }
 
 pub struct App {
@@ -509,6 +539,8 @@ pub struct App {
     files: Vec<PathBuf>,
     marks: HashSet<usize>,
     undo: Vec<Undo>,
+    /// The folder last typed to copy or move files into.
+    last_folder: Option<String>,
     prompt: Option<Prompt>,
     palette: Option<Palette>,
     /// A command picked in the find box, to be run now that it has closed.
@@ -682,6 +714,8 @@ enum Drag {
     /// Dragging along the seek bar.
     Scrub,
     Zoom { start_x: f64, start_scale: f64, anchor: (f64, f64), moved: bool },
+    /// Dragging along the bar under the grid, through its pages.
+    Pages,
 }
 
 struct Menu {
@@ -887,6 +921,7 @@ impl App {
         App {
             marks: HashSet::new(),
             undo: Vec::new(),
+            last_folder: None,
             prompt: None,
             palette: None,
             run_next: None,
@@ -1544,6 +1579,15 @@ impl App {
                 return self.toast(format!("Volume {volume:.0}%"));
             }
         }
+        // Pausing says so for a moment, at the top right with the other
+        // notes; playing again takes the word away.
+        if action == VideoAction::Pause {
+            let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
+            match paused {
+                true => self.toast(format!("{}  Paused", commands::icons::PAUSE)),
+                false => self.toast = None,
+            }
+        }
         // Bring up the time and the larger progress bar for a moment.
         self.time_until = Some(Instant::now() + TOAST);
         self.redraw();
@@ -1847,7 +1891,7 @@ impl App {
             }
             ToggleKeepView => {
                 self.keep_view = !self.keep_view;
-                self.toast(if self.keep_view { "Keeping zoom between images" } else { "Zoom resets between images" });
+                self.toast(if self.keep_view { "Keeping zoom from one file to the next" } else { "Zoom starts afresh with each file" });
             }
             // With nothing to scroll sideways, Ctrl+Left and Ctrl+Right move
             // between files, as they do over a video.
@@ -1877,8 +1921,16 @@ impl App {
                 self.request();
                 self.redraw();
             }
-            ToggleInfo => self.show_info = !self.show_info,
-            ToggleDebug => self.show_debug = !self.show_debug,
+            // The two are different looks at the same file, in the same
+            // corner: turning one on turns the other off.
+            ToggleInfo => {
+                self.show_info = !self.show_info;
+                self.show_debug &= !self.show_info;
+            }
+            ToggleDebug => {
+                self.show_debug = !self.show_debug;
+                self.show_info &= !self.show_debug;
+            }
             ToggleVerbose => {
                 self.options.verbose = !self.options.verbose;
                 self.toast(if self.options.verbose { "Printing files to the terminal" } else { "No longer printing files" });
@@ -1998,6 +2050,8 @@ impl App {
             CopyPath => self.copy_text(true),
             CopyTo => self.send(false, event_loop),
             MoveTo => self.send(true, event_loop),
+            CopyToAsk => self.ask_folder(false),
+            MoveToAsk => self.ask_folder(true),
             Undo => self.undo(),
             Rename => self.start_rename(),
             Delete => self.ask_delete(),
@@ -2109,10 +2163,16 @@ impl App {
     /// Copies or moves the target files into the `-o` folder. Files whose
     /// name is already taken there are left alone.
     fn send(&mut self, moving: bool, event_loop: &ActiveEventLoop) {
-        let Some(dir) = self.options.output_dir.clone() else {
-            self.toast("No destination folder: start jog with -o DIR");
-            return;
-        };
+        // With no `-o` folder there is nowhere agreed on: ask for one.
+        match self.options.output_dir.clone() {
+            Some(dir) => self.send_to(dir, moving, event_loop),
+            None => self.ask_folder(moving),
+        }
+    }
+
+    /// Copies or moves the target files into `dir`, made if it is not
+    /// there. Files whose name is already taken there are left alone.
+    fn send_to(&mut self, dir: PathBuf, moving: bool, event_loop: &ActiveEventLoop) {
         if let Err(error) = std::fs::create_dir_all(&dir) {
             self.toast(format!("Cannot use {}: {error}", dir.display()));
             return;
@@ -2191,6 +2251,31 @@ impl App {
         self.refresh();
     }
 
+    /// Which button of the delete confirmation is at a window position:
+    /// `true` for Delete, `false` for Cancel.
+    fn confirm_button_at(&self, x: f64, y: f64) -> Option<bool> {
+        let confirm = self.confirm.as_ref()?;
+        let on = |[left, top, width, height]: [i32; 4]| {
+            (left..left + width).contains(&(x as i32)) && (top..top + height).contains(&(y as i32))
+        };
+        confirm.drawn.iter().position(|place| on(*place)).map(|button| button == 1)
+    }
+
+    /// What a menu item is called. Copying and moving name the folder
+    /// they go to, when `-o` has set one.
+    fn menu_label(&self, item: &MenuItem) -> String {
+        let output = self.options.output_dir.as_deref().map(short_dir);
+        Self::label_for(item, output.as_deref())
+    }
+
+    fn label_for(item: &MenuItem, output: Option<&str>) -> String {
+        match (item.command, output) {
+            (Command::CopyTo, Some(folder)) => format!("Copy to {folder}"),
+            (Command::MoveTo, Some(folder)) => format!("Move to {folder}"),
+            _ => item.label.to_string(),
+        }
+    }
+
     /// Asks before deleting the target files for good.
     fn ask_delete(&mut self) {
         let ids = self.targets();
@@ -2199,7 +2284,7 @@ impl App {
             many => format!("Delete {} marked images?", many.len()),
         };
         self.menu = None;
-        self.confirm = Some(Confirm { question, yes: false, ids });
+        self.confirm = Some(Confirm { question, yes: false, ids, drawn: [[0; 4]; 2] });
         self.redraw();
     }
 
@@ -2342,16 +2427,37 @@ impl App {
         let text: Vec<char> = self.name_of(id).chars().collect();
         // Start typing before the extension.
         let cursor = text.iter().rposition(|c| *c == '.').filter(|at| *at > 0).unwrap_or(text.len());
-        self.prompt = Some(Prompt { id, field: TextField::new(text, cursor) });
+        self.prompt = Some(Prompt { id, kind: PromptKind::Rename, field: TextField::new(text, cursor) });
         self.menu = None;
         self.redraw();
     }
 
-    fn prompt_key(&mut self, key: Key<&str>) {
+    /// Opens a box to type the folder to copy or move the target files
+    /// into, starting from the one last typed, or the `-o` folder.
+    fn ask_folder(&mut self, moving: bool) {
+        let known = self.last_folder.clone().or_else(|| self.options.output_dir.as_deref().map(short_dir));
+        let text: Vec<char> = known.unwrap_or_default().chars().collect();
+        let id = self.list[self.focus()];
+        self.prompt = Some(Prompt { id, kind: PromptKind::SendTo { moving }, field: TextField::new(text.clone(), text.len()) });
+        self.menu = None;
+        self.redraw();
+    }
+
+    fn prompt_key(&mut self, key: Key<&str>, event_loop: &ActiveEventLoop) {
         let Some(prompt) = &mut self.prompt else { return };
         match key {
             Key::Named(NamedKey::Escape) => self.prompt = None,
-            Key::Named(NamedKey::Enter) => self.finish_rename(),
+            Key::Named(NamedKey::Enter) => match prompt.kind {
+                PromptKind::Rename => self.finish_rename(),
+                PromptKind::SendTo { moving } => {
+                    let typed = prompt.field.string().trim().to_string();
+                    self.prompt = None;
+                    if !typed.is_empty() {
+                        self.last_folder = Some(typed.clone());
+                        self.send_to(crate::options::expand_home(&typed), moving, event_loop);
+                    }
+                }
+            },
             key => drop(prompt.field.key(key, self.modifiers)),
         }
         self.redraw();
@@ -2527,11 +2633,12 @@ impl App {
             entries.pop();
         }
 
+        let output = self.options.output_dir.as_deref().map(short_dir);
         let text = self.text.get_or_insert_with(Text::load);
         let (row_height, separator_height, pad) = (px as i32 * 9 / 5, px as i32 * 3 / 5, px as i32 / 2);
 
         let items = entries.iter().flatten();
-        let label_width = items.clone().map(|i| text.width(i.label, px)).max().unwrap_or(0);
+        let label_width = items.clone().map(|i| text.width(&Self::label_for(i, output.as_deref()), px)).max().unwrap_or(0);
         let keys_width = items.map(|i| text.width(i.keys, px)).max().unwrap_or(0);
         let title_width = title.as_ref().map_or(0, |title| text.width(title, px));
         // Padding, a gutter for check marks, the label, a gap and the keys.
@@ -2745,16 +2852,20 @@ impl App {
         }
     }
 
-    /// Shuffles the viewing order. The image being viewed stays current,
-    /// and comes first, so that going on from it passes every other file.
+    /// Shuffles the viewing order around the file in hand: the one on
+    /// view, or in the grid the one under the cursor. It stays where it
+    /// is in the list, and everything before and after it changes.
     fn shuffle(&mut self) {
         (self.sort, self.reversed, self.shuffled) = (None, false, true);
-        let viewed = self.id();
+        let held = self.list[self.focus()];
         let mut rng = std::mem::replace(&mut self.rng, Rng::from_clock());
         self.reorder(|ids, _| {
+            let place = ids.iter().position(|id| *id == held);
             rng.shuffle(ids);
-            if let Some(at) = ids.iter().position(|id| *id == viewed) {
-                ids.swap(0, at);
+            // Back to the place it had, whatever landed there going where
+            // the shuffle had put it.
+            if let (Some(place), Some(at)) = (place, ids.iter().position(|id| *id == held)) {
+                ids.swap(place, at);
             }
         });
         self.rng = rng;
@@ -2938,12 +3049,16 @@ impl App {
         let text: Vec<char> = self.filter.as_ref().map(|(typed, _)| typed.chars().collect()).unwrap_or_default();
         let field = TextField::new(text.clone(), text.len());
         self.menu = None;
-        self.palette = Some(Palette { field, matches: Vec::new(), narrowed: false, selected: 0, focus: 0, drawn: Vec::new(), commands: Vec::new() });
+        self.palette = Some(Palette { field, matches: Vec::new(), narrowed: false, selected: 0, focus: 0, drawn: Vec::new(), commands: Vec::new(), first: 0 });
         self.palette_changed();
         // Start on the file on view, where it is among the matches.
         let current = self.list[self.focus()];
         if let Some(palette) = &mut self.palette {
             palette.selected = palette.matches.iter().position(|id| *id == current).unwrap_or(0);
+        }
+        let rows = self.palette_layout().map_or(1, |layout| layout.rows.max(1));
+        if let Some(palette) = &mut self.palette {
+            palette.show_selected(rows);
         }
     }
 
@@ -2964,6 +3079,7 @@ impl App {
         };
         if let Some(palette) = &mut self.palette {
             (palette.matches, palette.narrowed, palette.selected, palette.focus) = (matches, narrowed, 0, 0);
+            palette.first = 0;
             palette.commands = commands;
         }
         self.request();
@@ -2990,8 +3106,8 @@ impl App {
                     _ if !item.sub.is_empty() => groups.push((item.label, item.sub)),
                     // The box itself is not something to run from it.
                     Command::Search | Command::Palette => {}
-                    command if group.is_empty() => all.push((item.label.to_string(), item.keys, command)),
-                    command => all.push((format!("{group}: {}", item.label), item.keys, command)),
+                    command if group.is_empty() => all.push((self.menu_label(item), item.keys, command)),
+                    command => all.push((format!("{group}: {}", self.menu_label(item)), item.keys, command)),
                 }
             }
         }
@@ -3092,6 +3208,10 @@ impl App {
                 }
             }
         }
+        // The list moves only as far as it must to keep the pick in view.
+        if let Some(palette) = &mut self.palette {
+            palette.show_selected(rows);
+        }
         self.request();
         self.redraw();
     }
@@ -3150,7 +3270,7 @@ impl App {
         let fit = ((height as i32 * 3 / 4 - above - head) / row_height).clamp(1, 10) as usize;
         let top = (height as i32 - above - head - fit as i32 * row_height) / 2 + above;
         let rows = fit.min(palette.rows());
-        let first = (palette.selected + 1).saturating_sub(rows);
+        let first = palette.first.min(palette.rows().saturating_sub(rows));
         let box_width = (px as i32 * 48).min(width as i32);
         Some(PaletteLayout { left: (width as i32 - box_width) / 2, top, width: box_width, head, row_height, first, rows, px, frame })
     }
@@ -3372,7 +3492,7 @@ impl App {
             return self.confirm_key(key, event_loop);
         }
         if self.prompt.is_some() {
-            return self.prompt_key(key);
+            return self.prompt_key(key, event_loop);
         }
         if self.palette.is_some() {
             self.palette_key(key);
@@ -3406,6 +3526,34 @@ impl App {
         let (dx, dy) = (x - self.mouse.0, y - self.mouse.1);
         self.mouse = (x, y);
 
+        // In the delete confirmation the button under the pointer is the
+        // one picked out, Delete turning red as it is.
+        if self.confirm.is_some() {
+            let over = self.confirm_button_at(x, y);
+            if let (Some(confirm), Some(yes)) = (&mut self.confirm, over) {
+                if confirm.yes != yes {
+                    confirm.yes = yes;
+                    self.redraw();
+                }
+            }
+            return;
+        }
+
+        // In the find box the match under the pointer is picked out, as
+        // Up and Down would pick it. Only when the pointer has really
+        // moved: a list scrolling under a still pointer picks nothing.
+        if self.palette.is_some() {
+            let row = self.palette_row_at(x, y).filter(|_| (dx, dy) != (0.0, 0.0));
+            if let (Some(palette), Some(row)) = (&mut self.palette, row) {
+                if palette.selected != row {
+                    (palette.selected, palette.focus) = (row, 0);
+                    self.request();
+                    self.redraw();
+                }
+            }
+            return;
+        }
+
         if let Some(menu) = &mut self.menu {
             // Moving the pointer elsewhere leaves a keyboard selection alone.
             if let Some(sub) = &mut menu.sub {
@@ -3429,11 +3577,17 @@ impl App {
             return;
         }
         if self.grid.is_some() {
+            // Dragging along the page bar goes through the pages, and
+            // picks nothing out on the way.
+            if matches!(self.drag, Some(Drag::Pages)) {
+                return self.drag_pages(x);
+            }
             self.point_cursor();
             // The buttons light up under the pointer.
             let inside = |b: &Button| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32));
             let arrows = self.grid_arrows();
-            let over = self.grid_buttons.iter().chain(arrows.iter().map(|(place, _)| place)).position(inside);
+            let close = self.grid_close();
+            let over = self.grid_buttons.iter().chain(arrows.iter().map(|(place, _)| place)).chain(close.iter()).position(inside);
             if over != self.grid_over {
                 self.grid_over = over;
                 self.redraw();
@@ -3452,6 +3606,8 @@ impl App {
         }
         match &mut self.drag {
             Some(Drag::Pan) => self.pan(dx, dy),
+            // Only in the grid, which is dealt with above.
+            Some(Drag::Pages) => {}
             Some(Drag::Zoom { start_x, start_scale, anchor, moved }) => {
                 *moved = true;
                 let (scale, anchor) = (*start_scale * ((x - *start_x) / 300.0).exp(), *anchor);
@@ -3501,6 +3657,22 @@ impl App {
             self.help = !pressed;
             return self.redraw();
         }
+        if self.confirm.is_some() {
+            // A click on one of its buttons presses it; elsewhere, nothing.
+            if button == MouseButton::Left && pressed {
+                match self.confirm_button_at(x, y) {
+                    Some(true) => {
+                        if let Some(confirm) = self.confirm.take() {
+                            self.delete(&confirm.ids, event_loop);
+                        }
+                    }
+                    Some(false) => self.confirm = None,
+                    None => {}
+                }
+                self.redraw();
+            }
+            return;
+        }
         if self.palette.is_some() {
             // A click on a match goes to it; one anywhere else closes the box.
             if button == MouseButton::Left && pressed {
@@ -3532,18 +3704,31 @@ impl App {
                     // The buttons under the grid, then those at its sides
                     // for the pages either way, then the pictures.
                     let arrow = self.grid_arrows().into_iter().find(|(place, _)| hit(&place)).map(|(_, forward)| forward);
+                    if self.grid_close().as_ref().is_some_and(|place| hit(&place)) {
+                        return self.toggle_grid();
+                    }
                     if let Some(command) = self.grid_buttons.iter().find(hit).map(|button| button.command) {
                         self.execute(command, event_loop);
                     } else if let Some(forward) = arrow {
                         let per_page = self.grid_layout(self.window_size()).per_page() as i64;
                         self.move_cursor(if forward { per_page } else { -per_page });
+                    } else if self.grid_bar().is_some_and(|bar| bar.holds((x, y))) {
+                        // A click on the bar goes to the page at that spot;
+                        // keeping the button down drags through them.
+                        self.drag = Some(Drag::Pages);
+                        self.drag_pages(x);
                     } else if self.point_cursor() {
                         self.open_from_grid();
                     }
                 }
+                (MouseButton::Left, false) => self.drag = None,
                 // A right click on a picture brings up what can be done
                 // with it.
-                (MouseButton::Right, true) if self.point_cursor() => self.open_menu(commands::GRID_MENU, None),
+                (MouseButton::Right, true) => match self.point_cursor() {
+                    true => self.open_menu(commands::GRID_MENU, None),
+                    // Off the pictures, it is the grid as a whole.
+                    false => self.open_menu(commands::GRID_AROUND_MENU, None),
+                },
                 _ => {}
             }
             return;
@@ -3577,7 +3762,10 @@ impl App {
                 let height = self.window_size().1;
                 let strip = Strip::for_height(height);
                 let panel = self.list_panel().filter(|panel| (x as i32) < panel.width && (y as i32) < panel.bottom);
-                if panel.is_some() {
+                if self.list_close_at(x, y) {
+                    self.show_list = false;
+                    self.redraw();
+                } else if panel.is_some() {
                     // A click on a name goes to that file.
                     if let Some(pos) = self.list_row_at(x, y) {
                         self.go_to(pos, pos > self.pos);
@@ -3623,10 +3811,23 @@ impl App {
         if lines == 0.0 || self.menu.is_some() {
             return;
         }
-        // In the go-to box it moves through the matches.
+        // In the find box it scrolls the list of matches, and what then
+        // lies under the pointer is the one picked out. It does not step
+        // through them one at a time: the pointer and the arrows do that.
         if self.palette.is_some() {
-            let key = if lines < 0.0 { NamedKey::ArrowDown } else { NamedKey::ArrowUp };
-            return self.palette_key(Key::Named(key));
+            let rows = self.palette_layout().map_or(1, |layout| layout.rows.max(1));
+            if let Some(palette) = &mut self.palette {
+                let furthest = palette.rows().saturating_sub(rows) as i64;
+                palette.first = (palette.first as i64 - (lines * 3.0).round() as i64).clamp(0, furthest) as usize;
+                // A pick that has gone out of view is brought to its edge.
+                palette.selected = palette.selected.clamp(palette.first, palette.first + rows - 1);
+            }
+            let under = self.palette_row_at(self.mouse.0, self.mouse.1);
+            if let (Some(palette), Some(row)) = (&mut self.palette, under) {
+                palette.selected = row;
+            }
+            self.request();
+            return self.redraw();
         }
         // Over the file list the wheel moves the list, not the file on view.
         let (x, y) = self.mouse;
@@ -3930,25 +4131,36 @@ impl App {
             // A bar along the top edge flags a marked image.
             canvas.fill(0, 0, width, (px as i32 / 3).max(4), MARK_COLOR);
         }
-        let mut top_left = Vec::new();
+        // The lines at the top left, each a run of words in their colours:
+        // what matters bright, what describes it muted.
+        let (soft, dim) = (accent_soft(), DIM_TEXT_COLOR);
+        let mut top_left: Vec<Vec<(String, u32)>> = Vec::new();
         if let Some((typed, all)) = self.filter.as_ref().filter(|_| self.show_info) {
-            top_left.push(format!("Search \"{typed}\": {} of {}   (Esc for all)", self.list.len(), all.len()));
+            let found = format!("{} {typed}", commands::icons::SEARCH);
+            top_left.push(vec![(found, soft), (format!("   {} of {}", self.list.len(), all.len()), TEXT_COLOR), ("   Esc for all".to_string(), dim)]);
         }
         if viewing && !self.marks.is_empty() {
-            let count = format!("{} marked", self.marks.len());
-            top_left.push(if marked { format!("MARKED   ({count})") } else { count });
+            let count = format!("{} {} marked", commands::icons::STAR, self.marks.len());
+            let line = if marked { vec![(count, MARK_COLOR), ("   this one too".to_string(), dim)] } else { vec![(count, dim)] };
+            top_left.push(line);
         }
         if viewing && self.show_info {
-            top_left.push(format!("{}   [{}/{}]", self.name(), self.pos + 1, self.list.len()));
-            top_left.push(self.info_line());
+            top_left.push(vec![(self.name(), TEXT_COLOR), (format!("   {} / {}", self.pos + 1, self.list.len()), soft)]);
+            top_left.push(vec![(self.info_line(), dim)]);
             if let Some((position, length)) = self.video_time() {
-                let speed = if self.speed == 1.0 { String::new() } else { format!("   {}x", self.speed) };
-                top_left.push(format!("{} / {}{speed}", clock(position), clock(length)));
+                let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
+                let sign = if paused { commands::icons::PAUSE } else { commands::icons::PLAY };
+                let mut line = vec![(format!("{sign} {}", clock(position)), TEXT_COLOR), (format!(" / {}", clock(length)), dim)];
+                if self.speed != 1.0 {
+                    line.push((format!("   {}x", self.speed), soft));
+                }
+                if self.muted {
+                    line.push((format!("   {} muted", commands::icons::VOLUME_X), MARK_COLOR));
+                }
+                top_left.push(line);
             }
         }
-        if viewing && self.show_debug {
-            top_left.extend(self.debug_lines());
-        }
+        let debug = if viewing && self.show_debug { self.debug_groups() } else { Vec::new() };
         // The seek bar: a rounded track lifted off the bottom edge, with a
         // handle and the times at either end. It is out of the way during
         // playback, and appears while the pointer is at the bottom of the
@@ -4025,11 +4237,12 @@ impl App {
             _ => Vec::new(),
         };
 
-        let blocks = [&top_left, &exif, &actions, &toast, &error, &footer, &time];
-        let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty();
+        let blocks = [&exif, &actions, &toast, &error, &footer, &time];
+        let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty() && top_left.is_empty() && debug.is_empty();
         let panel = if viewing { self.list_panel() } else { None };
         let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some();
-        let boxes = boxes || self.palette.is_some() || self.strip_over.is_some();
+        // The filmstrip has words of its own: the lengths of its videos.
+        let boxes = boxes || self.palette.is_some() || strip.is_some();
         if nothing_to_write && !boxes && !self.help {
             return;
         }
@@ -4039,6 +4252,7 @@ impl App {
         // What sits on the left moves over to make room for the file list.
         let left = margin + panel.as_ref().map_or(0, |panel| panel.width);
         if let Some(strip) = &strip {
+            self.draw_strip_lengths(canvas, &mut text, strip, px);
             self.draw_strip_tip(canvas, &mut text, strip, px);
         }
         if let Some(panel) = &panel {
@@ -4047,7 +4261,8 @@ impl App {
             }
             self.draw_list(canvas, &mut text, panel);
         }
-        text_block(canvas, &mut text, &top_left, px, |_, _| (left, margin));
+        let below = rich_block(canvas, &mut text, &top_left, px, (left, margin));
+        draw_debug(canvas, &mut text, &debug, px, (left, below));
         text_block(canvas, &mut text, &exif, px, |_, h| (left, bottom - h));
         text_block(canvas, &mut text, &actions, px, |w, h| (width - margin - w, bottom - h));
         text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w, margin));
@@ -4069,7 +4284,12 @@ impl App {
         // Above the filmstrip or, in the grid, above the line under it.
         let box_bottom = if viewing { bottom } else { height - GridLayout::footer_height(height as u32) };
         if let Some(prompt) = &self.prompt {
-            draw_prompt(canvas, &mut text, "Rename:   ", &prompt.field, "", &[], 0, px, box_bottom);
+            let label = match prompt.kind {
+                PromptKind::Rename => "Rename:   ",
+                PromptKind::SendTo { moving: true } => "Move to:   ",
+                PromptKind::SendTo { moving: false } => "Copy to:   ",
+            };
+            draw_prompt(canvas, &mut text, label, &prompt.field, "", &[], 0, px, box_bottom);
         }
         if let Some(layout) = self.palette_layout() {
             for id in self.palette_shown() {
@@ -4081,7 +4301,10 @@ impl App {
             }
         }
         if let Some(confirm) = &self.confirm {
-            draw_confirm(canvas, &mut text, confirm, px);
+            let drawn = draw_confirm(canvas, &mut text, confirm, px);
+            if let Some(confirm) = &mut self.confirm {
+                confirm.drawn = drawn;
+            }
         }
         if self.help {
             draw_help(canvas, &mut text, px);
@@ -4178,6 +4401,48 @@ impl App {
         }
     }
 
+    /// The bar above the grid's footer that shows where among the pages the
+    /// one on show is, when there is more than one page.
+    fn grid_bar(&self) -> Option<PageBar> {
+        let (width, height) = self.window_size();
+        let layout = self.grid_layout((width, height));
+        let pages = self.list.len().div_ceil(layout.per_page());
+        let thick = (ui_px(height) as i32 / 3).max(4);
+        let track = width as i32 / 3;
+        let y = height as i32 - GridLayout::footer_height(height) - thick;
+        (self.grid.is_some() && pages > 1).then_some(PageBar { x: (width as i32 - track) / 2, y, width: track, height: thick, pages })
+    }
+
+    /// Goes to the page at a spot along the page bar, keeping the cursor in
+    /// the cell it was in.
+    fn drag_pages(&mut self, x: f64) {
+        let (Some(bar), Some(grid)) = (self.grid_bar(), &self.grid) else { return };
+        let per_page = self.grid_layout(self.window_size()).per_page();
+        let along = ((x - f64::from(bar.x)) / f64::from(bar.width)).clamp(0.0, 1.0);
+        let page = ((along * bar.pages as f64) as usize).min(bar.pages - 1);
+        let target = (page * per_page + grid.cursor % per_page).min(self.list.len() - 1);
+        let by = target as i64 - grid.cursor as i64;
+        if by != 0 {
+            self.move_cursor(by);
+        }
+    }
+
+    /// The round button at the grid's top right that leaves it.
+    fn grid_close(&self) -> Option<Button> {
+        self.grid.as_ref()?;
+        let (width, height) = self.window_size();
+        let size = ui_px(height) as i32 * 2;
+        Some(Button { x: width as i32 - size - size / 3, y: size / 3, width: size, height: size, command: Command::ToggleGrid })
+    }
+
+    /// Whether a window position is on the cross that closes the file list.
+    fn list_close_at(&self, x: f64, y: f64) -> bool {
+        self.list_panel().is_some_and(|panel| {
+            let reach = panel.px as i32 * 2;
+            (panel.width - reach..panel.width).contains(&(x as i32)) && (0..panel.top).contains(&(y as i32))
+        })
+    }
+
     /// The round buttons at the grid's left and right edges, for the page
     /// before and the page after: where each is, and whether it goes
     /// forward. Only those with a page to go to.
@@ -4226,15 +4491,23 @@ impl App {
             }
         }
         // A bar above the footer shows where among the pages this one is.
-        let pages = self.list.len().div_ceil(layout.per_page());
-        if let (Some(grid), true) = (&self.grid, pages > 1) {
-            let (track, thick) = (canvas.width / 3, (px as i32 / 4).max(3));
-            let (track_left, track_top) = ((canvas.width - track) / 2, canvas.height - GridLayout::footer_height(canvas.height as u32) - thick);
-            let thumb = (track / pages as i32).max(px as i32 * 2);
-            let along = (grid.scroll() / (pages - 1) as f64).clamp(0.0, 1.0);
-            let thumb_left = track_left + (f64::from(track - thumb) * along).round() as i32;
-            canvas.round_fill(track_left, track_top, track, thick, thick / 2, TEXT_COLOR, 40);
-            canvas.round_fill(thumb_left, track_top, thumb, thick, thick / 2, TEXT_COLOR, 200);
+        if let (Some(grid), Some(bar)) = (&self.grid, self.grid_bar()) {
+            let thumb = (bar.width / bar.pages as i32).max(px as i32 * 2).min(bar.width);
+            let along = (grid.scroll() / (bar.pages - 1) as f64).clamp(0.0, 1.0);
+            let thumb_left = bar.x + (f64::from(bar.width - thumb) * along).round() as i32;
+            // Brighter with the pointer on it, or while it is dragged.
+            let held = self.drag.as_ref().is_some_and(|drag| matches!(drag, Drag::Pages)) || bar.holds(self.mouse);
+            canvas.round_fill(bar.x, bar.y, bar.width, bar.height, bar.height / 2, TEXT_COLOR, if held { 70 } else { 40 });
+            canvas.round_fill(thumb_left, bar.y, thumb, bar.height, bar.height / 2, if held { accent_soft() } else { TEXT_COLOR }, if held { 256 } else { 200 });
+        }
+        // A cross at the top right leaves the grid.
+        if let Some(place) = self.grid_close() {
+            let over = (place.x..place.x + place.width).contains(&(self.mouse.0 as i32)) && (place.y..place.y + place.height).contains(&(self.mouse.1 as i32));
+            canvas.round_fill(place.x, place.y, place.width, place.height, place.width / 2, if over { accent() } else { 0x000000 }, if over { 256 } else { 170 });
+            canvas.round_outline(place.x, place.y, place.width, place.height, place.width / 2, 1, MENU_EDGE_COLOR);
+            let cross = commands::icons::X;
+            let inset = ((place.width - text.width(cross, px)) / 2, (place.height - Text::line_height(px)) / 2);
+            text.draw(canvas, place.x + inset.0, place.y + inset.1, px, if over { on_accent() } else { TEXT_COLOR }, cross);
         }
         // The buttons for the pages either way, brighter under the pointer.
         let (mouse_x, mouse_y) = (self.mouse.0 as i32, self.mouse.1 as i32);
@@ -4333,100 +4606,117 @@ impl App {
         line
     }
 
-    /// The debug overlay: what the player reports while a video is showing,
-    /// otherwise what decoding and drawing the image cost.
-    fn debug_lines(&mut self) -> Vec<String> {
+    /// The debug overlay, as groups of figures each with a name: what the
+    /// player reports while a video is showing, otherwise what decoding
+    /// and drawing the image cost.
+    fn debug_groups(&mut self) -> Vec<Group> {
         let perf = &self.perf;
-        let redraw = format!("paint {}   present {}", ms(perf.paint), ms(perf.present));
+        let mut drawing = vec![("paint", ms(perf.paint)), ("present", ms(perf.present))];
         if self.video.as_ref().is_some_and(|video| video.showing) {
             // Asking the player on every frame would get in its way, and
             // the figures would change too fast to read.
             let fresh = perf.video_lines.as_ref().is_some_and(|(at, _)| at.elapsed() < VIDEO_STATS_EVERY);
             if !fresh {
-                let lines = self.video_debug_lines();
-                self.perf.video_lines = Some((Instant::now(), lines));
+                let groups = self.video_debug_groups();
+                self.perf.video_lines = Some((Instant::now(), groups));
             }
             let perf = &self.perf;
-            let mut lines = perf.video_lines.as_ref().map(|(_, lines)| lines.clone()).unwrap_or_default();
-            let rate = perf.rate().map(|rate| format!("   {rate:.1} fps drawn")).unwrap_or_default();
+            let mut groups = perf.video_lines.as_ref().map(|(_, groups)| groups.clone()).unwrap_or_default();
             // The player holds a frame back until it is due, so only a
             // paused video shows what drawing one costs by itself.
             let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
-            let render = if paused { "render" } else { "render+wait" };
-            lines.insert(1.min(lines.len()), format!("{render} {}   {redraw}{rate}", ms(perf.render)));
-            return lines;
+            drawing.insert(0, (if paused { "render" } else { "render + wait" }, ms(perf.render)));
+            if let Some(rate) = perf.rate() {
+                drawing.push(("drawn", format!("{rate:.1} fps")));
+            }
+            groups.push(("Drawing", drawing));
+            return groups;
         }
 
         let stats = self.loader.stats(self.id());
-        let mut lines = Vec::new();
+        let mut groups = Vec::new();
         if let (Some(made), Some(native)) = (stats.fitted, self.native()) {
             let megapixels = f64::from(native.0) * f64::from(native.1) / 1e6;
-            let mut line = if made.how.is_empty() {
-                let total = ms(made.read + made.fit);
+            let mut decode = Vec::new();
+            if made.how.is_empty() {
                 let rate = megapixels / made.read.as_secs_f64().max(1e-6);
-                format!("decode {total} (read {} + fit {})   {megapixels:.1} MP   {rate:.0} MP/s", ms(made.read), ms(made.fit))
+                decode.push(("total", ms(made.read + made.fit)));
+                decode.push(("read", ms(made.read)));
+                decode.push(("fit", ms(made.fit)));
+                decode.push(("speed", format!("{rate:.0} MP/s")));
             } else {
-                format!("decode {} ({})   {megapixels:.1} MP", ms(made.fit), made.how)
-            };
+                decode.push(("total", format!("{} ({})", ms(made.fit), made.how)));
+            }
+            decode.push(("size", format!("{megapixels:.1} MP")));
             // Decoded ahead as a neighbour, or only once it was gone to.
-            line.push_str(if made.at <= perf.arrived { "   prefetched" } else { "   on demand" });
+            decode.push(("when", if made.at <= perf.arrived { "prefetched" } else { "on demand" }.to_string()));
             if let Some(full) = stats.full {
                 let how = if full.how.is_empty() { String::new() } else { format!(" ({})", full.how) };
-                line.push_str(&format!("   full-res {}{how}", ms(full.read + full.fit)));
+                decode.push(("full size", format!("{}{how}", ms(full.read + full.fit))));
             }
-            lines.push(line);
+            groups.push(("Decode", decode));
         }
         if let Some(scaled) = &perf.scaled {
-            let how = if scaled.smooth { "smooth" } else { "nearest" };
             let (from, to) = (scaled.from, scaled.to);
-            lines.push(format!("draw {} {how} {}x{} -> {}x{}", ms(scaled.took), from.0, from.1, to.0, to.1));
+            drawing.insert(0, ("scale", format!("{} {}", ms(scaled.took), if scaled.smooth { "smooth" } else { "nearest" })));
+            drawing.insert(1, ("from", format!("{} x {}", from.0, from.1)));
+            drawing.insert(2, ("to", format!("{} x {}", to.0, to.1)));
         }
-        let shown = perf.shown_in.map(|took| format!("   shown in {}", ms(took))).unwrap_or_default();
-        lines.push(format!("{redraw}{shown}"));
+        if let Some(took) = perf.shown_in {
+            drawing.push(("shown in", ms(took)));
+        }
+        groups.push(("Drawing", drawing));
         let kept = |(count, bytes): (usize, usize)| format!("{count} ({})", meta::human_size(bytes as u64));
-        let (fitted, thumbs) = (kept(stats.fitted_kept), kept(stats.thumbs_kept));
-        lines.push(format!("in memory: {fitted} frames   {thumbs} thumbnails   {} decoding", stats.busy));
-        lines
+        let memory = vec![("frames", kept(stats.fitted_kept)), ("thumbnails", kept(stats.thumbs_kept)), ("decoding", stats.busy.to_string())];
+        groups.push(("Memory", memory));
+        groups
     }
 
     /// What the player says about the video: the file, then how playback
     /// is keeping up.
-    fn video_debug_lines(&self) -> Vec<String> {
+    fn video_debug_groups(&self) -> Vec<Group> {
         let (Some(player), Some(video)) = (&self.player, &self.video) else { return Vec::new() };
         let number = |property| player.number(property);
         let mut file = Vec::new();
-        if let Some(took) = video.start_took {
-            file.push(format!("start {}", ms(took)));
+        file.push(("codec", player.text("video-format").unwrap_or_default()));
+        if let Some((w, h)) = number("width").zip(number("height")) {
+            file.push(("size", format!("{w:.0} x {h:.0}")));
         }
-        let size = number("width").zip(number("height")).map(|(w, h)| format!(" {w:.0}x{h:.0}"));
-        let codec = player.text("video-format").unwrap_or_default();
-        let pixels = player.text("video-params/pixelformat").map(|format| format!(" {format}"));
-        file.push(format!("{codec}{}{}", size.unwrap_or_default(), pixels.unwrap_or_default()));
+        if let Some(format) = player.text("video-params/pixelformat") {
+            file.push(("pixels", format));
+        }
         if let Some(rate) = number("container-fps") {
-            file.push(format!("{rate:.2} fps"));
+            file.push(("rate", format!("{rate:.2} fps")));
         }
         if let Some(bits) = number("video-bitrate").filter(|bits| *bits > 0.0) {
-            file.push(format!("{:.1} Mbps", bits / 1e6));
+            file.push(("bitrate", format!("{:.1} Mbps", bits / 1e6)));
         }
-        match player.text("hwdec-current").as_deref() {
-            None | Some("no" | "") => file.push("CPU decode".to_string()),
-            Some(decoder) => file.push(format!("{decoder} decode")),
+        let decoder = match player.text("hwdec-current").as_deref() {
+            None | Some("no" | "") => "CPU".to_string(),
+            Some(decoder) => decoder.to_string(),
+        };
+        file.push(("decoder", decoder));
+        if let Some(took) = video.start_took {
+            file.push(("start", ms(took)));
         }
 
         let mut playback = Vec::new();
         let count = |property| number(property).unwrap_or(0.0);
-        playback.push(format!("late {:.0}", count("frame-drop-count")));
-        playback.push(format!("dropped {:.0}", count("vo-drop-frame-count")));
+        playback.push(("late", format!("{:.0}", count("frame-drop-count"))));
+        playback.push(("dropped", format!("{:.0}", count("vo-drop-frame-count"))));
         if let Some(sync) = number("avsync") {
-            playback.push(format!("A-V {:+.0}ms", sync * 1000.0));
+            playback.push(("A-V", format!("{:+.0} ms", sync * 1000.0)));
         }
         if let Some(ahead) = number("demuxer-cache-duration") {
-            playback.push(format!("read ahead {ahead:.1}s"));
+            playback.push(("read ahead", format!("{ahead:.1} s")));
         }
         if let Some(took) = video.seek_took {
-            playback.push(format!("seek {}", ms(took)));
+            playback.push(("seek", ms(took)));
         }
-        vec![file.join("   "), playback.join("   ")]
+        if self.speed != 1.0 {
+            playback.push(("speed", format!("{}x", self.speed)));
+        }
+        vec![("Video", file), ("Playback", playback)]
     }
 
     /// Details of the current file, or `None` while they are being read.
@@ -4506,16 +4796,40 @@ impl App {
         }
     }
 
-    /// Over the filmstrip cell under the pointer: what the file is called,
-    /// and for a video how long it is.
+    /// In the corner of each video in the filmstrip, how long it is, as the
+    /// grid has it.
+    fn draw_strip_lengths(&mut self, canvas: &mut Canvas, text: &mut Text, strip: &Strip, px: u32) {
+        let small = (px * 3 / 4).max(10);
+        let reach = i64::from(canvas.width / 2 / strip.pitch() + 1);
+        let (top, pad) = (strip.top + strip.pad, (small as i32 / 4).max(2));
+        for offset in -reach..=reach {
+            let pos = self.pos as i64 + offset;
+            if !(0..self.list.len() as i64).contains(&pos) {
+                continue;
+            }
+            let id = self.list[pos as usize];
+            self.want_duration(id);
+            let Some(length) = self.durations.get(&id).copied().flatten().map(clock) else { continue };
+            // The corner of the picture, which may be narrower than its cell.
+            let left = self.strip_left(strip, pos as usize, canvas.width);
+            let size = self.loader.thumb(id).map_or((strip.cell_w as u32, strip.cell_h as u32), |thumb| {
+                fit_size((thumb.width, thumb.height), (strip.cell_w as u32, strip.cell_h as u32), false)
+            });
+            let (w, h) = (size.0 as i32, size.1 as i32);
+            let (right, bottom) = (left + (strip.cell_w + w) / 2, top + (strip.cell_h + h) / 2);
+            let (badge_w, badge_h) = (text.width(&length, small) + 2 * pad, Text::line_height(small));
+            let (badge_x, badge_y) = (right - badge_w - pad, bottom - badge_h - pad);
+            canvas.round_fill(badge_x, badge_y, badge_w, badge_h, pad, 0x000000, 190);
+            text.draw(canvas, badge_x + pad, badge_y, small, TEXT_COLOR, &length);
+        }
+    }
+
+    /// Over the filmstrip cell under the pointer: what the file is called
+    /// and where in the list it is.
     fn draw_strip_tip(&mut self, canvas: &mut Canvas, text: &mut Text, strip: &Strip, px: u32) {
         let Some(pos) = self.strip_over else { return };
         let id = self.list[pos];
-        self.want_duration(id);
-        let mut tip = format!("{}   {}/{}", title_of(&self.files[id]), pos + 1, self.list.len());
-        if let Some(length) = self.durations.get(&id).copied().flatten() {
-            tip.push_str(&format!("   {}", clock(length)));
-        }
+        let tip = format!("{}   {}/{}", title_of(&self.files[id]), pos + 1, self.list.len());
         let pad = px as i32 / 2;
         let tip = clipped(text, &tip, canvas.width - 4 * pad, px);
         let (width, height) = (text.width(&tip, px) + 2 * pad, Text::line_height(px) + pad);
@@ -4670,6 +4984,12 @@ impl App {
         };
         let heading = clipped(text, &heading, panel.width - 3 * pad, px);
         text.draw(canvas, pad * 2, pad, px, DIM_TEXT_COLOR, &heading);
+        // A cross at the top right closes the list.
+        let cross = commands::icons::X;
+        let over = self.list_close_at(self.mouse.0, self.mouse.1);
+        let cross_left = panel.width - pad * 2 - text.width(cross, px);
+        text.draw(canvas, cross_left, pad, px, if over { TEXT_COLOR } else { DIM_TEXT_COLOR }, cross);
+        let numbers = text.width(&self.list.len().to_string(), px);
         for row in 0..panel.rows {
             let pos = panel.first + row;
             let id = self.list[pos];
@@ -4688,8 +5008,14 @@ impl App {
             let length_width = if length.is_empty() { 0 } else { text.width(&length, px) + pad };
             let (main, dim) = row_text(pos == self.pos);
             text.draw(canvas, panel.width - length_width, line, px, dim, &length);
-            let name = clipped(text, &self.name_of(id), panel.width - 3 * pad - length_width, px);
-            text.draw(canvas, pad * 2, line, px, main, &name);
+            // Its number in the list, set against the right of a column
+            // wide enough for the largest, and then its name.
+            let number = (pos + 1).to_string();
+            let number_left = pad * 2 + numbers - text.width(&number, px);
+            text.draw(canvas, number_left, line, px, dim, &number);
+            let name_left = pad * 2 + numbers + pad;
+            let name = clipped(text, &self.name_of(id), panel.width - name_left - pad - length_width, px);
+            text.draw(canvas, name_left, line, px, main, &name);
         }
     }
 
@@ -4718,13 +5044,31 @@ impl App {
             let gutter = px as i32 * 2;
             let sign_left = menu.x + pad + (gutter - pad - text.width(sign, px)) / 2;
             text.draw(canvas, sign_left, line, px, color, sign);
-            text.draw(canvas, menu.x + pad + gutter, line, px, main, item.label);
+            text.draw(canvas, menu.x + pad + gutter, line, px, main, &self.menu_label(item));
             let keys_left = menu.x + menu.width - pad - text.width(item.keys, px);
             text.draw(canvas, keys_left, line, px, dim, item.keys);
         }
         if let Some(sub) = &menu.sub {
             self.draw_menu(canvas, text, sub);
         }
+    }
+}
+
+/// The grid's page bar: where its track is and how many pages it spans.
+struct PageBar {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    pages: usize,
+}
+
+impl PageBar {
+    /// Whether a window position is on the bar, or near enough above and
+    /// below it: the bar itself is too thin to aim at.
+    fn holds(&self, (x, y): (f64, f64)) -> bool {
+        let reach = self.height * 2;
+        (self.x..self.x + self.width).contains(&(x as i32)) && (self.y - reach..self.y + self.height + reach).contains(&(y as i32))
     }
 }
 
@@ -4765,6 +5109,23 @@ fn title_of(path: &Path) -> String {
     }
 }
 
+/// A folder as it is written in a menu: `~` for the home directory, and
+/// only its ends when it is a long one.
+fn short_dir(path: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let shown = match home.as_ref().and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    };
+    let parts: Vec<&str> = shown.split('/').collect();
+    if shown.chars().count() <= 36 || parts.len() <= 4 {
+        return shown;
+    }
+    // The start and the last two folders say where it is well enough.
+    format!("{}/\u{2026}/{}/{}", parts[..2].join("/"), parts[parts.len() - 2], parts[parts.len() - 1])
+}
+
 /// `line`, cut short with an ellipsis if it is wider than `width`.
 fn clipped(text: &mut Text, line: &str, width: i32, px: u32) -> String {
     if text.width(line, px) <= width {
@@ -4787,6 +5148,67 @@ fn panel(canvas: &mut Canvas, x: i32, y: i32, width: i32, height: i32, radius: i
     canvas.round_outline(x, y, width, height, radius, 1, MENU_EDGE_COLOR);
 }
 
+/// Draws lines made of runs of words, each run in its own colour, on a
+/// darkened panel with its top-left corner at `at`. Returns where the
+/// next thing down should start.
+fn rich_block(canvas: &mut Canvas, text: &mut Text, lines: &[Vec<(String, u32)>], px: u32, at: (i32, i32)) -> i32 {
+    if lines.is_empty() {
+        return at.1;
+    }
+    let pad = px as i32 / 2;
+    let line_height = Text::line_height(px);
+    let widths: Vec<i32> = lines.iter().map(|line| line.iter().map(|(run, _)| text.width(run, px)).sum()).collect();
+    let width = widths.into_iter().max().unwrap_or(0) + 3 * pad;
+    let height = line_height * lines.len() as i32 + 2 * pad;
+    canvas.round_fill(at.0, at.1, width, height, pad, 0x000000, 176);
+    for (index, line) in lines.iter().enumerate() {
+        let mut x = at.0 + 3 * pad / 2;
+        for (run, color) in line {
+            text.draw(canvas, x, at.1 + pad + index as i32 * line_height, px, *color, run);
+            x += text.width(run, px);
+        }
+    }
+    at.1 + height + pad
+}
+
+/// Draws the debug overlay: a panel of clusters side by side, each a
+/// heading over its figures, the names muted and the values bright.
+fn draw_debug(canvas: &mut Canvas, text: &mut Text, groups: &[Group], px: u32, at: (i32, i32)) {
+    if groups.is_empty() {
+        return;
+    }
+    let small = (px * 5 / 6).max(11);
+    let (pad, row) = (px as i32, Text::line_height(small) + px as i32 / 6);
+    // Each cluster is as wide as its widest name and its widest value.
+    let columns: Vec<(i32, i32)> = groups
+        .iter()
+        .map(|(title, figures)| {
+            let names = figures.iter().map(|(name, _)| text.width(name, small)).max().unwrap_or(0);
+            let values = figures.iter().map(|(_, value)| text.width(value, small)).max().unwrap_or(0);
+            (names, values.max(text.width(title, small) - names - pad))
+        })
+        .collect();
+    let width = columns.iter().map(|(names, values)| names + pad + values).sum::<i32>() + pad * 2 * groups.len() as i32;
+    let rows = groups.iter().map(|(_, figures)| figures.len()).max().unwrap_or(0) as i32 + 1;
+    let height = rows * row + 2 * pad;
+    canvas.round_fill(at.0, at.1, width, height, pad / 2, 0x000000, 190);
+    canvas.round_outline(at.0, at.1, width, height, pad / 2, 1, MENU_EDGE_COLOR);
+
+    let mut x = at.0 + pad;
+    for ((title, figures), (names, values)) in groups.iter().zip(columns) {
+        let mut y = at.1 + pad;
+        text.draw(canvas, x, y, small, accent_soft(), title);
+        canvas.fill(x, y + row - row / 6, names + pad + values, 1, MENU_EDGE_COLOR);
+        y += row;
+        for (name, value) in figures {
+            text.draw(canvas, x, y, small, DIM_TEXT_COLOR, name);
+            text.draw(canvas, x + names + pad, y, small, TEXT_COLOR, value);
+            y += row;
+        }
+        x += names + pad + values + 2 * pad;
+    }
+}
+
 /// Draws lines of text on a darkened panel. `place` is given the panel size
 /// and returns its top-left corner.
 fn text_block(canvas: &mut Canvas, text: &mut Text, lines: &[String], px: u32, place: impl Fn(i32, i32) -> (i32, i32)) {
@@ -4807,7 +5229,8 @@ fn text_block(canvas: &mut Canvas, text: &mut Text, lines: &[String], px: u32, p
 /// Draws the delete confirmation in the middle of the window: a warning
 /// sign and the question, above a Cancel and a Delete button. The one that
 /// Enter would press is filled in, Delete in red.
-fn draw_confirm(canvas: &mut Canvas, text: &mut Text, confirm: &Confirm, px: u32) {
+fn draw_confirm(canvas: &mut Canvas, text: &mut Text, confirm: &Confirm, px: u32) -> [[i32; 4]; 2] {
+    let mut drawn = [[0; 4]; 2];
     let pad = px as i32;
     let line_height = Text::line_height(px);
     let (sign, sign_px) = (commands::icons::TRIANGLE_ALERT, px * 3 / 2);
@@ -4842,7 +5265,9 @@ fn draw_confirm(canvas: &mut Canvas, text: &mut Text, confirm: &Confirm, px: u32
         }
         let label_left = button_left + (button_width - text.width(label, px)) / 2;
         text.draw(canvas, label_left, buttons_top + pad / 2, px, if selected && index == 0 { on_accent() } else { TEXT_COLOR }, label);
+        drawn[index] = [button_left, buttons_top, button_width, button_height];
     }
+    drawn
 }
 
 /// Draws the rename box, centred with its bottom edge at `bottom`.

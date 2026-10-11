@@ -49,7 +49,9 @@ Slideshow and actions:
   -A, --action CMD           shell command for Enter / 0; %f is the path,
                              %n the file name
       --action1..9 CMD       shell commands for keys 1 to 9
-  -o, --output-dir DIR       folder that V copies and M moves files into
+  -o, --output-dir DIR       folder that V copies and M moves files into; without
+                             one they ask for a folder, as Move to... in the
+                             menu always does
       --print-marked         print the marked files on exit
       --verbose              print each file as it comes up: its place in the
                              list, dimensions, size and how long it took
@@ -79,7 +81,7 @@ Config file:
 Keys:
   > . n Right Space          next image          < , Left Backspace  previous
   Home / End                 first / last        PgDn / PgUp   jump 5%
-  z                          shuffle the list    { / }         previous / next directory
+  z                          shuffle the rest    { / }         previous / next directory
   + Up / - Down              zoom in / out       * 0 !         100%, fit, fill
   / or Ctrl+K                find: type part of a name, Up / Down to pick among
                              the matches, Enter to go to the one picked, Tab to
@@ -450,7 +452,7 @@ fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>
 }
 
 /// Expands a leading `~`, which the shell does not do for config values.
-fn expand_home(text: &str) -> PathBuf {
+pub fn expand_home(text: &str) -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     match (text.strip_prefix('~'), home) {
         (Some(""), Some(home)) => home,

@@ -78,6 +78,9 @@ pub enum Command {
     CopyPath,
     CopyTo,
     MoveTo,
+    /// The same, into a folder typed there and then.
+    CopyToAsk,
+    MoveToAsk,
     Undo,
     Rename,
     Convert(Format),
@@ -245,8 +248,10 @@ pub mod icons {
     pub const ARROW_RIGHT: &str = "\u{e04d}";
     pub const ARROW_LEFT: &str = "\u{e04c}";
     pub const SEARCH: &str = "\u{e154}";
+    pub const X: &str = "\u{e1b1}";
     pub const SHUFFLE: &str = "\u{e161}";
     pub const PLAY: &str = "\u{e13f}";
+    pub const PAUSE: &str = "\u{e131}";
     pub const ROTATE_CCW: &str = "\u{e14b}";
     pub const ROTATE_CW: &str = "\u{e14c}";
     pub const CHEVRONS_RIGHT: &str = "\u{e077}";
@@ -374,8 +379,8 @@ pub fn command_icon(command: Command) -> &'static str {
         Mark | MarkAll => STAR,
         MarkMenu | InvertMarks => FLAG,
         OnlyMarked => LIST_FILTER,
-        CopyTo => FOLDER_PLUS,
-        MoveTo => FOLDER_INPUT,
+        CopyTo | CopyToAsk => FOLDER_PLUS,
+        MoveTo | MoveToAsk => FOLDER_INPUT,
         Rename => PENCIL,
         Convert(_) => REPLACE,
         Undo => UNDO,
@@ -483,6 +488,8 @@ const MARKS: &[Option<MenuItem>] = &[
 const FILE: &[Option<MenuItem>] = &[
     item("Copy to folder", "V", Command::CopyTo),
     item("Move to folder", "M", Command::MoveTo),
+    item("Copy to...", "", Command::CopyToAsk),
+    item("Move to...", "", Command::MoveToAsk),
     item("Rename", "F2", Command::Rename),
     image_item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
     image_item("Convert to PNG", "", Command::Convert(Format::Png)),
@@ -511,6 +518,8 @@ pub const GRID_MENU: &[Option<MenuItem>] = &[
     None,
     item("Copy to folder", "V", Command::CopyTo),
     item("Move to folder", "M", Command::MoveTo),
+    item("Copy to...", "", Command::CopyToAsk),
+    item("Move to...", "", Command::MoveToAsk),
     item("Rename", "F2", Command::Rename),
     image_item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
     None,
@@ -530,10 +539,38 @@ pub const GRID_MENU: &[Option<MenuItem>] = &[
     item("Close the grid", "g", Command::ToggleGrid),
 ];
 
+/// The menu for the grid as a whole, on a right click off the pictures.
+pub const GRID_AROUND_MENU: &[Option<MenuItem>] = &[
+    item("Find...", "/", Command::Search),
+    submenu("Sort", SORT, Applies::Always),
+    item("Shuffle", "z", Command::Shuffle),
+    None,
+    item("Mark all", "", Command::MarkAll),
+    item("Invert marks", "", Command::InvertMarks),
+    item("Clear all marks", "", Command::ClearMarks),
+    item("Show only marked", "", Command::OnlyMarked),
+    Some(MenuItem { label: "Show all files again", keys: "Esc", command: Command::ClearFilter, applies: Applies::Filtered, sub: &[] }),
+    None,
+    item("Larger pictures", "Ctrl++", Command::GridLarger),
+    item("Smaller pictures", "Ctrl+-", Command::GridSmaller),
+    item("Titles", "i", Command::ToggleGridTitles),
+    None,
+    item("Refresh", "r", Command::Reload),
+    item("Watch for new files", "W", Command::ToggleWatch),
+    None,
+    submenu("Debug", DEBUG, Applies::Always),
+    item("Keyboard shortcuts", "?", Command::ToggleHelp),
+    None,
+    item("Close the grid", "g", Command::ToggleGrid),
+    item("Quit", "q", Command::Quit),
+];
+
 /// The `X` menu: what can be done with the marked images.
 pub const MARK_MENU: &[Option<MenuItem>] = &[
     item("Copy to folder", "V", Command::CopyTo),
     item("Move to folder", "M", Command::MoveTo),
+    item("Copy to...", "", Command::CopyToAsk),
+    item("Move to...", "", Command::MoveToAsk),
     None,
     item("Copy file names", "c", Command::CopyName),
     item("Copy full paths", "C", Command::CopyPath),
@@ -574,7 +611,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("PgDn  PgUp", "Jump 5% forward / back"),
                 ("}  {", "Next / previous folder"),
                 ("Wheel", "Next / previous file"),
-                ("z", "Shuffle the list"),
+                ("z", "Shuffle the list around this file"),
                 ("s", "Sort: name, newest, size, reverse"),
             ],
         ),
