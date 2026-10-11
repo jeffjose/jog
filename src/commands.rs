@@ -53,6 +53,8 @@ pub enum Command {
     Workspace(usize),
     NextWorkspace,
     PrevWorkspace,
+    /// Back to where jog was started: what was named on the command line.
+    HomeWorkspace,
     WorkspaceList,
     /// The overview: every workspace as a card, to look over and pick from.
     Overview,
@@ -175,6 +177,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "0" => ZoomFit,
             "/" => Search,
             "@" => WorkspaceList,
+            "`" | "~" if modifiers.control_key() => HomeWorkspace,
             "!" => ZoomFill,
             "Z" => ToggleEnlarge,
             "k" if modifiers.control_key() || modifiers.super_key() => Palette,
@@ -364,7 +367,7 @@ pub fn command_icon(command: Command) -> &'static str {
         Next => ARROW_RIGHT,
         Previous => ARROW_LEFT,
         Search | Palette => SEARCH,
-        WorkspaceList | Overview | Workspace(_) | NextWorkspace | PrevWorkspace => FOLDERS,
+        WorkspaceList | Overview | Workspace(_) | NextWorkspace | PrevWorkspace | HomeWorkspace => FOLDERS,
         SaveWorkspace => FOLDER_PLUS,
         ClearFilter => LIST_X,
         ClearMarks => STAR_OFF,
@@ -657,6 +660,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Esc", "Show all files again"),
                 ("G", "Workspaces: look over them all"),
                 ("@  Ctrl+1  Ctrl+Tab", "Workspaces: list, go to, next"),
+                ("Ctrl+`", "Back to what jog was started on"),
                 ("word  ^start  !not", "Match names"),
                 ("#video  #marked  >10mb", "Match kinds and sizes"),
                 (">sort", "Find a command and run it"),

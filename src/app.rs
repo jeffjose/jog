@@ -603,6 +603,8 @@ pub struct App {
     /// which one is on show.
     spaces: Vec<Space>,
     space: usize,
+    /// The one jog was started on, which Ctrl+` comes back to.
+    home: usize,
     /// The overview of the workspaces, when it is up, and when its
     /// slideshow is to move on.
     overview: Option<Overview>,
@@ -1133,6 +1135,7 @@ impl App {
             surface: None,
             spaces,
             space,
+            home: space,
             overview: None,
             overview_due: None,
             options,
@@ -2178,6 +2181,7 @@ impl App {
             MarkMenu => self.open_mark_menu(),
             SortMenu => self.open_palette_with(">sort "),
             Workspace(to) => self.switch_space(to),
+            HomeWorkspace => self.switch_space(self.home),
             NextWorkspace => self.switch_space((self.space + 1) % self.spaces.len()),
             PrevWorkspace => self.switch_space((self.space + self.spaces.len() - 1) % self.spaces.len()),
             WorkspaceList => self.open_palette_with("@"),
@@ -3162,6 +3166,17 @@ impl App {
         self.redraw();
     }
 
+    /// The key that goes to a workspace, as a list shows it: Ctrl with
+    /// its number for one of the config file's, Ctrl+` for what was opened
+    /// by its path.
+    fn space_key(&self, which: usize) -> &'static str {
+        match self.spaces[which].saved {
+            true => SPACE_KEYS.get(which).copied().unwrap_or(""),
+            false if which == self.home => "Ctrl+`",
+            false => "",
+        }
+    }
+
     /// The workspaces whose names match what follows an `@` in the find
     /// box, as rows to pick from: each with its folder and its key, the
     /// one on show ticked. And, for a folder that was opened by its path,
@@ -3172,7 +3187,7 @@ impl App {
         let row = |(at, space): (usize, &Space)| {
             let folder = space.paths.first().map(|path| short_dir(path)).unwrap_or_default();
             let unsaved = if space.saved { "" } else { "   (not saved)" };
-            (format!("{}   {folder}{unsaved}", space.name), SPACE_KEYS.get(at).copied().unwrap_or(""), Command::Workspace(at))
+            (format!("{}   {folder}{unsaved}", space.name), self.space_key(at), Command::Workspace(at))
         };
         let pass = |loose: bool| -> Vec<(String, &'static str, Command)> {
             self.spaces.iter().enumerate().filter(|(_, space)| wanted(&space.name, loose)).map(row).collect()
@@ -3418,7 +3433,7 @@ impl App {
                 1 => "1 file".to_string(),
                 count => format!("{count} files"),
             };
-            let key = SPACE_KEYS.get(which).map(|key| format!("{key}   ")).unwrap_or_default();
+            let key = Some(self.space_key(which)).filter(|key| !key.is_empty()).map(|key| format!("{key}   ")).unwrap_or_default();
             let about = format!("{key}{files}{}", if space.saved { "" } else { "   not saved" });
             let about = clipped(text, &about, width, px);
             let about_left = left + (width - text.width(&about, px)) / 2;
@@ -4067,7 +4082,7 @@ impl App {
         }
         // Going to another workspace works from anywhere but a text box.
         let to_space = commands::for_key(key.clone(), self.modifiers, numpad);
-        if let Some(command @ (Command::Workspace(_) | Command::NextWorkspace | Command::PrevWorkspace)) = to_space {
+        if let Some(command @ (Command::Workspace(_) | Command::NextWorkspace | Command::PrevWorkspace | Command::HomeWorkspace)) = to_space {
             self.menu = None;
             return self.execute(command, event_loop);
         }

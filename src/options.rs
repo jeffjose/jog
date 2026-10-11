@@ -82,7 +82,8 @@ Workspaces are folders with names, set in the config file:
       pictures = \"~/Downloads/Pictures\"
       clips = { path = \"~/Videos/clips\", recursive = true, sort = \"mtime\" }
   jog @pictures starts in one. Ctrl+1 to Ctrl+9 go to them in the order
-  they are written, Ctrl+Tab to the next, and @ in the find box lists
+  they are written, Ctrl+Tab to the next, Ctrl+` back to what jog was
+  started on, G shows them all, and @ in the find box lists
   them; there too a folder opened by its path can be saved as one. Each
   is listed again when it is gone to, and begun at its first file, so
   that it shows what is there now; fresh = false in its entry has it
