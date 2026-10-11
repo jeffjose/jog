@@ -526,8 +526,10 @@ enum PaletteEnd {
     Go,
     /// Carry on with only the matches.
     Keep,
-    /// Carry on with every file, dropping a search kept earlier.
+    /// Drop a search kept earlier and go back to where it was begun.
     All,
+    /// Drop it, and stay on the file on view among all the others.
+    Here,
 }
 
 /// The box for finding files: what is typed, the files that match it with
@@ -605,12 +607,25 @@ struct Space {
     asked: bool,
 }
 
+/// How the list stood when a search was kept: the file on view and the
+/// one under the grid's cursor, and the order every file was in.
+struct FilterFrom {
+    viewed: usize,
+    focus: usize,
+    order: Vec<usize>,
+    sort: Option<Sort>,
+    reversed: bool,
+    shuffled: bool,
+}
+
 /// What a workspace was showing when it was left, to come back to.
 struct Kept {
     list: Vec<usize>,
     pos: usize,
     cursor: usize,
     filter: Option<(String, Vec<usize>)>,
+    /// Where things stood when the search was kept, to go back to.
+    filter_from: Option<FilterFrom>,
     sort: Option<Sort>,
     reversed: bool,
     shuffled: bool,
@@ -673,6 +688,8 @@ pub struct App {
     /// A search that was kept: what was typed and every file, in order.
     /// `list` then holds only the matches.
     filter: Option<(String, Vec<usize>)>,
+    /// Where things stood when the search was kept, to go back to.
+    filter_from: Option<FilterFrom>,
     /// The order the list was last put in, unless shuffled since, and
     /// whether it runs backwards.
     sort: Option<Sort>,
@@ -1115,6 +1132,7 @@ impl App {
             palette: None,
             run_next: None,
             filter: None,
+            filter_from: None,
             sort: options.listing.sort.filter(|_| !options.listing.randomize),
             reversed: options.listing.reverse,
             shuffled: options.listing.randomize,
@@ -2627,7 +2645,8 @@ impl App {
             CycleAudio => self.cycle_audio(),
             SubtitlesLarger => self.size_subtitles(true),
             SubtitlesSmaller => self.size_subtitles(false),
-            ClearFilter => self.clear_filter(),
+            ClearFilter => self.clear_filter(false),
+            ShowAllHere => self.clear_filter(true),
             Quit => event_loop.exit(),
         }
         self.redraw();
@@ -3096,7 +3115,14 @@ impl App {
                 eprintln!("jog:     [{}] {}", pos + 1, self.files[*id].display());
             }
         }
-        self.toast(format!("Showing {} of {} (Esc for all)", list.len(), everything.len()));
+        // A search within a search goes back to where the first began.
+        if self.filter.is_none() {
+            let (viewed, focus) = (self.id(), self.list[self.focus()]);
+            let order = everything.clone();
+            self.filter_from = Some(FilterFrom { viewed, focus, order, sort: self.sort, reversed: self.reversed, shuffled: self.shuffled });
+        }
+        let back = self.filter_origin().map_or(String::new(), |at| format!(" to {at}"));
+        self.toast(format!("Showing {} of {} (Esc goes back{back})", list.len(), everything.len()));
         self.filter = Some((typed, everything));
         self.set_list(list, at, at);
         self.sync_video();
@@ -3117,17 +3143,38 @@ impl App {
         self.refresh();
     }
 
-    /// Shows every file again after a search was kept.
-    fn clear_filter(&mut self) {
-        let Some((_, all)) = self.filter.take() else { return };
-        let (viewed, focus) = (self.id(), self.list[self.focus()]);
+    /// Shows every file again after a search was kept, in the order they
+    /// had before it and whatever has been done to the matches since. It
+    /// goes back to the file that was on view then, to carry on from
+    /// there, unless it is to stay on the one on view now.
+    fn clear_filter(&mut self, stay: bool) {
+        let Some((_, mut all)) = self.filter.take() else { return };
+        let (mut viewed, mut focus) = (self.id(), self.list[self.focus()]);
+        if let Some(from) = self.filter_from.take() {
+            // Files that have turned up since go after the rest.
+            let place: HashMap<usize, usize> = from.order.iter().enumerate().map(|(place, id)| (*id, place)).collect();
+            all.sort_by_key(|id| place.get(id).copied().unwrap_or(usize::MAX));
+            (self.sort, self.reversed, self.shuffled) = (from.sort, from.reversed, from.shuffled);
+            // It may have been deleted or moved away in the meantime.
+            if !stay && all.contains(&from.viewed) {
+                (viewed, focus) = (from.viewed, if all.contains(&from.focus) { from.focus } else { from.viewed });
+            }
+        }
         let at = |id: usize| all.iter().position(|&other| other == id).unwrap_or(0);
         let (viewed, focus) = (at(viewed), at(focus));
         self.set_list(all, viewed, focus);
+        self.sync_video();
         if self.options.verbose {
-            eprintln!("jog: search cleared: all {} files", self.list.len());
+            eprintln!("jog: search cleared: all {} files, at {}", self.list.len(), self.pos + 1);
         }
-        self.toast("Showing all files");
+        self.toast(format!("Showing all files, at {} of {}", self.focus() + 1, self.list.len()));
+    }
+
+    /// Where among all the files leaving a kept search goes back to,
+    /// counted from one.
+    fn filter_origin(&self) -> Option<usize> {
+        let from = self.filter_from.as_ref()?;
+        Some(from.order.iter().position(|id| *id == if self.grid.is_some() { from.focus } else { from.viewed })? + 1)
     }
 
     fn finish_rename(&mut self) {
@@ -3518,7 +3565,7 @@ impl App {
                 if start == Start::Random {
                     self.rng.shuffle(&mut list);
                 }
-                Kept { list, pos: 0, cursor: 0, filter: None, sort: sort.filter(|_| start != Start::Random), reversed, shuffled: start == Start::Random }
+                Kept { list, pos: 0, cursor: 0, filter: None, filter_from: None, sort: sort.filter(|_| start != Start::Random), reversed, shuffled: start == Start::Random }
             }
         };
         let leaving = Kept {
@@ -3526,6 +3573,7 @@ impl App {
             list: std::mem::take(&mut self.list),
             pos: self.pos,
             filter: self.filter.take(),
+            filter_from: self.filter_from.take(),
             sort: self.sort,
             reversed: self.reversed,
             shuffled: self.shuffled,
@@ -3542,6 +3590,7 @@ impl App {
         let last = incoming.list.len() - 1;
         let count = incoming.list.len();
         (self.filter, self.sort, self.reversed, self.shuffled) = (incoming.filter, incoming.sort, incoming.reversed, incoming.shuffled);
+        self.filter_from = incoming.filter_from;
         (self.list, self.pos) = (incoming.list, incoming.pos.min(last));
         (self.palette, self.menu, self.prompt, self.overview) = (None, None, None, None);
         (self.strip_scroll, self.strip_over, self.list_scroll, self.list_hover) = (0, None, None, None);
@@ -4140,7 +4189,9 @@ impl App {
             buttons.push((PaletteEnd::Keep, format!("Show only {}", palette.matches.len())));
         }
         if let Some((_, all)) = &self.filter {
-            buttons.push((PaletteEnd::All, format!("Show all {}", all.len())));
+            let back = self.filter_origin().map_or(String::new(), |at| format!(", back at {at}"));
+            buttons.push((PaletteEnd::All, format!("Show all {}{back}", all.len())));
+            buttons.push((PaletteEnd::Here, "Show all, stay here".to_string()));
         }
         buttons
     }
@@ -4209,12 +4260,13 @@ impl App {
                 let typed = palette.field.string().trim().to_string();
                 self.keep_matches(typed, palette.matches, picked);
             }
-            PaletteEnd::All => self.clear_filter(),
+            PaletteEnd::All => self.clear_filter(false),
+            PaletteEnd::Here => self.clear_filter(true),
             PaletteEnd::Go => {
                 let Some(id) = picked else { return self.redraw() };
                 // One that a kept search has hidden brings every file back.
                 if !self.list.contains(&id) {
-                    self.clear_filter();
+                    self.clear_filter(true);
                 }
                 let pos = self.list.iter().position(|other| *other == id).unwrap_or(self.pos);
                 // From the grid, the file is opened as Enter on its cell would.
@@ -4451,6 +4503,7 @@ impl App {
                 | Command::SaveFilelist
                 | Command::Search
                 | Command::ClearFilter
+                | Command::ShowAllHere
                 | Command::SortMenu
                 | Command::Quit),
             ) => self.execute(command, event_loop),
@@ -4497,7 +4550,7 @@ impl App {
         }
         // Escape leaves a kept search before it leaves the program.
         if self.filter.is_some() && key == Key::Named(NamedKey::Escape) {
-            return self.clear_filter();
+            return self.clear_filter(false);
         }
         if self.video.is_some() && self.video_key(key.clone(), repeat) {
             return;
@@ -5196,7 +5249,7 @@ impl App {
         let mut top_left: Vec<Vec<(String, u32)>> = Vec::new();
         if let Some((typed, all)) = self.filter.as_ref().filter(|_| self.show_info) {
             let found = format!("{} {typed}", commands::icons::SEARCH);
-            top_left.push(vec![(found, soft), (format!("   {} of {}", self.list.len(), all.len()), TEXT_COLOR), ("   Esc for all".to_string(), dim)]);
+            top_left.push(vec![(found, soft), (format!("   {} of {}", self.list.len(), all.len()), TEXT_COLOR), ("   Esc to go back".to_string(), dim)]);
         }
         if viewing && !self.marks.is_empty() {
             let count = format!("{} {} marked", commands::icons::STAR, self.marks.len());
@@ -6808,7 +6861,7 @@ impl ApplicationHandler<Event> for App {
                 let list = self.ids_for(found);
                 if which != self.space && self.spaces[which].kept.is_none() && !list.is_empty() {
                     let sort = self.spaces[which].sort;
-                    self.spaces[which].kept = Some(Kept { list, pos: 0, cursor: 0, filter: None, sort, reversed: false, shuffled: false });
+                    self.spaces[which].kept = Some(Kept { list, pos: 0, cursor: 0, filter: None, filter_from: None, sort, reversed: false, shuffled: false });
                 }
                 self.request();
                 self.redraw();
