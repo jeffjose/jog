@@ -1700,8 +1700,9 @@ impl App {
             _ => return false,
         };
         // The files lie end to end as one timeline: a seek that would run
-        // off either end of this video lands that far into the one next to
-        // it, however the key came to be pressed.
+        // off the end of this video starts the next, and one that would run
+        // off its start lands that far from the end of the one before,
+        // however the key came to be pressed.
         if let VideoAction::Seek(seconds) = action {
             if let Some(enter) = self.seek_across(seconds) {
                 // A held key starts again from its slowest in the new file.
@@ -1718,7 +1719,7 @@ impl App {
 
     /// Where a seek of this many seconds lands in the file after or before
     /// this one, when it would run off the end or the start of the video:
-    /// seconds from the start of the next, or as a negative number from
+    /// the start of the next, as zero, or as a negative number of seconds from
     /// the end of the previous. `None` when it stays within this video.
     fn seek_across(&self, seconds: f64) -> Option<f64> {
         let (position, length) = self.video_time()?;
@@ -1727,7 +1728,7 @@ impl App {
         if self.list.len() < 2 {
             None
         } else if seconds > 0.0 && to >= length - VIDEO_END {
-            Some((to - length).max(0.0))
+            Some(0.0)
         } else {
             // Less than this short of the start is the start.
             (seconds < 0.0 && to < -VIDEO_START).then_some(to)
