@@ -265,6 +265,9 @@ struct Grow {
     cell: [i32; 4],
     since: Instant,
     opening: bool,
+    /// The frame a video was showing in its cell when it set out, which
+    /// is nearer what it is growing into than its thumbnail is.
+    picture: Option<Arc<Frame>>,
 }
 
 /// What happens when a video has played to its end.
@@ -975,6 +978,7 @@ pub struct App {
     /// grid is up, and its picture there.
     pip: bool,
     pip_live: Option<Frame>,
+    pip_in_cell: bool,
     hold: Option<Hold>,
     loupe: Option<f64>,
     /// Whether seeking lands on the very moment asked for or on the
@@ -984,6 +988,8 @@ pub struct App {
     /// at so far, and the thread that finds them.
     /// The search being typed into the heading of the file list.
     list_search: Option<TextField>,
+    /// The row of the file list picked out with the arrows while searching.
+    list_cursor: Option<usize>,
     scenes_on: bool,
     /// The scene the pointer is on.
     scene_over: Option<usize>,
@@ -1398,10 +1404,12 @@ impl App {
             looping: Looping::Off,
             pip: false,
             pip_live: None,
+            pip_in_cell: false,
             hold: None,
             loupe: None,
             precise: options.precise_seeking,
             list_search: None,
+            list_cursor: None,
             scenes_on: false,
             scene_over: None,
             scenes: HashMap::new(),
@@ -2926,6 +2934,12 @@ impl App {
             SpeedDown => self.change_speed(Some(false)),
             SpeedReset => self.change_speed(None),
             PlayPause => self.video_action(VideoAction::Pause),
+            ShowPlaying => {
+                // To the cell of the video playing, on whichever page.
+                if let Some(cursor) = self.grid.as_ref().map(|grid| grid.cursor) {
+                    self.move_cursor(self.pos as i64 - cursor as i64);
+                }
+            }
             SeekForward => self.video_action(VideoAction::Seek(SEEK_STEP)),
             SeekTo(seconds) => {
                 if let Some((_, length)) = self.video_time() {
@@ -3393,7 +3407,33 @@ impl App {
         let Some(field) = &mut self.list_search else { return };
         match key {
             // The list stays as it has been narrowed; Escape again widens it.
-            Key::Named(NamedKey::Escape | NamedKey::Enter) => self.list_search = None,
+            Key::Named(NamedKey::Escape) => (self.list_search, self.list_cursor) = (None, None),
+            // Enter goes to the row picked out with the arrows, if one was.
+            Key::Named(NamedKey::Enter) => {
+                let picked = self.list_cursor.take().filter(|at| *at < self.list.len());
+                self.list_search = None;
+                if let Some(at) = picked {
+                    let first = self.list_panel().map(|panel| panel.first);
+                    self.go_to(at, at > self.pos);
+                    self.list_scroll = first.map(|first| (self.pos, self.list.len(), first));
+                }
+            }
+            // The arrows pick a row out, from the top or from where they left off.
+            Key::Named(arrow @ (NamedKey::ArrowDown | NamedKey::ArrowUp)) => {
+                let last = self.list.len() - 1;
+                let at = match (self.list_cursor, arrow) {
+                    (None, NamedKey::ArrowDown) => 0,
+                    (None, _) => last,
+                    (Some(at), NamedKey::ArrowDown) => (at + 1).min(last),
+                    (Some(at), _) => at.saturating_sub(1),
+                };
+                self.list_cursor = Some(at);
+                // It is kept in sight.
+                if let Some(panel) = self.list_panel() {
+                    let first = panel.first.min(at).max((at + 1).saturating_sub(panel.rows));
+                    self.list_scroll = Some((self.pos, self.list.len(), first));
+                }
+            }
             key => {
                 let before = field.string();
                 field.key(key, modifiers);
@@ -3411,6 +3451,8 @@ impl App {
     /// or not: what is playing is not cut off by a search. With nothing
     /// typed every file is back.
     fn filter_list(&mut self, typed: &str) {
+        // Whatever row the arrows had picked out is of the list as it was.
+        self.list_cursor = None;
         let typed = typed.trim();
         if typed.is_empty() {
             return self.clear_filter(true);
@@ -3443,16 +3485,75 @@ impl App {
         (place[0] >= 0 && place[0] + place[2] <= window.0 as i32).then_some(place)
     }
 
-    /// Takes the video's frame at the size of its cell, for the grid to
-    /// draw there in place of its thumbnail.
+    /// Where, at the left of the line under the grid, the small picture
+    /// of the video playing stands: there on every page, whether or not
+    /// its own cell is on the one showing.
+    fn pip_small(&self, window: (u32, u32)) -> Option<[i32; 4]> {
+        let video = self.video.as_ref().filter(|_| self.pip && self.grid.is_some())?;
+        let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map_or((16, 9), |(_, frame)| frame.native);
+        let unit = ui_px(window.1) as i32;
+        let footer = GridLayout::footer_height(window.1);
+        let (w, h) = fit_size(native, ((footer * 3) as u32, (footer - unit / 2).max(8) as u32), true);
+        Some([unit, window.1 as i32 - footer + (footer - h as i32) / 2, w as i32, h as i32])
+    }
+
+    /// Takes the video's frame for the grid to draw: at the size of its
+    /// cell when that is on the page showing, where it takes the place of
+    /// the thumbnail, and otherwise at the size of the small picture under
+    /// the grid.
     fn render_pip(&mut self, window: (u32, u32)) {
-        let place = self.pip_place(window).filter(|_| self.video.as_ref().is_some_and(|video| video.showing));
+        let showing = self.video.as_ref().is_some_and(|video| video.showing);
+        let cell = self.pip_place(window);
+        let place = cell.or_else(|| self.pip_small(window)).filter(|_| showing);
         let (Some([_, _, w, h]), Some(player)) = (place, &self.player) else { return self.pip_live = None };
         let mut pixels = self.pip_live.take().map(|frame| frame.pixels).unwrap_or_default();
         pixels.resize((w * h) as usize, 0);
         if player.render(&mut pixels, w as u32, h as u32) {
-            self.pip_live = Some(Frame::still(w as u32, h as u32, (w as u32, h as u32), pixels));
+            // Its full size is the video's, for when it grows out of the cell.
+            let native = self.shown.as_ref().filter(|(id, _)| *id == self.id()).map_or((w as u32, h as u32), |(_, frame)| frame.native);
+            self.pip_live = Some(Frame::still(w as u32, h as u32, native, pixels));
+            self.pip_in_cell = cell.is_some();
         }
+    }
+
+    /// At the left of the line under the grid, the video that is playing:
+    /// a small picture of it, a button to pause it or play it, its name
+    /// and how far in it is. A click on the picture or the name goes to
+    /// its cell, on whichever page that is.
+    fn draw_now_playing(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32, room: i32) {
+        let window = (canvas.width as u32, canvas.height as u32);
+        let (Some([x, y, w, h]), Some(video)) = (self.pip_small(window), &self.video) else { return };
+        let id = video.id;
+        let unit = px as i32;
+        match &self.pip_live {
+            Some(live) => canvas.image_fast(live, x, y, w, h),
+            None => canvas.fill(x, y, w, h, PLACEHOLDER_COLOR),
+        }
+        canvas.round_outline(x - 1, y - 1, w + 2, h + 2, 2, 1, MENU_EDGE_COLOR);
+        // The symbol is what a press does, as on the seek bar.
+        let side = unit * 5 / 4;
+        let (button_x, button_y) = (x + w + unit, canvas.height - GridLayout::footer_height(window.1) / 2 - side / 2);
+        let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
+        match paused {
+            true => canvas.play_symbol(button_x, button_y, side, TEXT_COLOR),
+            false => canvas.pause_symbol(button_x, button_y, side, TEXT_COLOR),
+        }
+        self.grid_buttons.push(Button { x: button_x - unit / 2, y: button_y - unit / 2, width: side + unit, height: side + unit, command: Command::PlayPause });
+        // Its name and the time, as far as there is room beside what is
+        // written in the middle of the line.
+        let left = button_x + side + unit;
+        let time = self.video_time().map(|(position, length)| format!("{} / {}", clock(position), clock(length))).unwrap_or_default();
+        let small = (px * 5 / 6).max(11);
+        let line = canvas.height - GridLayout::footer_height(window.1) / 2 - Text::line_height(px) / 2;
+        let time_width = text.width(&time, small);
+        let name = clipped(text, &title_of(&self.files[id]), (room - left - time_width - unit * 2).max(0), px);
+        text.draw(canvas, left, line, px, TEXT_COLOR, &name);
+        let after = left + text.width(&name, px) + if name.is_empty() { 0 } else { unit };
+        if after + time_width <= room {
+            text.draw(canvas, after, line + (Text::line_height(px) - Text::line_height(small)) / 2, small, DIM_TEXT_COLOR, &time);
+        }
+        self.grid_buttons.push(Button { x, y, width: w, height: h, command: Command::ShowPlaying });
+        self.grid_buttons.push(Button { x: left, y, width: (after - left).max(0), height: h, command: Command::ShowPlaying });
     }
 
     // ---- Held keys -----------------------------------------------------
@@ -4155,11 +4256,13 @@ impl App {
         // where it was playing there; into the grid it shrinks to its
         // cell, unless it is a video, which plays on in its cell instead.
         let corner = self.pip_place(window);
+        // A video playing in its cell grows from the frame it had got to.
+        let live = self.pip_live.take().filter(|_| self.pip_in_cell && self.grid.is_some()).map(Arc::new);
         let stays = self.grid.is_none() && self.video.is_some();
         self.grow = match &self.grid {
-            Some(_) => corner.or_else(|| self.grid_cell(self.pos, &layout, window)).map(|cell| Grow { id, cell, since: Instant::now(), opening: true }),
+            Some(_) => corner.or_else(|| self.grid_cell(self.pos, &layout, window)).map(|cell| Grow { id, cell, since: Instant::now(), opening: true, picture: live.clone() }),
             None if stays => None,
-            None => Some(Grow { id, cell: [0; 4], since: Instant::now(), opening: false }),
+            None => Some(Grow { id, cell: [0; 4], since: Instant::now(), opening: false, picture: None }),
         };
         self.pip = stays;
         self.grid = match self.grid {
@@ -4199,7 +4302,7 @@ impl App {
     /// way to its place in the window; nothing once it is there.
     fn growing(&mut self, window: (u32, u32)) -> Option<(Arc<Frame>, [i32; 4])> {
         let grow = self.grow.as_ref().filter(|grow| grow.opening && self.options.animations)?;
-        let picture = self.grow_picture(grow.id).filter(|_| grow.since.elapsed() < GROW && grow.id == self.id());
+        let picture = grow.picture.clone().or_else(|| self.grow_picture(grow.id)).filter(|_| grow.since.elapsed() < GROW && grow.id == self.id());
         let Some(picture) = picture else {
             self.grow = None;
             return None;
@@ -4269,7 +4372,7 @@ impl App {
         let layout = self.grid_layout(window);
         if let Some(cursor) = self.grid.as_ref().map(|grid| grid.cursor) {
             let id = self.list[cursor];
-            self.grow = self.grid_cell(cursor, &layout, window).map(|cell| Grow { id, cell, since: Instant::now(), opening: true });
+            self.grow = self.grid_cell(cursor, &layout, window).map(|cell| Grow { id, cell, since: Instant::now(), opening: true, picture: None });
         }
         let Some(grid) = self.grid.take() else { return };
         self.pip = false;
@@ -5288,6 +5391,9 @@ impl App {
         match key {
             Key::Named(NamedKey::Escape) => return self.toggle_grid(),
             Key::Named(NamedKey::Tab) => return self.execute(Command::GridMenu, event_loop),
+            // With a video playing on, the space bar pauses and plays it,
+            // as it does with the video on view.
+            Key::Named(NamedKey::Space) if self.pip && self.video.is_some() => return self.video_action(VideoAction::Pause),
             Key::Named(NamedKey::ArrowUp) => return self.step_cursor(0, -1),
             Key::Named(NamedKey::ArrowDown) => return self.step_cursor(0, 1),
             // Ctrl with + or - makes the pictures larger or smaller.
@@ -6602,7 +6708,7 @@ impl App {
             // A video under the cursor plays as a trailer.
             let trailer = self.trailer.as_ref().filter(|trailer| trailer.id == id && pos == grid.cursor);
             // The video that was on view plays on in its cell, sound and all.
-            let live = self.pip_live.as_ref().filter(|_| self.pip && pos == self.pos);
+            let live = self.pip_live.as_ref().filter(|_| self.pip && self.pip_in_cell && pos == self.pos);
             let since = trailer.filter(|_| live.is_none()).and_then(|trailer| trailer.since);
             let trailer = live.or(trailer.and_then(|trailer| trailer.frame.as_ref()).filter(|frame| !frame.pixels.is_empty()));
             let thumb = self.loader.thumb(id);
@@ -6812,6 +6918,8 @@ impl App {
         let footer_height = GridLayout::footer_height(canvas.height as u32);
         // Nothing of the pictures shows behind this line.
         canvas.fill(0, canvas.height - footer_height, canvas.width, footer_height, GRID_COLOR);
+        // At its left, the video that plays on while the grid is up.
+        self.draw_now_playing(canvas, text, px, (canvas.width - width) / 2 - px as i32);
         let mut x = (canvas.width - width) / 2;
         let y = canvas.height - footer_height + (footer_height - height) / 2;
 
@@ -7448,7 +7556,7 @@ impl App {
             let pos = panel.first + row;
             let id = self.list[pos];
             let top = panel.top + row as i32 * panel.row_height;
-            let (current, hovered) = (pos == self.pos, self.list_hover == Some(pos));
+            let (current, hovered) = (pos == self.pos, self.list_hover == Some(pos) || self.list_cursor == Some(pos));
             if current {
                 canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, accent(), 256);
             } else if hovered {

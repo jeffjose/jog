@@ -124,6 +124,8 @@ pub enum Command {
     Restart,
     Search,
     ClearFilter,
+    /// In the grid, go to the cell of the video that is playing.
+    ShowPlaying,
     /// Type a search into the heading of the file list.
     ListSearch,
     /// Drop a kept search without going back to where it was begun.
@@ -404,6 +406,7 @@ pub fn command_icon(command: Command) -> &'static str {
         ClearMarks => STAR_OFF,
         Shuffle => SHUFFLE,
         PlayPause => PLAY,
+        ShowPlaying => LAYOUT_GRID,
         SeekForward => FAST_FORWARD,
         SeekBack => REWIND,
         FrameForward => STEP_FORWARD,
