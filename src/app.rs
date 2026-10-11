@@ -783,12 +783,11 @@ pub struct App {
     grid_due: Option<Instant>,
     /// Things on their way: a toast sliding in, the seek bar and the strip
     /// of scenes rising, and the middles of the
-    /// filmstrip and of the strip of scenes.
+    /// filmstrip.
     toast_slide: Cell<Glide>,
     bar_rise: Cell<Glide>,
     scenes_rise: Cell<Glide>,
     strip_slide: Cell<Glide>,
-    scene_slide: Cell<Glide>,
     /// The grid cursor's ring on its way to another cell, and whether it
     /// is to be put straight where it belongs: the grid has just come up.
     ring: [Cell<Glide>; 4],
@@ -1277,7 +1276,6 @@ impl App {
             bar_rise: Cell::new(Glide::at(0.0)),
             scenes_rise: Cell::new(Glide::at(0.0)),
             strip_slide: Cell::new(Glide::at(start as f64)),
-            scene_slide: Cell::new(Glide::at(0.0)),
             ring: std::array::from_fn(|_| Cell::new(Glide::at(0.0))),
             ring_snap: Cell::new(true),
             row_fade: Cell::new(Glide::at(0.0)),
@@ -3384,20 +3382,20 @@ impl App {
         true
     }
 
-    /// Where the cell of a scene is along the strip, which keeps the one
-    /// playing in the middle.
-    fn scene_left(&self, strip: &Strip, index: usize, playing: usize, window_width: i32) -> i32 {
-        let centre = self.glide(&self.scene_slide, playing as f64, EASE);
-        (window_width - strip.cell_w) / 2 + ((index as f64 - centre) * f64::from(strip.pitch())).round() as i32
+    /// Where the cell of a scene is along the strip: they stand in a row
+    /// in the middle of the window, and stay where they are.
+    fn scene_left(&self, strip: &Strip, index: usize, window_width: i32) -> i32 {
+        let row = scenes::PARTS as i32 * strip.pitch() - strip.pad;
+        (window_width - row) / 2 + index as i32 * strip.pitch()
     }
 
     /// The scene whose cell a window position is on.
     fn scene_at(&self, x: f64, y: f64) -> Option<usize> {
         let (width, height) = self.window_size();
         let strip = Strip::for_height(height);
-        let (_, starts, playing) = self.scenes_now().filter(|_| self.scenes_shown() && y >= f64::from(strip.top))?;
+        let (_, starts, _) = self.scenes_now().filter(|_| self.scenes_shown() && y >= f64::from(strip.top))?;
         (0..starts.len()).find(|&index| {
-            let left = self.scene_left(&strip, index, playing, width as i32);
+            let left = self.scene_left(&strip, index, width as i32);
             (left..left + strip.cell_w).contains(&(x as i32))
         })
     }
@@ -3409,7 +3407,7 @@ impl App {
         let (round, edge) = ((strip.pad * 2 / 3).max(3), (strip.pad / 4).max(2));
         let over = self.scene_at(self.mouse.0, self.mouse.1);
         for index in 0..starts.len() {
-            let left = self.scene_left(&strip, index, playing, canvas.width);
+            let left = self.scene_left(&strip, index, canvas.width);
             if left + strip.cell_w < 0 || left > canvas.width {
                 continue;
             }
@@ -3445,19 +3443,26 @@ impl App {
     fn draw_scene_labels(&self, canvas: &mut Canvas, text: &mut Text, strip: &Strip, px: u32) {
         let small = (px * 3 / 4).max(10);
         let (top, pad, line) = (strip.top + strip.pad, (small as i32 / 4).max(2), Text::line_height(small));
-        let Some((_, starts, playing)) = self.scenes_now() else {
+        let Some((list, starts, _)) = self.scenes_now() else {
             let words = "Scenes…";
             let left = (canvas.width - text.width(words, px)) / 2;
             return text.draw(canvas, left, strip.top + (strip.height - Text::line_height(px)) / 2, px, DIM_TEXT_COLOR, words);
         };
         for (index, start) in starts.iter().enumerate() {
-            let left = self.scene_left(strip, index, playing, canvas.width);
+            let left = self.scene_left(strip, index, canvas.width);
             if left + strip.cell_w < 0 || left > canvas.width {
                 continue;
             }
             let at = clock(*start);
-            let (badge_w, badge_x) = (text.width(&at, small) + 2 * pad, left + pad);
-            let badge_y = top + strip.cell_h - line - pad;
+            // In the bottom right corner of the picture, which may be
+            // narrower than its cell, as a video's length is in the filmstrip.
+            let size = list.frames.get(index).and_then(Option::as_ref).map_or((strip.cell_w, strip.cell_h), |frame| {
+                let (w, h) = fit_size((frame.width, frame.height), (strip.cell_w as u32, strip.cell_h as u32), false);
+                (w as i32, h as i32)
+            });
+            let (right, bottom) = (left + (strip.cell_w + size.0) / 2, top + (strip.cell_h + size.1) / 2);
+            let badge_w = text.width(&at, small) + 2 * pad;
+            let (badge_x, badge_y) = (right - badge_w - pad, bottom - line - pad);
             canvas.round_fill(badge_x, badge_y, badge_w, line, pad, 0x000000, 190);
             text.draw(canvas, badge_x + pad, badge_y, small, TEXT_COLOR, &at);
         }
@@ -5380,6 +5385,8 @@ impl App {
                     let start = self.scene_at(x, y).and_then(|index| Some(self.scenes_now()?.1[index]));
                     if let (Some(start), Some((_, length))) = (start, self.video_time()) {
                         self.seek_to(start / length, true);
+                        // The seek bar comes up to show how far in that is.
+                        self.time_until = Some(Instant::now() + TOAST);
                     }
                 } else if self.strip_visible() && y >= f64::from(strip.top) {
                     if let Some(pos) = self.strip_cell_at(x, y) {
@@ -5933,7 +5940,9 @@ impl App {
             // Darken the picture behind it, more and more towards the
             // bottom edge.
             let shade_top = bar.middle - unit * 6;
-            canvas.fade_down(0, shade_top, width, height - shade_top, 70);
+            // Down to what the bar stands on: the window's edge, or a strip
+            // along it, which is not to be darkened with the picture.
+            canvas.fade_down(0, shade_top, width, (bar.middle + unit * 2).min(height) - shade_top, 70);
             // The handle is where the video is, and jumps with it.
             let done = (f64::from(bar.width) * position / length) as i32;
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 72, bar.width);
@@ -6632,7 +6641,9 @@ impl App {
         let strip = Strip::for_height(height);
         let size = ui_px(height) as i32 * 3 / 2;
         let shown = self.grid.is_none() && self.strip_visible();
-        shown.then_some(Button { x: width as i32 - size - size / 2, y: strip.top - size - size / 3, width: size, height: size, command: Command::ToggleFilmstrip })
+        // In the corner of the strip itself: over a video the seek bar and
+        // its buttons stand just above it.
+        shown.then_some(Button { x: width as i32 - size - size / 2, y: strip.top + size / 3, width: size, height: size, command: Command::ToggleFilmstrip })
     }
 
     fn strip_left(&self, strip: &Strip, pos: usize, window_width: i32) -> i32 {
