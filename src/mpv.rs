@@ -280,6 +280,7 @@ impl Player {
     /// Starts playing a file, replacing whatever was playing, from the
     /// beginning or from a number of seconds in.
     pub fn play(&self, path: &Path, from: Option<f64>) {
+        self.pick_tracks();
         let start = from.map(|seconds| format!("start={seconds:.3}"));
         let mut arguments: Vec<&[u8]> = vec![b"loadfile", path.as_os_str().as_bytes()];
         if let Some(start) = &start {
@@ -292,6 +293,7 @@ impl Player {
     /// Opens a file and stops on the frame it would start at, so that it
     /// can be played at once when its turn comes. Does not wait for it.
     pub fn hold(&self, path: &Path, from: Option<f64>) {
+        self.pick_tracks();
         self.set("pause", "yes");
         // Whatever view the last video was given is not this one's.
         for (name, value) in [("vf", ""), ("video-zoom", "0"), ("video-pan-x", "0"), ("video-pan-y", "0")] {
@@ -303,6 +305,13 @@ impl Player {
             arguments.extend([b"replace".as_slice(), start.as_bytes()]);
         }
         self.command_later(&arguments);
+    }
+
+    /// A track chosen for one file is not the choice for the next, which
+    /// gets the ones the player would pick by itself.
+    fn pick_tracks(&self) {
+        self.set("aid", "auto");
+        self.set("sid", "auto");
     }
 
     /// Whether the file has been opened and its frame is there to be shown.

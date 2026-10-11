@@ -48,6 +48,12 @@ pub enum Command {
     /// Step through no looping, this video over and over, and the whole
     /// list over and over.
     CycleLoop,
+    /// Step through a video's subtitle tracks, and after the last none.
+    CycleSubtitles,
+    /// Step through a video's audio tracks.
+    CycleAudio,
+    SubtitlesLarger,
+    SubtitlesSmaller,
     /// Put the debug overlay's figures on the clipboard, plainly or as JSON.
     CopyDebug,
     CopyDebugJson,
@@ -221,6 +227,8 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "s" => SortMenu,
             "m" => ToggleMute,
             "l" => CycleLoop,
+            "j" => CycleSubtitles,
+            "J" => CycleAudio,
             "b" => Restart,
             "W" => ToggleWatch,
             "L" => SaveFilelist,
@@ -292,6 +300,10 @@ pub mod icons {
     pub const VOLUME_X: &str = "\u{e1ab}";
     pub const REPEAT: &str = "\u{e149}";
     pub const REPEAT_1: &str = "\u{e1fc}";
+    pub const CAPTIONS: &str = "\u{e3a7}";
+    pub const CAPTIONS_OFF: &str = "\u{e5c5}";
+    pub const AUDIO_LINES: &str = "\u{e55e}";
+    pub const A_LARGE_SMALL: &str = "\u{e58b}";
     pub const ZOOM_IN: &str = "\u{e1b5}";
     pub const ZOOM_OUT: &str = "\u{e1b6}";
     pub const SCAN: &str = "\u{e256}";
@@ -393,6 +405,9 @@ pub fn command_icon(command: Command) -> &'static str {
         VolumeDown => VOLUME_1,
         ToggleMute => VOLUME_X,
         CycleLoop => REPEAT,
+        CycleSubtitles => CAPTIONS,
+        CycleAudio => AUDIO_LINES,
+        SubtitlesLarger | SubtitlesSmaller => A_LARGE_SMALL,
         ZoomIn | GridLarger => ZOOM_IN,
         ZoomOut | GridSmaller => ZOOM_OUT,
         ZoomActual => SCAN,
@@ -479,6 +494,11 @@ const PLAYBACK: &[Option<MenuItem>] = &[
     video_item("Mute", "m", Command::ToggleMute),
     None,
     video_item("Loop: off, this video, all", "l", Command::CycleLoop),
+    None,
+    video_item("Next subtitles, or none", "j", Command::CycleSubtitles),
+    video_item("Larger subtitles", "", Command::SubtitlesLarger),
+    video_item("Smaller subtitles", "", Command::SubtitlesSmaller),
+    video_item("Next audio track", "J", Command::CycleAudio),
 ];
 
 const ZOOM: &[Option<MenuItem>] = &[
@@ -703,6 +723,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("]  [  \\", "Faster / slower / normal speed"),
                 ("Up  Down  m", "Volume, mute"),
                 ("l", "Loop: this video, the whole list, off"),
+                ("j  J", "Next subtitles, or none / next audio track"),
                 ("Ctrl+Left  Ctrl+Right", "Previous / next file"),
                 ("Pointer at the bottom", "Seek bar with previews"),
                 ("At the end", "The next file plays, unless this one loops"),

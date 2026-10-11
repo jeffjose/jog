@@ -24,7 +24,7 @@ use crate::loader::{Job, Loader, Request};
 use crate::meta::{self, Meta};
 use crate::mpv::{Player, PlayerEvent, Role, Signal};
 use crate::ops;
-use crate::options::{LastSlide, Options, Start};
+use crate::options::{LastSlide, Options, Start, SubtitleStyle};
 use crate::positions::Positions;
 use crate::render;
 use crate::rng::Rng;
@@ -81,6 +81,10 @@ const VIDEO_END: f64 = 0.25;
 /// How far back past its start, in seconds, a seek has to aim to leave a
 /// video for the file before it.
 const VIDEO_START: f64 = 0.5;
+/// The usual size of subtitles and how far off the bottom edge they sit,
+/// in pixels of a picture 720 high.
+const SUBTITLE_SIZE: f64 = 44.0;
+const SUBTITLE_MARGIN: i32 = 40;
 
 /// How often the debug overlay asks the player for its figures.
 const VIDEO_STATS_EVERY: Duration = Duration::from_millis(250);
@@ -213,6 +217,8 @@ struct Video {
     /// Whether it was taken over from the spare player, which may have had
     /// its frame ready, and then says nothing more about it.
     held: bool,
+    /// How many subtitle and audio tracks it has, once it is showing.
+    tracks: (usize, usize),
     /// When the user last took the video to its end, by seeking there or
     /// stepping forward a frame, or such a seek landed. A seek elsewhere
     /// takes it away.
@@ -291,6 +297,9 @@ struct SeekBar {
     width: i32,
     middle: i32,
     unit: i32,
+    /// The right edge of the window, and how many buttons stand at it.
+    end: i32,
+    buttons: i32,
 }
 
 impl SeekBar {
@@ -314,7 +323,20 @@ impl SeekBar {
     }
 
     fn on_control(&self, which: i32, x: f64, y: f64) -> bool {
-        let (left, top, side) = self.control(which);
+        self.over(self.control(which), x, y)
+    }
+
+    /// One of the squares at the far right, counted from the edge inwards.
+    fn button(&self, which: i32) -> (i32, i32, i32) {
+        let side = self.unit * 5 / 4;
+        (self.end - self.unit * 3 / 2 - side - which * (side + self.unit), self.middle - side / 2, side)
+    }
+
+    fn on_button(&self, which: i32, x: f64, y: f64) -> bool {
+        which < self.buttons && self.over(self.button(which), x, y)
+    }
+
+    fn over(&self, (left, top, side): (i32, i32, i32), x: f64, y: f64) -> bool {
         let slack = f64::from(self.unit / 2);
         let within = |at: f64, from: i32| at >= f64::from(from) - slack && at < f64::from(from + side) + slack;
         within(x, left) && within(y, top)
@@ -790,6 +812,11 @@ pub struct App {
     /// What a video that has played to its end does, kept from one video
     /// to the next.
     looping: Looping,
+    /// Whether subtitles show, kept from one video to the next, their size
+    /// as a percentage, and how far off the bottom edge they sit.
+    subtitles: bool,
+    subtitle_size: u32,
+    subtitle_margin: i32,
     toast: Option<(String, Instant)>,
     /// While set, the video's time and a larger progress bar are shown.
     time_until: Option<Instant>,
@@ -1168,6 +1195,9 @@ impl App {
             speed: 1.0,
             muted: false,
             looping: Looping::Off,
+            subtitles: options.subtitles,
+            subtitle_size: options.subtitle_size,
+            subtitle_margin: SUBTITLE_MARGIN,
             toast: None,
             time_until: None,
             meta: None,
@@ -1535,10 +1565,11 @@ impl App {
         let (width, height) = self.window_size();
         let unit = ui_px(height) as i32;
         let base = if self.strip_pinned { Strip::for_height(height).top } else { height as i32 };
-        // Room on the left for the play / pause symbol and the elapsed
-        // time, and on the right for the duration.
-        // Room on the left for the three buttons and the elapsed time.
-        SeekBar { x: unit * 13, width: (width as i32 - unit * 19).max(1), middle: base - unit * 2, unit }
+        // Room on the left for the three buttons and the elapsed time, and
+        // on the right for the duration and the buttons there.
+        let (end, buttons) = (width as i32, self.bar_buttons().len() as i32);
+        let right = unit * 7 + buttons * unit * 9 / 4;
+        SeekBar { x: unit * 13, width: (end - unit * 13 - right).max(1), middle: base - unit * 2, unit, end, buttons }
     }
 
     /// Tracks the pointer over the seek bar: shows it at full size, and the
@@ -1564,6 +1595,7 @@ impl App {
                 player.set("speed", &self.speed.to_string());
                 player.set("mute", if self.muted { "yes" } else { "no" });
                 self.player = Some(player);
+                self.apply_subtitles();
                 *self.video_view_sent.borrow_mut() = None;
                 // A video may already be waiting for it.
                 self.sync_video();
@@ -1631,7 +1663,7 @@ impl App {
             // Until the player reports for itself, this is where it is.
             // One counted from the end has to wait for the length.
             let seeking = from.filter(|seconds| *seconds >= 0.0).map(|seconds| (started, seconds));
-            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, held, to_end: None });
+            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, held, tracks: (0, 0), to_end: None });
             self.perf.video_lines = None;
             self.apply_video_view();
         }
@@ -1667,9 +1699,10 @@ impl App {
             return;
         }
         let from = self.resume_from(next);
-        let Some(spare) = self.spare.as_mut().filter(|spare| spare.id != Some(next)) else { return };
+        let start = from.unwrap_or(0.0);
+        let Some(spare) = self.spare.as_mut().filter(|spare| spare.id != Some(next) || spare.from != start) else { return };
         spare.player.hold(&self.files[next], from);
-        (spare.id, spare.from) = (Some(next), from.unwrap_or(0.0));
+        (spare.id, spare.from) = (Some(next), start);
     }
 
     /// The spare player has only to be listened to: mpv signals again only
@@ -1720,6 +1753,7 @@ impl App {
             if showing && !video.showing {
                 let took = video.started.elapsed();
                 video.start_took.get_or_insert(took);
+                video.tracks = (tracks_of(player, "sub").len(), tracks_of(player, "audio").len());
                 if self.options.debug {
                     eprintln!("jog: {took:>7.1?} video start {}", self.files[video.id].display());
                 }
@@ -1812,6 +1846,134 @@ impl App {
         });
     }
 
+    /// The two players that take turns, where they exist.
+    fn players(&self) -> impl Iterator<Item = &Player> {
+        self.player.iter().chain(self.spare.iter().map(|spare| &spare.player))
+    }
+
+    /// Tells both players how subtitles are to look and whether they show.
+    /// Those a file styles for itself keep their own look.
+    fn apply_subtitles(&self) {
+        // mpv's sizes are in pixels of a picture 720 high, and its colours
+        // are written `#AARRGGBB`.
+        let size = (SUBTITLE_SIZE * f64::from(self.subtitle_size) / 100.0).to_string();
+        let margin = self.subtitle_margin.to_string();
+        let look: [(&str, &str); 6] = match self.options.subtitle_style {
+            SubtitleStyle::Outline => [
+                ("sub-border-size", "2.2"),
+                ("sub-border-color", "#E6000000"),
+                ("sub-shadow-offset", "0"),
+                ("sub-shadow-color", "#00000000"),
+                ("sub-back-color", "#00000000"),
+                ("sub-blur", "0.3"),
+            ],
+            SubtitleStyle::Shadow => [
+                ("sub-border-size", "0.9"),
+                ("sub-border-color", "#40000000"),
+                ("sub-shadow-offset", "1.4"),
+                ("sub-shadow-color", "#C0000000"),
+                ("sub-back-color", "#00000000"),
+                ("sub-blur", "1.6"),
+            ],
+            // The shadow's offset is how far the panel reaches past the
+            // letters.
+            SubtitleStyle::Box => [
+                ("sub-border-size", "0"),
+                ("sub-border-color", "#00000000"),
+                ("sub-shadow-offset", "7"),
+                ("sub-shadow-color", "#00000000"),
+                ("sub-back-color", "#A6000000"),
+                ("sub-blur", "0"),
+            ],
+        };
+        for player in self.players() {
+            player.set("sub-font", &self.options.subtitle_font);
+            player.set("sub-font-size", &size);
+            player.set("sub-color", "#FFF4F4F4");
+            player.set("sub-margin-y", &margin);
+            player.set("sub-visibility", if self.subtitles { "yes" } else { "no" });
+            for (name, value) in look {
+                player.set(name, value);
+            }
+        }
+    }
+
+    /// Steps on to the video's next subtitle track, and after the last to
+    /// none. Whether subtitles show is kept from one video to the next.
+    fn cycle_subtitles(&mut self) {
+        let Some(player) = self.player.as_ref().filter(|_| self.video.is_some()) else { return };
+        let tracks = tracks_of(player, "sub");
+        if tracks.is_empty() {
+            return self.toast("This video has no subtitles");
+        }
+        let showing = tracks.iter().position(|track| track.selected).filter(|_| self.subtitles);
+        let next = match showing {
+            None => tracks.first(),
+            Some(at) => tracks.get(at + 1),
+        };
+        if let Some(track) = next {
+            player.set("sid", &track.id.to_string());
+        }
+        self.subtitles = next.is_some();
+        self.apply_subtitles();
+        self.toast(match next {
+            Some(track) => format!("{}  {}", commands::icons::CAPTIONS, track.name),
+            None => format!("{}  Subtitles off", commands::icons::CAPTIONS_OFF),
+        });
+    }
+
+    /// Steps on to the video's next audio track, and round to the first.
+    fn cycle_audio(&mut self) {
+        let Some(player) = self.player.as_ref().filter(|_| self.video.is_some()) else { return };
+        let tracks = tracks_of(player, "audio");
+        if tracks.len() < 2 {
+            return self.toast(if tracks.is_empty() { "This video has no sound" } else { "This video has one audio track" });
+        }
+        let at = tracks.iter().position(|track| track.selected).map_or(0, |at| (at + 1) % tracks.len());
+        player.set("aid", &tracks[at].id.to_string());
+        self.toast(format!("{}  {}   {} of {}", commands::icons::AUDIO_LINES, tracks[at].name, at + 1, tracks.len()));
+    }
+
+    /// Makes subtitles a step larger or smaller.
+    fn size_subtitles(&mut self, larger: bool) {
+        let size = if larger { self.subtitle_size + 10 } else { self.subtitle_size.saturating_sub(10) };
+        self.subtitle_size = size.clamp(25, 400);
+        self.apply_subtitles();
+        self.toast(format!("{}  Subtitles {}%", commands::icons::A_LARGE_SMALL, self.subtitle_size));
+    }
+
+    /// The buttons at the right of the seek bar, from the edge inwards:
+    /// looping, and for a video that has them subtitles and audio tracks.
+    fn bar_buttons(&self) -> Vec<Command> {
+        let (subtitles, audio) = self.video.as_ref().map_or((0, 0), |video| video.tracks);
+        let mut buttons = vec![Command::CycleLoop];
+        if subtitles > 0 {
+            buttons.push(Command::CycleSubtitles);
+        }
+        if audio > 1 {
+            buttons.push(Command::CycleAudio);
+        }
+        buttons
+    }
+
+    /// Has the spare player hold the file before this one, a seek's length
+    /// from its end, once seeking back has come near enough to the start
+    /// of this video that the next press may land there.
+    fn preload_back(&mut self) {
+        let len = self.list.len();
+        let near = self.video_time().is_some_and(|(position, _)| position < SEEK_STEP * 2.0);
+        if !near || len < 2 {
+            return;
+        }
+        let before = self.list[(self.pos + len - 1) % len];
+        if !files::is_video(&self.files[before]) || before == self.id() {
+            return;
+        }
+        let Some(spare) = self.spare.as_mut().filter(|spare| spare.id != Some(before) || spare.from != -SEEK_STEP) else { return };
+        spare.player.hold(&self.files[before], Some(-SEEK_STEP));
+        (spare.id, spare.from) = (Some(before), -SEEK_STEP);
+    }
+
     /// Tells the player whether a video is to play again when it ends.
     fn apply_loop(&self) {
         if let Some(player) = &self.player {
@@ -1865,6 +2027,10 @@ impl App {
                 self.enter_at = Some(enter);
                 self.step(seconds > 0.0);
                 self.enter_at = None;
+                // Going on back may run into the file before that one next.
+                if seconds < 0.0 {
+                    self.preload_back();
+                }
                 return true;
             }
         }
@@ -1885,8 +2051,10 @@ impl App {
         } else if seconds > 0.0 && to >= length - VIDEO_END {
             Some(0.0)
         } else {
-            // Less than this short of the start is the start.
-            (seconds < 0.0 && to < -VIDEO_START).then_some(to)
+            // Less than this short of the start is the start. Further, and
+            // it is the whole of the seek from the end of the file before,
+            // which is where that file can be held ready.
+            (seconds < 0.0 && to < -VIDEO_START).then_some(-seconds.abs())
         }
     }
 
@@ -1929,6 +2097,13 @@ impl App {
                 true => self.toast(format!("{}  Paused", commands::icons::PAUSE)),
                 false => self.toast = None,
             }
+        }
+        // The file a seek may be about to run into is held ready: the one
+        // before once the start is near, and otherwise the next.
+        match action {
+            VideoAction::Seek(seconds) if seconds < 0.0 => self.preload_back(),
+            VideoAction::Seek(_) => self.preload_video(),
+            _ => {}
         }
         // Bring up the time and the larger progress bar for a moment.
         self.time_until = Some(Instant::now() + TOAST);
@@ -2448,6 +2623,10 @@ impl App {
             VolumeDown => self.video_action(VideoAction::Volume(-5)),
             Restart => self.restart_video(),
             CycleLoop => self.cycle_loop(),
+            CycleSubtitles => self.cycle_subtitles(),
+            CycleAudio => self.cycle_audio(),
+            SubtitlesLarger => self.size_subtitles(true),
+            SubtitlesSmaller => self.size_subtitles(false),
             ClearFilter => self.clear_filter(),
             Quit => event_loop.exit(),
         }
@@ -2488,6 +2667,7 @@ impl App {
             ToggleGridTitles => self.grid_titles,
             ToggleMute => self.muted,
             CycleLoop => self.looping != Looping::Off,
+            CycleSubtitles => self.subtitles,
             SortBy(sort) => self.sort == Some(sort),
             ReverseOrder => self.reversed,
             Shuffle => self.shuffled,
@@ -4590,6 +4770,8 @@ impl App {
                     self.step(false);
                 } else if bar.on_control(2, x, y) {
                     self.step(true);
+                } else if let Some(command) = (0..).zip(self.bar_buttons()).find(|(which, _)| bar.on_button(*which, x, y)).map(|(_, command)| command) {
+                    self.execute(command, event_loop);
                 } else if bar.on_symbol(x, y) {
                     self.video_action(VideoAction::Pause);
                 } else if bar.on_track(x) {
@@ -5056,6 +5238,9 @@ impl App {
         let mut time_bottom = bottom;
         // Text placed by an anchor: ending at it, centred on it, or starting at it.
         let mut labels: Vec<(i32, i32, Ordering, String)> = Vec::new();
+        // The buttons at the right of the bar: where, which icon, how bright.
+        let mut buttons: Vec<(i32, i32, &str, u32)> = Vec::new();
+        let mut subtitle_margin = SUBTITLE_MARGIN;
         let bar_wanted = viewing && (self.hover.is_some() || self.time_until.is_some());
         if let Some((position, length)) = self.video_time().filter(|_| bar_wanted) {
             let bar = self.seek_bar();
@@ -5088,6 +5273,22 @@ impl App {
             }
             labels.push((bar.x - unit, bar.middle - line / 2, Ordering::Less, clock(position)));
             labels.push((bar.x + bar.width + unit, bar.middle - line / 2, Ordering::Greater, clock(length)));
+            for (which, command) in (0..).zip(self.bar_buttons()) {
+                let (left, top, side) = bar.button(which);
+                let (icon, on) = match command {
+                    Command::CycleLoop => match self.looping {
+                        Looping::Off => (commands::icons::REPEAT, false),
+                        Looping::File => (commands::icons::REPEAT_1, true),
+                        Looping::List => (commands::icons::REPEAT, true),
+                    },
+                    Command::CycleSubtitles if self.subtitles => (commands::icons::CAPTIONS, true),
+                    Command::CycleSubtitles => (commands::icons::CAPTIONS_OFF, false),
+                    _ => (commands::icons::AUDIO_LINES, true),
+                };
+                buttons.push((left + side / 2, top + (side - line) / 2, icon, if on { TEXT_COLOR } else { DIM_TEXT_COLOR }));
+            }
+            // Subtitles stand clear of the bar while it is up.
+            subtitle_margin = (height - (bar.middle - unit * 3)) * 720 / height.max(1);
             time_bottom = bar.middle - unit * 4;
 
             if let Some(fraction) = self.hover.filter(|_| bar.on_track(self.mouse.0)) {
@@ -5173,6 +5374,16 @@ impl App {
         text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w, margin));
         // Twice the usual size, centred just above the seek bar.
         text_block(canvas, &mut text, &time, px, |w, h| ((width - w) / 2, time_bottom - h));
+        for (centre, top, icon, color) in buttons {
+            let left = centre - text.width(icon, px) / 2;
+            text.draw(canvas, left, top, px, color, icon);
+        }
+        if subtitle_margin != self.subtitle_margin {
+            self.subtitle_margin = subtitle_margin;
+            for player in self.players() {
+                player.set("sub-margin-y", &subtitle_margin.to_string());
+            }
+        }
         for (anchor, top, side, label) in &labels {
             let label_width = text.width(label, px);
             let left = match side {
@@ -6458,6 +6669,30 @@ fn clock(seconds: f64) -> String {
     }
 }
 
+/// One of a video's audio or subtitle tracks.
+struct Track {
+    id: i64,
+    /// Its language and title, as far as the file gives them.
+    name: String,
+    selected: bool,
+}
+
+/// The tracks of one kind, `audio` or `sub`, in the file a player has open.
+fn tracks_of(player: &Player, kind: &str) -> Vec<Track> {
+    let count = player.number("track-list/count").unwrap_or(0.0) as usize;
+    let track = |n: usize| {
+        let field = |name: &str| player.text(&format!("track-list/{n}/{name}"));
+        if field("type")? != kind {
+            return None;
+        }
+        let id = player.number(&format!("track-list/{n}/id"))? as i64;
+        let named: Vec<String> = [field("lang"), field("title")].into_iter().flatten().collect();
+        let name = if named.is_empty() { format!("Track {id}") } else { named.join("  ") };
+        Some(Track { id, name, selected: player.flag(&format!("track-list/{n}/selected")) == Some(true) })
+    };
+    (0..count).filter_map(track).collect()
+}
+
 /// Fills in an action template: `%f` is the path and `%n` the file name,
 /// both quoted for the shell, and `%%` a literal percent sign.
 fn expand_action(template: &str, path: &Path) -> String {
@@ -6554,6 +6789,7 @@ impl ApplicationHandler<Event> for App {
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {
                 self.spare = spare.ok().map(|player| Spare { player, id: None, from: 0.0 });
+                self.apply_subtitles();
                 // As for the first: it may have queued events unheard.
                 self.spare_signal(Signal::Events);
                 self.preload_video();

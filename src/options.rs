@@ -65,6 +65,14 @@ Slideshow and actions:
       --no-resume            start videos from the beginning, and do not
                              remember where they were left (--resume undoes it)
 
+Subtitles:
+      --no-subtitles         start with subtitles hidden (j shows them)
+      --subtitle-font NAME   an installed font, such as Inter (the default)
+      --subtitle-size N      their size as a percentage: 100 is the usual
+      --subtitle-style HOW   outline (the default): letters edged in black;
+                             shadow: a soft shadow and no edge;
+                             box: on a dark panel
+
 Overlays:
   -d, --draw-info            show name, position, dimensions, zoom and size
       --draw-exif            show EXIF data
@@ -141,6 +149,7 @@ where they were left unless --no-resume is given. While one is up:
   Shift+Left / Shift+Right   step one frame      Up / Down     volume (m mutes)
   b                          back to the start of the video
   l                          loop: this video, then the whole list, then off
+  j / J                      next subtitles, or none / next audio track
   Ctrl+Left / Ctrl+Right, or , . < > n           previous / next file
   Seeking past the end of a video starts the next file, and seeking back
   past its start carries on into the one before, as though they lay end to end.
@@ -149,6 +158,17 @@ Mouse: drag to pan, middle-drag to zoom, wheel for next/previous,
 Ctrl+wheel to zoom, double click for fullscreen, bottom edge for the
 filmstrip. Ctrl+Left / Ctrl+Right also change file when an image has
 nothing to scroll sideways.";
+
+/// How subtitles are set off from the picture behind them.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SubtitleStyle {
+    /// Letters edged in black.
+    Outline,
+    /// A soft shadow under the letters and no edge.
+    Shadow,
+    /// A dark panel behind each line.
+    Box,
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum LastSlide {
@@ -175,6 +195,12 @@ pub struct Options {
     pub on_last_slide: LastSlide,
     /// Whether the next file comes up when a video ends.
     pub autoplay: bool,
+    /// Whether a video's subtitles are shown, and how they are drawn.
+    pub subtitles: bool,
+    pub subtitle_font: String,
+    /// Their size, as a percentage of the usual.
+    pub subtitle_size: u32,
+    pub subtitle_style: SubtitleStyle,
     /// Whether the grid shows each file's title under its picture.
     pub grid_titles: bool,
     /// Whether to start in the grid.
@@ -370,7 +396,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
 fn takes_value(name: &str) -> bool {
     let valued = [
         "geometry", "image-bg", "accent", "zoom", "sort", "start-at", "start", "filelist", "filter", "slideshow-delay", "on-last-slide",
-        "output-dir",
+        "output-dir", "subtitle-font", "subtitle-size", "subtitle-style",
     ];
     valued.contains(&name) || name.starts_with("action")
 }
@@ -380,7 +406,7 @@ fn is_switch(name: &str) -> bool {
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
-        "debug", "verbose", "watch", "resume", "no-resume",
+        "debug", "verbose", "watch", "resume", "no-resume", "subtitles", "no-subtitles",
     ];
     switches.contains(&name)
 }
@@ -411,6 +437,10 @@ fn parse_with(
         slideshow_delay: None,
         on_last_slide: LastSlide::Resume,
         autoplay: true,
+        subtitles: true,
+        subtitle_font: "Inter".to_string(),
+        subtitle_size: 100,
+        subtitle_style: SubtitleStyle::Outline,
         grid_titles: true,
         grid: false,
         actions: Default::default(),
@@ -557,6 +587,22 @@ fn apply(
         "cycle-once" => options.on_last_slide = LastSlide::Quit,
         "autoplay" => options.autoplay = true,
         "no-autoplay" => options.autoplay = false,
+        "subtitles" => options.subtitles = true,
+        "no-subtitles" => options.subtitles = false,
+        "subtitle-font" => options.subtitle_font = value()?,
+        "subtitle-size" => {
+            let text = value()?;
+            let size = text.trim_end_matches('%').parse::<u32>().ok().filter(|size| (25..=400).contains(size));
+            options.subtitle_size = size.ok_or_else(|| format!("invalid subtitle size '{text}', expected a percentage from 25 to 400"))?;
+        }
+        "subtitle-style" => {
+            options.subtitle_style = match value()?.as_str() {
+                "outline" => SubtitleStyle::Outline,
+                "shadow" => SubtitleStyle::Shadow,
+                "box" => SubtitleStyle::Box,
+                other => return Err(format!("invalid subtitle style '{other}', expected outline, shadow or box")),
+            }
+        }
         "grid" => options.grid = true,
         "grid-titles" => options.grid_titles = true,
         "no-grid-titles" => options.grid_titles = false,
@@ -639,6 +685,7 @@ fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>
             toml::Value::Boolean(false) => match key.as_str() {
                 "auto-zoom" => ("no-auto-zoom", None),
                 "autoplay" => ("no-autoplay", None),
+                "subtitles" => ("no-subtitles", None),
                 "grid-titles" => ("no-grid-titles", None),
                 "fullscreen" => ("windowed", None),
                 "resume" => ("no-resume", None),

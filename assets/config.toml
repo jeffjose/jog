@@ -113,6 +113,22 @@
 #   false   start videos from the beginning, and do not remember where
 #           they were left
 
+# subtitles = true
+#   false   start with subtitles hidden (j shows them)
+
+# The font subtitles are set in: any font installed on this machine.
+# subtitle-font = "Inter"
+
+# Their size, as a percentage of the usual.
+# subtitle-size = 100
+#   from 25 to 400
+
+# How they are set off from the picture behind them.
+# subtitle-style = "outline"
+#   "outline"   letters edged in black
+#   "shadow"    a soft shadow under the letters and no edge
+#   "box"       on a dark panel
+
 # ---- Slideshow ------------------------------------------------------
 
 # Start a slideshow, each file staying up this many seconds.
