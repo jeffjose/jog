@@ -3493,8 +3493,11 @@ impl App {
         let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map_or((16, 9), |(_, frame)| frame.native);
         let unit = ui_px(window.1) as i32;
         let footer = GridLayout::footer_height(window.1);
-        let (w, h) = fit_size(native, ((footer * 3) as u32, (footer - unit / 2).max(8) as u32), true);
-        Some([unit, window.1 as i32 - footer + (footer - h as i32) / 2, w as i32, h as i32])
+        // As tall as the line and the margin the grid leaves free above
+        // it: room that nothing else uses, and no cell is covered.
+        let tall = footer + self.grid_layout(window).top - unit / 2;
+        let (w, h) = fit_size(native, ((window.0 / 6).max(64), tall.max(8) as u32), true);
+        Some([unit, window.1 as i32 - unit / 3 - h as i32, w as i32, h as i32])
     }
 
     /// Takes the video's frame for the grid to draw: at the size of its
@@ -4261,7 +4264,9 @@ impl App {
         let stays = self.grid.is_none() && self.video.is_some();
         self.grow = match &self.grid {
             Some(_) => corner.or_else(|| self.grid_cell(self.pos, &layout, window)).map(|cell| Grow { id, cell, since: Instant::now(), opening: true, picture: live.clone() }),
-            None if stays => None,
+            // A video shrinks to its cell as the frame it has got to, and
+            // plays on there.
+            None if stays => Some(Grow { id, cell: [0; 4], since: Instant::now(), opening: false, picture: self.video_frame(window) }),
             None => Some(Grow { id, cell: [0; 4], since: Instant::now(), opening: false, picture: None }),
         };
         self.pip = stays;
@@ -4287,6 +4292,18 @@ impl App {
             None => area,
         };
         (place[0] >= 0 && place[0] + place[2] <= window.0 as i32).then_some(place)
+    }
+
+    /// The frame the video on view is showing, as it is in the window: to
+    /// shrink into its cell of the grid.
+    fn video_frame(&self, window: (u32, u32)) -> Option<Arc<Frame>> {
+        let video = self.video.as_ref().filter(|video| video.showing)?;
+        let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map(|(_, frame)| frame.native)?;
+        // Only the picture, without the bars beside it.
+        let place = self.view.layout(native, window);
+        let (w, h) = (place.width.min(window.0).max(1), place.height.min(window.1).max(1));
+        let mut pixels = vec![0; w as usize * h as usize];
+        self.player.as_ref()?.render(&mut pixels, w, h).then(|| Arc::new(Frame::still(w, h, native, pixels)))
     }
 
     /// The picture that grows out of a cell of the grid or shrinks into
@@ -4320,7 +4337,7 @@ impl App {
         let Some(grow) = self.grow.as_ref().filter(|grow| !grow.opening && self.options.animations) else { return };
         let window = (canvas.width as u32, canvas.height as u32);
         let pos = self.list.iter().position(|id| *id == grow.id);
-        let frame = self.grow_picture(grow.id);
+        let frame = grow.picture.clone().or_else(|| self.grow_picture(grow.id));
         let (Some(pos), Some(frame), true) = (pos, frame, grow.since.elapsed() < GROW) else {
             self.grow = None;
             return;
@@ -7556,7 +7573,10 @@ impl App {
             let pos = panel.first + row;
             let id = self.list[pos];
             let top = panel.top + row as i32 * panel.row_height;
-            let (current, hovered) = (pos == self.pos, self.list_hover == Some(pos) || self.list_cursor == Some(pos));
+            let (current, hovered) = (pos == self.pos, self.list_hover == Some(pos));
+            // The row the arrows have picked out in a search is ringed and
+            // lit, plainly enough to be found at a glance.
+            let picked = self.list_cursor == Some(pos);
             if current {
                 canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, accent(), 256);
             } else if hovered {
@@ -7566,6 +7586,12 @@ impl App {
                 }
                 let lit = self.glide(&self.row_fade, 1.0, EASE);
                 canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, TEXT_COLOR, (28.0 * lit) as u32);
+            }
+            if picked {
+                if !current {
+                    canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, TEXT_COLOR, 56);
+                }
+                canvas.round_outline(pad / 2, top, panel.width - pad, panel.row_height, pad, 2, if current { TEXT_COLOR } else { accent_soft() });
             }
             let line = top + (panel.row_height - Text::line_height(px)) / 2;
             let (main, dim) = row_text(current);
