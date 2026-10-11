@@ -325,6 +325,64 @@ pub fn copy_all(into: &mut Vec<u32>, from: &[u32]) {
     into.par_chunks_mut(SHARE).zip(from.par_chunks(SHARE)).for_each(|(into, from)| into.copy_from_slice(from));
 }
 
+/// How many rows are looked at together when telling what has changed.
+const BAND: usize = 32;
+/// More rectangles than this are sent as the one that holds them all.
+const MOST_PARTS: usize = 48;
+
+/// Where one picture differs from another of the same size, as a few
+/// rectangles of left, top, width and height, bringing the other up to
+/// date as it goes. Handing the display only these is what keeps a small
+/// change cheap on a large window: the whole of a 4K frame is 33 MB.
+pub fn changed(now: &[u32], was: &mut [u32], width: usize) -> Vec<[u32; 4]> {
+    if width == 0 || now.len() != was.len() {
+        return Vec::new();
+    }
+    // For each band of rows, the columns between which something changed.
+    let bands: Vec<Option<(usize, usize)>> = now
+        .par_chunks(width * BAND)
+        .zip(was.par_chunks_mut(width * BAND))
+        .map(|(now, was)| {
+            if now == was {
+                return None;
+            }
+            let mut span: Option<(usize, usize)> = None;
+            for (now, was) in now.chunks(width).zip(was.chunks(width)) {
+                let Some(first) = now.iter().zip(was).position(|(a, b)| a != b) else { continue };
+                let last = now.iter().zip(was).rposition(|(a, b)| a != b).unwrap_or(first);
+                span = Some(span.map_or((first, last), |(left, right)| (left.min(first), right.max(last))));
+            }
+            was.copy_from_slice(now);
+            span
+        })
+        .collect();
+    let height = now.len() / width;
+    let mut parts: Vec<[u32; 4]> = Vec::new();
+    let mut open: Option<(usize, usize, usize)> = None;
+    let mut close = |open: &mut Option<(usize, usize, usize)>, end: usize| {
+        if let Some((top, left, right)) = open.take() {
+            let bottom = (end * BAND).min(height);
+            parts.push([left as u32, (top * BAND) as u32, (right - left + 1) as u32, (bottom - top * BAND) as u32]);
+        }
+    };
+    for (band, span) in bands.iter().enumerate() {
+        match (span, &mut open) {
+            // Bands one under another are one rectangle, as wide as the widest.
+            (Some((first, last)), Some((_, left, right))) => (*left, *right) = ((*left).min(*first), (*right).max(*last)),
+            (Some((first, last)), None) => open = Some((band, *first, *last)),
+            (None, _) => close(&mut open, band),
+        }
+    }
+    close(&mut open, bands.len());
+    if parts.len() > MOST_PARTS {
+        let left = parts.iter().map(|part| part[0]).min().unwrap_or(0);
+        let right = parts.iter().map(|part| part[0] + part[2]).max().unwrap_or(0);
+        let (top, bottom) = (parts[0][1], parts[parts.len() - 1][1] + parts[parts.len() - 1][3]);
+        parts = vec![[left, top, right - left, bottom - top]];
+    }
+    parts
+}
+
 const FONT_PATHS: &[&str] = &[
     "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     "/usr/share/fonts/TTF/DejaVuSans.ttf",
@@ -493,4 +551,26 @@ fn font_files() -> impl Iterator<Item = PathBuf> {
         Some(PathBuf::from(String::from_utf8(output.stdout).ok()?))
     });
     chosen.into_iter().chain(known).chain(fontconfig.flatten())
+}
+
+#[cfg(test)]
+mod change_tests {
+    use super::changed;
+
+    #[test]
+    fn only_what_differs_is_reported_and_then_nothing() {
+        let (width, height) = (200, 100);
+        let mut was = vec![0u32; width * height];
+        let mut now = was.clone();
+        assert!(changed(&now, &mut was, width).is_empty());
+        // A dot near the top and a bar lower down, in different bands.
+        now[3 * width + 10] = 1;
+        now[70 * width + 50..70 * width + 90].fill(2);
+        assert_eq!(changed(&now, &mut was, width), [[10, 0, 1, 32], [50, 64, 40, 32]]);
+        assert_eq!(was, now);
+        assert!(changed(&now, &mut was, width).is_empty());
+        // Rows of a last band that is short of full are counted as they are.
+        now[99 * width + 199] = 3;
+        assert_eq!(changed(&now, &mut was, width), [[199, 96, 1, 4]]);
+    }
 }

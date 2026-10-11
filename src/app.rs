@@ -819,6 +819,10 @@ pub struct App {
     frame_every: Option<Duration>,
     /// When the frame before this one was begun.
     frame_began: Option<Instant>,
+    /// Whether a frame has been asked for from here since the last was
+    /// drawn, and what the window was last handed, to tell what changes.
+    asked: Cell<bool>,
+    presented: Vec<u32>,
     animating: Cell<bool>,
     /// The first row the file list was scrolled to with the wheel, along
     /// with the position and list length it was scrolled at: once either
@@ -1288,6 +1292,8 @@ impl App {
             anim_due: None,
             frame_every: None,
             frame_began: None,
+            asked: Cell::new(false),
+            presented: Vec::new(),
             animating: Cell::new(false),
             list_scroll: None,
             list_hover: None,
@@ -1444,6 +1450,7 @@ impl App {
 
     fn redraw(&self) {
         if let Some(window) = &self.window {
+            self.asked.set(true);
             window.request_redraw();
         }
     }
@@ -5572,10 +5579,18 @@ impl App {
     fn draw(&mut self) {
         let (Some(window), Some(mut surface)) = (self.window.clone(), self.surface.take()) else { return };
         let size = window.inner_size();
+        // A frame nobody here asked for is the system's: the window has
+        // been uncovered or mapped, and wants all of itself drawn.
+        let ours = self.asked.take();
         if let (Some(width), Some(height)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) {
+            let entered = Instant::now();
             if surface.resize(width, height).is_ok() {
+                // This waits for the display to have taken the frame before.
                 if let Ok(mut buffer) = surface.buffer_mut() {
                     let started = Instant::now();
+                    let waited = started.duration_since(entered);
+                    // Whether the window still shows what was last handed it.
+                    let kept = ours && buffer.age() == 1 && self.presented.len() == buffer.len();
                     self.paint(&mut buffer, (size.width, size.height));
                     // Something is still on its way somewhere: draw again soon.
                     let moving = self.animating.take();
@@ -5588,15 +5603,42 @@ impl App {
                         self.anim_due = Some((started + every).max(Instant::now() + Duration::from_millis(1)));
                     }
                     let painted = started.elapsed();
+                    // The display is handed only what has changed: taking
+                    // the whole of a large window is what takes it longest,
+                    // several times as long as drawing the frame did.
+                    let parts = match kept {
+                        true => Some(ui::changed(&buffer, &mut self.presented, size.width as usize)),
+                        false => {
+                            ui::copy_all(&mut self.presented, &buffer);
+                            None
+                        }
+                    };
+                    let told = started.elapsed().saturating_sub(painted);
                     window.pre_present_notify();
-                    let _ = buffer.present();
-                    // What a moving frame really cost: drawing it, handing
-                    // it to the display, and how long after the one before
-                    // it began.
+                    let share = match &parts {
+                        Some(parts) => {
+                            let rects: Vec<softbuffer::Rect> = parts
+                                .iter()
+                                .filter_map(|[x, y, w, h]| Some(softbuffer::Rect { x: *x, y: *y, width: NonZeroU32::new(*w)?, height: NonZeroU32::new(*h)? }))
+                                .collect();
+                            let _ = buffer.present_with_damage(&rects);
+                            (parts.iter().map(|part| f64::from(part[2]) * f64::from(part[3])).sum::<f64>() + 0.0) / (f64::from(size.width) * f64::from(size.height))
+                        }
+                        None => {
+                            let _ = buffer.present();
+                            1.0
+                        }
+                    };
+                    // What a moving frame really cost: waiting for the
+                    // display to be done with the last, drawing this one,
+                    // telling what changed in it and how much of the window
+                    // that was, and how long after the last it began.
                     if moving && self.options.debug {
-                        let gap = self.frame_began.map(|before| started.duration_since(before));
-                        let (presented, gap) = (started.elapsed().saturating_sub(painted), gap.unwrap_or_default());
-                        eprintln!("jog: draw  moving  paint {painted:>7.1?}  present {presented:>7.1?}  since last {gap:>7.1?}");
+                        let gap = self.frame_began.map(|before| started.duration_since(before)).unwrap_or_default();
+                        eprintln!(
+                            "jog: draw  moving  wait {waited:>7.1?}  paint {painted:>7.1?}  compare {told:>7.1?}  sent {:>5.1}%  since last {gap:>7.1?}",
+                            share * 100.0
+                        );
                     }
                     self.frame_began = Some(started);
                     self.painted(started, painted);
@@ -6015,7 +6057,7 @@ impl App {
         // as its time runs out.
         let toast_in = self.glide(&self.toast_slide, 1.0, EASE);
         let toast_left = self.toast.as_ref().map_or(Duration::ZERO, |(_, until)| until.saturating_duration_since(Instant::now()));
-        let toast_out = match self.options.animations && toast_left < EASE {
+        let toast_out = match self.toast.is_some() && self.options.animations && toast_left < EASE {
             true => {
                 self.animating.set(true);
                 (1.0 - toast_left.as_secs_f64() / EASE.as_secs_f64()).powi(2)
@@ -7607,6 +7649,13 @@ impl ApplicationHandler<Event> for App {
                 self.menu = None;
                 self.request();
                 self.apply_video_view();
+                self.redraw();
+            }
+            // Coming back to the window, all of it is drawn afresh: a part
+            // that was covered may have been uncovered while a frame of
+            // this program's own asking was already due, and missed.
+            WindowEvent::Focused(true) | WindowEvent::CursorEntered { .. } | WindowEvent::Occluded(false) => {
+                self.presented.clear();
                 self.redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
