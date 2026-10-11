@@ -3532,7 +3532,10 @@ impl App {
             Some(live) => canvas.image_fast(live, x, y, w, h),
             None => canvas.fill(x, y, w, h, PLACEHOLDER_COLOR),
         }
-        canvas.round_outline(x - 1, y - 1, w + 2, h + 2, 2, 1, MENU_EDGE_COLOR);
+        // Rounded at the corners, as the pictures of the grid are.
+        let round = (unit / 2).max(4);
+        canvas.round_off(x, y, w, h, round, GRID_COLOR);
+        canvas.round_outline(x - 1, y - 1, w + 2, h + 2, round + 1, 1, MENU_EDGE_COLOR);
         // The symbol is what a press does, as on the seek bar.
         let side = unit * 5 / 4;
         let (button_x, button_y) = (x + w + unit, canvas.height - GridLayout::footer_height(window.1) / 2 - side / 2);
