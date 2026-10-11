@@ -135,8 +135,12 @@ const GRID_COLOR: u32 = 0x101010;
 pub enum Event {
     Loaded(Job),
     Converted { created: Vec<PathBuf>, failed: usize, format: Format },
-    Video(Signal),
+    /// A signal from one of the two players that take turns playing: the
+    /// number says which.
+    Video(u8, Signal),
     Player(Result<Player, String>),
+    /// The second of the two, which holds the next video ready.
+    Spare(Result<Player, String>),
     /// The same pair for the player that fetches seek-bar previews.
     Preview(Signal),
     PreviewPlayer(Result<Player, String>),
@@ -172,6 +176,14 @@ struct Moved {
     to: PathBuf,
 }
 
+/// The player that is not playing, and the video it has been given to
+/// hold ready: which file, and how many seconds in.
+struct Spare {
+    player: Player,
+    id: Option<usize>,
+    from: f64,
+}
+
 /// The video the player has been given, and whether it has produced a
 /// frame yet. Until then the still from the loader is shown.
 struct Video {
@@ -187,6 +199,9 @@ struct Video {
     /// last one that did land took.
     seek_asked: Option<Instant>,
     seek_took: Option<Duration>,
+    /// Whether it was taken over from the spare player, which may have had
+    /// its frame ready, and then says nothing more about it.
+    held: bool,
     /// When the user last took the video to its end, by seeking there or
     /// stepping forward a frame, or such a seek landed. A seek elsewhere
     /// takes it away.
@@ -736,6 +751,10 @@ pub struct App {
     player: Option<Player>,
     /// Set once the player has been asked for, so that happens only once.
     player_asked: bool,
+    /// Which of the two players that take turns `player` is, and the other
+    /// one, which holds the video that comes next ready to play.
+    active: u8,
+    spare: Option<Spare>,
     video: Option<Video>,
     /// A second, muted player that fetches the frames shown while the
     /// pointer is over the seek bar, the file it has open, and its picture.
@@ -1119,6 +1138,8 @@ impl App {
             help: false,
             snapshot: Snapshot::from_env(),
             player: None,
+            active: 0,
+            spare: None,
             player_asked: false,
             video: None,
             preview: None,
@@ -1396,6 +1417,7 @@ impl App {
                 player.stop();
             }
         }
+        self.preload_video();
     }
 
     /// Starts the player on another thread, once; `Event::Player` delivers
@@ -1410,13 +1432,16 @@ impl App {
         std::thread::spawn(move || {
             let wake = proxy.clone();
             let role = Role::Playback { silent };
-            let player = Player::new(role, move |signal| drop(wake.send_event(Event::Video(signal))));
+            let player = Player::new(role, move |signal| drop(wake.send_event(Event::Video(0, signal))));
             let playable = player.is_ok();
             let _ = proxy.send_event(Event::Player(player));
             if playable {
                 let wake = proxy.clone();
                 let preview = Player::new(Role::Preview, move |signal| drop(wake.send_event(Event::Preview(signal))));
                 let _ = proxy.send_event(Event::PreviewPlayer(preview));
+                let wake = proxy.clone();
+                let spare = Player::new(role, move |signal| drop(wake.send_event(Event::Video(1, signal))));
+                let _ = proxy.send_event(Event::Spare(spare));
             }
         });
     }
@@ -1559,22 +1584,86 @@ impl App {
         // A seek carried over from the file beside this one says where to
         // begin; otherwise it is where the video was left.
         let carried = self.enter_at.take();
-        let from = carried.or_else(|| match self.options.resume {
-            true => self.positions.get_or_insert_with(Positions::load).get(&self.files[id]),
-            false => None,
-        });
-        if let Some(player) = &self.player {
+        let from = carried.or_else(|| self.resume_from(id));
+        let mut held = false;
+        if let Some(player) = &mut self.player {
             let started = Instant::now();
-            player.play(&self.files[id], from);
+            // Seeking one that is held somewhere else takes longer than
+            // opening the file afresh, so only one held where this is to
+            // begin is taken.
+            let start = from.unwrap_or(0.0);
+            match self.spare.as_mut().filter(|spare| spare.id == Some(id) && (start - spare.from).abs() < 0.01) {
+                // The spare player has it open already, and takes over.
+                Some(spare) => {
+                    std::mem::swap(player, &mut spare.player);
+                    self.active ^= 1;
+                    let old = &spare.player;
+                    old.stop();
+                    spare.id = None;
+                    player.set("speed", &self.speed.to_string());
+                    player.set("mute", if self.muted { "yes" } else { "no" });
+                    if let Some(volume) = old.number("volume") {
+                        player.set("volume", &volume.to_string());
+                    }
+                    *self.video_view_sent.borrow_mut() = None;
+                    // What it said while waiting was said to no one.
+                    player.events();
+                    player.set("pause", "no");
+                    held = true;
+                }
+                None => player.play(&self.files[id], from),
+            }
             // Until the player reports for itself, this is where it is.
             // One counted from the end has to wait for the length.
             let seeking = from.filter(|seconds| *seconds >= 0.0).map(|seconds| (started, seconds));
-            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, to_end: None });
+            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, held, to_end: None });
             self.perf.video_lines = None;
             self.apply_video_view();
         }
         if let Some(seconds) = from.filter(|_| carried.is_none()) {
             self.toast(format!("Resumed at {}", clock(seconds)));
+        }
+        if held {
+            // It may have nothing more to say before its frame is shown.
+            self.video_signal(Signal::Events);
+        }
+    }
+
+    /// Where a video was left, when those places are being remembered.
+    fn resume_from(&mut self, id: usize) -> Option<f64> {
+        match self.options.resume {
+            true => self.positions.get_or_insert_with(Positions::load).get(&self.files[id]),
+            false => None,
+        }
+    }
+
+    /// Gives the spare player the video that comes after the file on view,
+    /// or before it when going backwards, to hold ready on its first frame.
+    /// Starting a video cold takes long enough to see; this way the one
+    /// most likely to be wanted next plays at once.
+    fn preload_video(&mut self) {
+        let len = self.list.len();
+        if self.spare.is_none() || len < 2 || self.grid.is_some() || self.overview.is_some() {
+            return;
+        }
+        let next = self.list[if self.forward { (self.pos + 1) % len } else { (self.pos + len - 1) % len }];
+        if !files::is_video(&self.files[next]) || next == self.id() {
+            return;
+        }
+        let from = self.resume_from(next);
+        let Some(spare) = self.spare.as_mut().filter(|spare| spare.id != Some(next)) else { return };
+        spare.player.hold(&self.files[next], from);
+        (spare.id, spare.from) = (Some(next), from.unwrap_or(0.0));
+    }
+
+    /// The spare player has only to be listened to: mpv signals again only
+    /// once its queue is empty, and stalls if a frame it has announced is
+    /// not taken.
+    fn spare_signal(&mut self, signal: Signal) {
+        let Some(spare) = &self.spare else { return };
+        match signal {
+            Signal::Events => drop(spare.player.events()),
+            Signal::Frame => drop(spare.player.render(&mut [0; 64], 8, 8)),
         }
     }
 
@@ -1597,8 +1686,13 @@ impl App {
         let Some(player) = &self.player else { return };
         // Read the events even when no video is wanted: mpv only signals
         // again once its queue has been emptied.
-        let events = if let Signal::Events = signal { player.events() } else { Vec::new() };
+        let mut events = if let Signal::Events = signal { player.events() } else { Vec::new() };
         let Some(video) = &mut self.video else { return };
+        // One held ready by the spare player announced its frame before it
+        // was this player, so that has to be looked for.
+        if video.held && !video.showing && player.holds(&self.files[video.id]) {
+            events.insert(0, PlayerEvent::Showing);
+        }
         let mut at_end = false;
         for event in events {
             if event == PlayerEvent::AtEnd {
@@ -6368,7 +6462,14 @@ impl ApplicationHandler<Event> for App {
             }
             Event::Loaded(_) => {}
             Event::Converted { created, failed, format } => self.converted(created, failed, format),
-            Event::Video(signal) => self.video_signal(signal),
+            Event::Video(which, signal) if which == self.active => self.video_signal(signal),
+            Event::Video(_, signal) => self.spare_signal(signal),
+            Event::Spare(spare) => {
+                self.spare = spare.ok().map(|player| Spare { player, id: None, from: 0.0 });
+                // As for the first: it may have queued events unheard.
+                self.spare_signal(Signal::Events);
+                self.preload_video();
+            }
             Event::Player(player) => self.player_ready(player, event_loop),
             Event::Preview(signal) => self.preview_signal(signal),
             // Without it the seek bar still works, just without pictures.

@@ -289,6 +289,28 @@ impl Player {
         self.set("pause", "no");
     }
 
+    /// Opens a file and stops on the frame it would start at, so that it
+    /// can be played at once when its turn comes. Does not wait for it.
+    pub fn hold(&self, path: &Path, from: Option<f64>) {
+        self.set("pause", "yes");
+        // Whatever view the last video was given is not this one's.
+        for (name, value) in [("vf", ""), ("video-zoom", "0"), ("video-pan-x", "0"), ("video-pan-y", "0")] {
+            self.set(name, value);
+        }
+        let start = from.map(|seconds| format!("start={seconds:.3}"));
+        let mut arguments: Vec<&[u8]> = vec![b"loadfile", path.as_os_str().as_bytes()];
+        if let Some(start) = &start {
+            arguments.extend([b"replace".as_slice(), start.as_bytes()]);
+        }
+        self.command_later(&arguments);
+    }
+
+    /// Whether the file has been opened and its frame is there to be shown.
+    pub fn holds(&self, path: &Path) -> bool {
+        let open = self.text("path").is_some_and(|open| open.as_bytes() == path.as_os_str().as_bytes());
+        open && self.flag("seeking") == Some(false) && self.flag("vo-configured") == Some(true)
+    }
+
     pub fn stop(&self) {
         self.command(&[b"stop"]);
     }
