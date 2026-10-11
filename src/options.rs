@@ -65,6 +65,9 @@ Slideshow and actions:
       --no-resume            start videos from the beginning, and do not
                              remember where they were left (--resume undoes it)
 
+      --no-seen              do not remember which videos have been watched, or
+                             mark the rest as new (config: seen = false)
+
 Subtitles:
       --no-subtitles         start with subtitles hidden (j shows them)
       --subtitle-font NAME   an installed font, such as Inter (the default)
@@ -118,7 +121,7 @@ Keys:
                              Show only the matches, or Show all once a search
                              has been kept (Esc later, too).
                              ^foo starts with, !foo without; also is:video
-                             is:image is:gif is:marked, and sizes such as
+                             is:image is:gif is:marked is:seen is:new, and sizes such as
                              >10mb or <1gb (b, kb, mb, gb)
   Ctrl+arrows, Alt+arrows    scroll, by a page   Z  small images: fit screen / actual size
   s                          sort: name, newest, size, shuffle, reverse
@@ -195,6 +198,8 @@ pub struct Options {
     pub on_last_slide: LastSlide,
     /// Whether the next file comes up when a video ends.
     pub autoplay: bool,
+    /// Whether the videos watched are remembered and the rest marked new.
+    pub seen: bool,
     /// Whether a video's subtitles are shown, and how they are drawn.
     pub subtitles: bool,
     pub subtitle_font: String,
@@ -406,7 +411,7 @@ fn is_switch(name: &str) -> bool {
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
-        "debug", "verbose", "watch", "resume", "no-resume", "subtitles", "no-subtitles",
+        "debug", "verbose", "watch", "resume", "no-resume", "subtitles", "no-subtitles", "seen", "no-seen",
     ];
     switches.contains(&name)
 }
@@ -437,6 +442,7 @@ fn parse_with(
         slideshow_delay: None,
         on_last_slide: LastSlide::Resume,
         autoplay: true,
+        seen: true,
         subtitles: true,
         subtitle_font: "Inter".to_string(),
         subtitle_size: 100,
@@ -587,6 +593,8 @@ fn apply(
         "cycle-once" => options.on_last_slide = LastSlide::Quit,
         "autoplay" => options.autoplay = true,
         "no-autoplay" => options.autoplay = false,
+        "seen" => options.seen = true,
+        "no-seen" => options.seen = false,
         "subtitles" => options.subtitles = true,
         "no-subtitles" => options.subtitles = false,
         "subtitle-font" => options.subtitle_font = value()?,
@@ -685,6 +693,7 @@ fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>
             toml::Value::Boolean(false) => match key.as_str() {
                 "auto-zoom" => ("no-auto-zoom", None),
                 "autoplay" => ("no-autoplay", None),
+                "seen" => ("no-seen", None),
                 "subtitles" => ("no-subtitles", None),
                 "grid-titles" => ("no-grid-titles", None),
                 "fullscreen" => ("windowed", None),

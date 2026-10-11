@@ -26,6 +26,7 @@ use crate::mpv::{Player, PlayerEvent, Role, Signal};
 use crate::ops;
 use crate::options::{LastSlide, Options, Start, SubtitleStyle};
 use crate::positions::Positions;
+use crate::seen::Seen;
 use crate::render;
 use crate::rng::Rng;
 use crate::search::{Facts, Query};
@@ -81,6 +82,8 @@ const VIDEO_END: f64 = 0.25;
 /// How far back past its start, in seconds, a seek has to aim to leave a
 /// video for the file before it.
 const VIDEO_START: f64 = 0.5;
+/// How long a video has to have been playing to count as watched.
+const SEEN_AFTER: Duration = Duration::from_secs(5);
 /// The usual size of subtitles and how far off the bottom edge they sit,
 /// in pixels of a picture 720 high.
 const SUBTITLE_SIZE: f64 = 44.0;
@@ -219,6 +222,9 @@ struct Video {
     held: bool,
     /// How many subtitle and audio tracks it has, once it is showing.
     tracks: (usize, usize),
+    /// When it first showed, and whether it has been counted as watched.
+    shown_at: Option<Instant>,
+    watched: bool,
     /// When the user last took the video to its end, by seeking there or
     /// stepping forward a frame, or such a seek landed. A seek elsewhere
     /// takes it away.
@@ -610,6 +616,8 @@ struct Space {
 /// How the list stood when a search was kept: the file on view and the
 /// one under the grid's cursor, and the order every file was in.
 struct FilterFrom {
+    /// The search this one was made in, if it was made in one.
+    typed: Option<String>,
     viewed: usize,
     focus: usize,
     order: Vec<usize>,
@@ -624,8 +632,9 @@ struct Kept {
     pos: usize,
     cursor: usize,
     filter: Option<(String, Vec<usize>)>,
-    /// Where things stood when the search was kept, to go back to.
-    filter_from: Option<FilterFrom>,
+    /// Where things stood when each search now in force was kept, the
+    /// first of them first, to go back to.
+    filter_from: Vec<FilterFrom>,
     sort: Option<Sort>,
     reversed: bool,
     shuffled: bool,
@@ -688,8 +697,9 @@ pub struct App {
     /// A search that was kept: what was typed and every file, in order.
     /// `list` then holds only the matches.
     filter: Option<(String, Vec<usize>)>,
-    /// Where things stood when the search was kept, to go back to.
-    filter_from: Option<FilterFrom>,
+    /// Where things stood when each search now in force was kept, the
+    /// first of them first, to go back to.
+    filter_from: Vec<FilterFrom>,
     /// The order the list was last put in, unless shuffled since, and
     /// whether it runs backwards.
     sort: Option<Sort>,
@@ -745,6 +755,10 @@ pub struct App {
     sizes: HashMap<usize, Option<u64>>,
     /// Where videos were left, read the first time one is played.
     positions: Option<Positions>,
+    /// The videos watched, read when first asked about, and what has been
+    /// found out about the files here so far.
+    seen: RefCell<Option<Seen>>,
+    seen_known: RefCell<HashMap<usize, bool>>,
     confirm: Option<Confirm>,
     proxy: EventLoopProxy<Event>,
     /// File ids in viewing order. Removing an image drops it from here.
@@ -1132,7 +1146,7 @@ impl App {
             palette: None,
             run_next: None,
             filter: None,
-            filter_from: None,
+            filter_from: Vec::new(),
             sort: options.listing.sort.filter(|_| !options.listing.randomize),
             reversed: options.listing.reverse,
             shuffled: options.listing.randomize,
@@ -1160,6 +1174,8 @@ impl App {
             watch: None,
             sizes: HashMap::new(),
             positions: None,
+            seen: RefCell::new(None),
+            seen_known: RefCell::new(HashMap::new()),
             confirm: None,
             proxy,
             list: (0..files.len()).collect(),
@@ -1681,7 +1697,7 @@ impl App {
             // Until the player reports for itself, this is where it is.
             // One counted from the end has to wait for the length.
             let seeking = from.filter(|seconds| *seconds >= 0.0).map(|seconds| (started, seconds));
-            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, held, tracks: (0, 0), to_end: None });
+            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, held, tracks: (0, 0), shown_at: None, watched: false, to_end: None });
             self.perf.video_lines = None;
             self.apply_video_view();
         }
@@ -1771,6 +1787,7 @@ impl App {
             if showing && !video.showing {
                 let took = video.started.elapsed();
                 video.start_took.get_or_insert(took);
+                video.shown_at.get_or_insert_with(Instant::now);
                 video.tracks = (tracks_of(player, "sub").len(), tracks_of(player, "audio").len());
                 if self.options.debug {
                     eprintln!("jog: {took:>7.1?} video start {}", self.files[video.id].display());
@@ -1807,8 +1824,17 @@ impl App {
         // the event may be left over from the file before this one. A seek
         // to short of the end is not that: what plays out after it goes on.
         let by_hand = video.to_end.is_some_and(|at| video.seek_asked.is_some() || at.elapsed() < SEEK_SETTLE);
-        if video.showing {
+        // Watched: it has played for a while, or right through. A seek on
+        // past the first few seconds counts as well, and is seen to there.
+        let over = at_end && player.flag("eof-reached") == Some(true);
+        let watched = !video.watched && (over || video.shown_at.is_some_and(|at| at.elapsed() >= SEEN_AFTER));
+        video.watched |= watched;
+        let (id, showing) = (video.id, video.showing);
+        if showing {
             self.redraw();
+        }
+        if watched {
+            self.mark_seen(id);
         }
         if at_end && !by_hand && player.flag("eof-reached") == Some(true) {
             self.play_next();
@@ -1862,6 +1888,24 @@ impl App {
             Looping::File => format!("{once}  Looping this video"),
             Looping::List => format!("{repeat}  Looping the whole list"),
         });
+    }
+
+    /// Whether a video has been watched, as far as is remembered.
+    fn watched(&self, id: usize) -> bool {
+        *self.seen_known.borrow_mut().entry(id).or_insert_with(|| self.seen.borrow_mut().get_or_insert_with(Seen::load).has(&self.files[id]))
+    }
+
+    /// Whether to mark a file as one not watched yet: a video that is not
+    /// remembered as watched, where that is being kept track of.
+    fn is_new(&self, id: usize) -> bool {
+        self.options.seen && files::is_video(&self.files[id]) && !self.watched(id)
+    }
+
+    /// Remembers a video as watched.
+    fn mark_seen(&self, id: usize) {
+        if self.options.seen && self.seen_known.borrow_mut().insert(id, true) != Some(true) {
+            self.seen.borrow_mut().get_or_insert_with(Seen::load).add(&self.files[id]);
+        }
     }
 
     /// The two players that take turns, where they exist.
@@ -2114,6 +2158,11 @@ impl App {
             match paused {
                 true => self.toast(format!("{}  Paused", commands::icons::PAUSE)),
                 false => self.toast = None,
+            }
+        }
+        if matches!(action, VideoAction::Seek(_)) && self.video_time().is_some_and(|(position, _)| position >= SEEN_AFTER.as_secs_f64()) {
+            if let Some(id) = self.video.as_ref().map(|video| video.id) {
+                self.mark_seen(id);
             }
         }
         // The file a seek may be about to run into is held ready: the one
@@ -3105,6 +3154,22 @@ impl App {
         if matches.is_empty() {
             return;
         }
+        // What is on view now is what leaving this search goes back to:
+        // every file, or the matches of the search this one was made in.
+        let within = self.filter.as_ref().map(|(typed, _)| typed.clone());
+        if within.as_deref() != Some(typed.as_str()) {
+            let (viewed, focus) = (self.id(), self.list[self.focus()]);
+            let order = self.everything();
+            self.filter_from.push(FilterFrom { typed: within, viewed, focus, order, sort: self.sort, reversed: self.reversed, shuffled: self.shuffled });
+        }
+        let total = self.total();
+        self.narrow(typed, matches, picked);
+        self.toast(format!("Showing {} of {total} (Esc goes {})", self.list.len(), self.back_label()));
+    }
+
+    /// Puts only `matches` in the list, in the order the list had them,
+    /// and goes to `picked` among them.
+    fn narrow(&mut self, typed: String, matches: Vec<usize>, picked: Option<usize>) {
         let everything = self.everything();
         let wanted: HashSet<usize> = matches.into_iter().collect();
         let list: Vec<usize> = everything.iter().copied().filter(|id| wanted.contains(id)).collect();
@@ -3115,18 +3180,25 @@ impl App {
                 eprintln!("jog:     [{}] {}", pos + 1, self.files[*id].display());
             }
         }
-        // A search within a search goes back to where the first began.
-        if self.filter.is_none() {
-            let (viewed, focus) = (self.id(), self.list[self.focus()]);
-            let order = everything.clone();
-            self.filter_from = Some(FilterFrom { viewed, focus, order, sort: self.sort, reversed: self.reversed, shuffled: self.shuffled });
-        }
-        let back = self.filter_origin().map_or(String::new(), |at| format!(" to {at}"));
-        self.toast(format!("Showing {} of {} (Esc goes back{back})", list.len(), everything.len()));
         self.filter = Some((typed, everything));
         self.set_list(list, at, at);
         self.sync_video();
         self.redraw();
+    }
+
+    /// Where leaving the search on view goes back to, in a few words: the
+    /// search it was made in, by what was typed for that, or else the file
+    /// that was on view, by the start of its name.
+    fn back_label(&self) -> String {
+        let short = |text: &str| match text.chars().count() {
+            0..=18 => text.to_string(),
+            _ => format!("{}…", text.chars().take(16).collect::<String>().trim_end()),
+        };
+        match self.filter_from.last() {
+            Some(FilterFrom { typed: Some(typed), .. }) => format!("back to \"{}\"", short(typed)),
+            Some(from) => format!("back to {}", short(&self.name_of(if self.grid.is_some() { from.focus } else { from.viewed }))),
+            None => "back".to_string(),
+        }
     }
 
     /// Puts a different set of files in the list, with the one at `viewed`
@@ -3143,14 +3215,21 @@ impl App {
         self.refresh();
     }
 
-    /// Shows every file again after a search was kept, in the order they
-    /// had before it and whatever has been done to the matches since. It
-    /// goes back to the file that was on view then, to carry on from
-    /// there, unless it is to stay on the one on view now.
+    /// Leaves the search on view for what it was made in: every file, or
+    /// the matches of another search. The files are in the order they had
+    /// then, whatever has been done to the matches since, and the one that
+    /// was on view then is on view again, to carry on from there. With
+    /// `stay` it instead shows every file and stays on the one on view now.
     fn clear_filter(&mut self, stay: bool) {
         let Some((_, mut all)) = self.filter.take() else { return };
         let (mut viewed, mut focus) = (self.id(), self.list[self.focus()]);
-        if let Some(from) = self.filter_from.take() {
+        // Staying drops every search there is, back to how it all began.
+        let from = match stay {
+            true => self.filter_from.drain(..).next(),
+            false => self.filter_from.pop(),
+        };
+        let mut within = None;
+        if let Some(from) = from {
             // Files that have turned up since go after the rest.
             let place: HashMap<usize, usize> = from.order.iter().enumerate().map(|(place, id)| (*id, place)).collect();
             all.sort_by_key(|id| place.get(id).copied().unwrap_or(usize::MAX));
@@ -3158,23 +3237,27 @@ impl App {
             // It may have been deleted or moved away in the meantime.
             if !stay && all.contains(&from.viewed) {
                 (viewed, focus) = (from.viewed, if all.contains(&from.focus) { from.focus } else { from.viewed });
+                within = from.typed;
             }
         }
         let at = |id: usize| all.iter().position(|&other| other == id).unwrap_or(0);
         let (viewed, focus) = (at(viewed), at(focus));
         self.set_list(all, viewed, focus);
         self.sync_video();
+        // Back in the search this one was made in, at the same file.
+        if let Some(typed) = within {
+            let picked = self.list[self.focus()];
+            let (matches, narrowed) = self.matching(&typed);
+            if narrowed && matches.contains(&picked) {
+                self.narrow(typed.clone(), matches, Some(picked));
+                return self.toast(format!("Back to \"{typed}\", at {} of {}", self.focus() + 1, self.list.len()));
+            }
+            self.filter_from.clear();
+        }
         if self.options.verbose {
             eprintln!("jog: search cleared: all {} files, at {}", self.list.len(), self.pos + 1);
         }
         self.toast(format!("Showing all files, at {} of {}", self.focus() + 1, self.list.len()));
-    }
-
-    /// Where among all the files leaving a kept search goes back to,
-    /// counted from one.
-    fn filter_origin(&self) -> Option<usize> {
-        let from = self.filter_from.as_ref()?;
-        Some(from.order.iter().position(|id| *id == if self.grid.is_some() { from.focus } else { from.viewed })? + 1)
     }
 
     fn finish_rename(&mut self) {
@@ -3565,7 +3648,7 @@ impl App {
                 if start == Start::Random {
                     self.rng.shuffle(&mut list);
                 }
-                Kept { list, pos: 0, cursor: 0, filter: None, filter_from: None, sort: sort.filter(|_| start != Start::Random), reversed, shuffled: start == Start::Random }
+                Kept { list, pos: 0, cursor: 0, filter: None, filter_from: Vec::new(), sort: sort.filter(|_| start != Start::Random), reversed, shuffled: start == Start::Random }
             }
         };
         let leaving = Kept {
@@ -3573,7 +3656,7 @@ impl App {
             list: std::mem::take(&mut self.list),
             pos: self.pos,
             filter: self.filter.take(),
-            filter_from: self.filter_from.take(),
+            filter_from: std::mem::take(&mut self.filter_from),
             sort: self.sort,
             reversed: self.reversed,
             shuffled: self.shuffled,
@@ -3631,7 +3714,7 @@ impl App {
     /// a row to save it as one.
     fn spaces_matching(&mut self, typed: &str) -> Vec<(String, &'static str, Command)> {
         let query = Query::parse(typed);
-        let wanted = |name: &str, loose: bool| query.is_empty() || query.score(&Facts { name, video: false, marked: false, size: None }, loose).is_some();
+        let wanted = |name: &str, loose: bool| query.is_empty() || query.score(&Facts { name, video: false, marked: false, seen: None, size: None }, loose).is_some();
         let row = |(at, space): (usize, &Space)| {
             let folder = space.paths.first().map(|path| short_dir(path)).unwrap_or_default();
             let unsaved = if space.saved { "" } else { "   (not saved)" };
@@ -4138,7 +4221,7 @@ impl App {
         if query.is_empty() {
             return all;
         }
-        let score = |name: &str, loose: bool| query.score(&Facts { name, video: false, marked: false, size: None }, loose);
+        let score = |name: &str, loose: bool| query.score(&Facts { name, video: false, marked: false, seen: None, size: None }, loose);
         let pass = |loose: bool| -> Vec<(i32, (String, &'static str, Command))> {
             all.iter().filter_map(|entry| Some((score(&entry.0, loose)?, entry.clone()))).collect()
         };
@@ -4189,9 +4272,9 @@ impl App {
             buttons.push((PaletteEnd::Keep, format!("Show only {}", palette.matches.len())));
         }
         if let Some((_, all)) = &self.filter {
-            let back = self.filter_origin().map_or(String::new(), |at| format!(", back at {at}"));
-            buttons.push((PaletteEnd::All, format!("Show all {}{back}", all.len())));
-            buttons.push((PaletteEnd::Here, "Show all, stay here".to_string()));
+            let back = self.back_label();
+            buttons.push((PaletteEnd::All, format!("{}{}", back[..1].to_uppercase(), &back[1..])));
+            buttons.push((PaletteEnd::Here, format!("Show all {}, stay here", all.len())));
         }
         buttons
     }
@@ -4440,7 +4523,8 @@ impl App {
             true => *self.sizes.entry(id).or_insert_with(|| std::fs::metadata(path).ok().map(|meta| meta.len())),
             false => None,
         };
-        query.score(&Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), size }, loose)
+        let seen = (query.wants_seen() && files::is_video(path)).then(|| self.watched(id));
+        query.score(&Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), seen, size }, loose)
     }
 
     fn sort_by(&mut self, sort: Sort) {
@@ -5258,6 +5342,10 @@ impl App {
         }
         if viewing && self.show_info {
             let mut line = vec![(self.name(), TEXT_COLOR), (format!("   {} / {}", self.pos + 1, self.list.len()), soft)];
+            // A video not watched yet says so, until it has been.
+            if self.is_new(self.id()) {
+                line.push(("   new".to_string(), accent_soft()));
+            }
             // Which workspace this is, when there are several to be in.
             if self.spaces.len() > 1 {
                 line.insert(0, (format!("@{}   ", self.spaces[self.space].name), soft));
@@ -5639,6 +5727,12 @@ impl App {
             let area = self.grid_area(&layout, pos, canvas.height as u32);
             let size = self.loader.thumb(id).map(|thumb| (thumb.width, thumb.height));
             let [x, y, w, h] = size.map_or(area, |size| Self::grid_picture(area, size, false));
+            // A dot in the corner of a video not watched yet.
+            if self.is_new(id) {
+                let (dot, inset) = ((px as i32 * 2 / 3).max(6), (px as i32 / 2).max(4));
+                canvas.round_fill(x + inset - 2, y + inset - 2, dot + 4, dot + 4, dot / 2 + 2, 0x000000, 150);
+                canvas.round_fill(x + inset, y + inset, dot, dot, dot / 2, accent_soft(), 256);
+            }
             self.want_duration(id);
             if let Some(length) = self.durations.get(&id).copied().flatten().map(clock) {
                 let pad = px as i32 / 3;
@@ -6014,6 +6108,15 @@ impl App {
                 continue;
             }
             let id = self.list[pos as usize];
+            // A dot in the corner of a video not watched yet.
+            if self.is_new(id) {
+                let (dot, inset) = ((small as i32 / 2).max(5), (small as i32 / 3).max(3));
+                let left = self.strip_left(strip, pos as usize, canvas.width) + (strip.cell_w - self.loader.thumb(id).map_or(strip.cell_w, |thumb| {
+                    fit_size((thumb.width, thumb.height), (strip.cell_w as u32, strip.cell_h as u32), false).0 as i32
+                })) / 2;
+                canvas.round_fill(left + inset - 1, top + inset - 1, dot + 2, dot + 2, dot / 2 + 1, 0x000000, 150);
+                canvas.round_fill(left + inset, top + inset, dot, dot, dot / 2, accent_soft(), 256);
+            }
             self.want_duration(id);
             let Some(length) = self.durations.get(&id).copied().flatten().map(clock) else { continue };
             // The corner of the picture, which may be narrower than its cell.
@@ -6285,6 +6388,11 @@ impl App {
             let length = self.durations.get(&id).copied().flatten().map(clock).unwrap_or_default();
             let length_width = if length.is_empty() { 0 } else { text.width(&length, px) + pad };
             text.draw(canvas, panel.width - star_room - length_width, line, px, dim, &length);
+            // A dot at the left edge for a video not watched yet.
+            if self.is_new(id) {
+                let dot = (px as i32 / 3).max(4);
+                canvas.round_fill(pad * 5 / 4 - dot / 2, top + (panel.row_height - dot) / 2, dot, dot, dot / 2, if current { main } else { accent_soft() }, 256);
+            }
             // Its number in the list, set against the right of a column
             // wide enough for the largest, and then its name.
             let number = (pos + 1).to_string();
@@ -6861,7 +6969,7 @@ impl ApplicationHandler<Event> for App {
                 let list = self.ids_for(found);
                 if which != self.space && self.spaces[which].kept.is_none() && !list.is_empty() {
                     let sort = self.spaces[which].sort;
-                    self.spaces[which].kept = Some(Kept { list, pos: 0, cursor: 0, filter: None, filter_from: None, sort, reversed: false, shuffled: false });
+                    self.spaces[which].kept = Some(Kept { list, pos: 0, cursor: 0, filter: None, filter_from: Vec::new(), sort, reversed: false, shuffled: false });
                 }
                 self.request();
                 self.redraw();

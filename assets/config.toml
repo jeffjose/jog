@@ -109,6 +109,10 @@
 # autoplay = true
 #   false   stay on a video when it ends, rather than go on to the next
 
+# seen = true
+#   false   do not remember which videos have been watched, or mark the
+#           rest with a dot as new
+
 # resume = true
 #   false   start videos from the beginning, and do not remember where
 #           they were left

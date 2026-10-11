@@ -21,7 +21,7 @@ pub struct Positions {
 }
 
 /// `$JOG_STATE`, or `jog` under `$XDG_STATE_HOME` or `~/.local/state`.
-fn state_dir() -> Option<PathBuf> {
+pub fn state_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("JOG_STATE") {
         return Some(dir.into());
     }
@@ -47,7 +47,7 @@ fn render(entries: &[Entry]) -> String {
 }
 
 /// A file's identity for this purpose: its absolute path and its size.
-fn identify(file: &Path) -> Option<(PathBuf, u64)> {
+pub fn identify(file: &Path) -> Option<(PathBuf, u64)> {
     Some((std::path::absolute(file).ok()?, std::fs::metadata(file).ok()?.len()))
 }
 

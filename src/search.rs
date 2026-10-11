@@ -24,6 +24,9 @@ enum Kind {
     Image,
     Gif,
     Marked,
+    /// A video that has, or has not yet, been watched.
+    Seen,
+    Unseen,
 }
 
 /// What a query is matched against.
@@ -31,6 +34,9 @@ pub struct Facts<'a> {
     pub name: &'a str,
     pub video: bool,
     pub marked: bool,
+    /// Whether it has been watched; only looked up when `Query::wants_seen`
+    /// says so, and never so for a picture.
+    pub seen: Option<bool>,
     /// Size in bytes; only looked up when `Query::wants_size` says so.
     pub size: Option<u64>,
 }
@@ -65,6 +71,8 @@ impl Query {
                         "image" => Kind::Image,
                         "gif" => Kind::Gif,
                         "marked" => Kind::Marked,
+                        "seen" => Kind::Seen,
+                        "unseen" | "new" => Kind::Unseen,
                         _ => return None,
                     }));
                 }
@@ -92,6 +100,10 @@ impl Query {
     }
 
     /// Whether any term compares sizes, which means looking each file up.
+    pub fn wants_seen(&self) -> bool {
+        self.terms.iter().any(|term| matches!(term, Term::Is(Kind::Seen | Kind::Unseen)))
+    }
+
     pub fn wants_size(&self) -> bool {
         self.terms.iter().any(|term| matches!(term, Term::Size { .. }))
     }
@@ -112,6 +124,8 @@ impl Query {
                         Kind::Image => !file.video,
                         Kind::Gif => name.ends_with(".gif"),
                         Kind::Marked => file.marked,
+                        Kind::Seen => file.seen == Some(true),
+                        Kind::Unseen => file.seen == Some(false),
                     };
                     is.then_some(0)?
                 }
@@ -166,7 +180,7 @@ mod tests {
 
     fn matches<'a>(query: &str, names: &[&'a str]) -> Vec<&'a str> {
         let query = Query::parse(query);
-        let facts = |name: &'a str| Facts { name, video: name.ends_with(".mp4"), marked: name == "bark.jpg", size: Some(name.len() as u64 * 1024) };
+        let facts = |name: &'a str| Facts { name, video: name.ends_with(".mp4"), marked: name == "bark.jpg", seen: None, size: Some(name.len() as u64 * 1024) };
         // As the search box does: scattered letters only when nothing has
         // them together.
         let pass = |loose: bool| -> Vec<(i32, &'a str)> {

@@ -14,6 +14,7 @@ mod positions;
 mod render;
 mod rng;
 mod search;
+mod seen;
 mod story;
 mod trailer;
 mod ui;
