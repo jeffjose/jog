@@ -84,7 +84,9 @@ Workspaces are folders with names, set in the config file:
   jog @pictures starts in one. Ctrl+1 to Ctrl+9 go to them in the order
   they are written, Ctrl+Tab to the next, and @ in the find box lists
   them; there too a folder opened by its path can be saved as one. Each
-  keeps its place, its marks and its order while jog runs. In the box for
+  is listed again when it is gone to, and begun at its first file, so
+  that it shows what is there now; fresh = false in its entry has it
+  pick up where it was left instead. Marks are kept. In the box for
   a folder to copy or move into, @pictures means that workspace.
 
   -h, --help                 show this help
@@ -208,7 +210,7 @@ fn parse_workspaces(value: &toml::Value) -> Result<Vec<Workspace>, String> {
     let table = value.as_table().ok_or("workspaces: expected a table of names and folders")?;
     let mut workspaces = Vec::new();
     for (name, entry) in table {
-        let plain = |path: &str| Workspace { name: name.clone(), path: expand_home(path), recursive: None, sort: None, reverse: false, fresh: false };
+        let plain = |path: &str| Workspace { name: name.clone(), path: expand_home(path), recursive: None, sort: None, reverse: false, fresh: true };
         let workspace = match entry {
             toml::Value::String(path) => plain(path),
             toml::Value::Table(details) => {
@@ -216,7 +218,7 @@ fn parse_workspaces(value: &toml::Value) -> Result<Vec<Workspace>, String> {
                 let mut workspace = plain(path.ok_or_else(|| format!("workspace {name}: needs a path"))?);
                 workspace.recursive = details.get("recursive").and_then(toml::Value::as_bool);
                 workspace.reverse = details.get("reverse").and_then(toml::Value::as_bool).unwrap_or(false);
-                workspace.fresh = details.get("fresh").and_then(toml::Value::as_bool).unwrap_or(false);
+                workspace.fresh = details.get("fresh").and_then(toml::Value::as_bool).unwrap_or(true);
                 if let Some(order) = details.get("sort").and_then(toml::Value::as_str) {
                     workspace.sort = Some(parse_sort(order)?);
                 }
@@ -629,8 +631,10 @@ const STARTER_CONFIG: &str = r##"# jog: settings.
 #   sort = "mtime"     newest first (or name, filename, dirname, size)
 #   reverse = true     that order backwards: with mtime, oldest first
 #   recursive = true   look in the folders inside it too
-#   fresh = true       list it again each time it is gone to, and start
-#                      at its first file: with sort = "mtime", the newest
+#   fresh = false      pick up where it was left, each time it is gone
+#                      to. Left out, a workspace is listed again every
+#                      time and begun at its first file: with
+#                      sort = "mtime", the newest
 "##;
 
 /// Applies a config file. Its keys are the long option names: switches take
