@@ -136,6 +136,8 @@ Keys:
   f fullscreen  t filmstrip  i info  e EXIF  a actions  o pointer
   v held                     a loupe under the pointer: the wheel makes it stronger
   p                          file list down the side; click a name to go to it
+                             with it up, / or its magnifying glass searches
+                             in it: the list narrows as you type
   D                          delete (asks first; marked images, or the current one)
   g                          grid view           ?             list of shortcuts
                              in the grid: Ctrl with + or - for larger or smaller

@@ -124,6 +124,8 @@ pub enum Command {
     Restart,
     Search,
     ClearFilter,
+    /// Type a search into the heading of the file list.
+    ListSearch,
     /// Drop a kept search without going back to where it was begun.
     ShowAllHere,
     /// The go-to box: type part of a name, pick a match, go to it.
@@ -398,6 +400,7 @@ pub fn command_icon(command: Command) -> &'static str {
         WorkspaceList | Overview | Workspace(_) | WorkspaceKey(_) | NextWorkspace | PrevWorkspace | HomeWorkspace => FOLDERS,
         SaveWorkspace => FOLDER_PLUS,
         ClearFilter | ShowAllHere => LIST_X,
+        ListSearch => SEARCH,
         ClearMarks => STAR_OFF,
         Shuffle => SHUFFLE,
         PlayPause => PLAY,

@@ -982,6 +982,8 @@ pub struct App {
     precise: bool,
     /// Whether the strip of scenes is up, the scenes of the videos looked
     /// at so far, and the thread that finds them.
+    /// The search being typed into the heading of the file list.
+    list_search: Option<TextField>,
     scenes_on: bool,
     /// The scene the pointer is on.
     scene_over: Option<usize>,
@@ -1399,6 +1401,7 @@ impl App {
             hold: None,
             loupe: None,
             precise: options.precise_seeking,
+            list_search: None,
             scenes_on: false,
             scene_over: None,
             scenes: HashMap::new(),
@@ -2798,7 +2801,11 @@ impl App {
                 self.request();
             }
             ToggleWatch => self.set_watch(self.watch.is_none()),
-            ToggleList => self.show_list = !self.show_list,
+            ToggleList => {
+                self.show_list = !self.show_list;
+                self.list_search = None;
+            }
+            ListSearch => self.focus_list_search(),
             OpenFromGrid => self.open_from_grid(),
             GridLarger => self.zoom_grid(true),
             GridSmaller => self.zoom_grid(false),
@@ -3353,6 +3360,75 @@ impl App {
             key => drop(prompt.field.key(key, self.modifiers)),
         }
         self.redraw();
+    }
+
+    // ---- Searching in the file list ------------------------------------
+
+    /// Whether the heading of the file list is a box to type a search in:
+    /// while one is being typed, and while the list is narrowed to one.
+    fn list_searching(&self) -> bool {
+        self.list_search.is_some() || self.filter.is_some()
+    }
+
+    /// Where that box is: across the heading, up to the buttons at its right.
+    fn list_field(&self) -> Option<[i32; 4]> {
+        let panel = self.list_panel().filter(|_| self.list_searching())?;
+        let px = panel.px as i32;
+        let side = px * 3 / 2;
+        let right = panel.width - 2 * side - px / 2 - px / 3;
+        Some([px / 2, px / 2, right - px / 2 - px / 3, side])
+    }
+
+    /// Puts the keyboard in the file list's search box, with whatever the
+    /// list is narrowed to already there to go on from.
+    fn focus_list_search(&mut self) {
+        let typed: Vec<char> = self.filter.as_ref().map(|(typed, _)| typed.chars().collect()).unwrap_or_default();
+        let end = typed.len();
+        self.list_search = Some(TextField::new(typed, end));
+        self.redraw();
+    }
+
+    fn list_search_key(&mut self, key: Key<&str>) {
+        let modifiers = self.modifiers;
+        let Some(field) = &mut self.list_search else { return };
+        match key {
+            // The list stays as it has been narrowed; Escape again widens it.
+            Key::Named(NamedKey::Escape | NamedKey::Enter) => self.list_search = None,
+            key => {
+                let before = field.string();
+                field.key(key, modifiers);
+                let typed = field.string();
+                if typed != before {
+                    self.filter_list(&typed);
+                }
+            }
+        }
+        self.redraw();
+    }
+
+    /// Narrows the file list to what `typed` finds, as it is typed. The
+    /// file on view stays on view and in the list whether it is among them
+    /// or not: what is playing is not cut off by a search. With nothing
+    /// typed every file is back.
+    fn filter_list(&mut self, typed: &str) {
+        let typed = typed.trim();
+        if typed.is_empty() {
+            return self.clear_filter(true);
+        }
+        let current = self.id();
+        let (mut matches, narrowed) = self.matching(typed);
+        if !narrowed {
+            return;
+        }
+        if !matches.contains(&current) {
+            matches.push(current);
+        }
+        // Where leaving the search goes back to is where it was begun.
+        if self.filter.is_none() {
+            let (focus, order) = (self.list[self.focus()], self.everything());
+            self.filter_from.push(FilterFrom { typed: None, viewed: current, focus, order, sort: self.sort, reversed: self.reversed, shuffled: self.shuffled });
+        }
+        self.narrow(typed.to_string(), matches, Some(current));
     }
 
     // ---- A video playing on in the grid --------------------------------
@@ -5296,6 +5372,14 @@ impl App {
         if self.menu.is_some() {
             return self.menu_key(key, event_loop);
         }
+        // What is typed goes into the file list's search while that has
+        // the keyboard, and with the list up `/` is what gives it to it.
+        if self.list_search.is_some() && self.grid.is_none() {
+            return self.list_search_key(key);
+        }
+        if matches!(key, Key::Character("/")) && self.modifiers.is_empty() && self.list_panel().is_some() {
+            return self.focus_list_search();
+        }
         if self.grid.is_some() {
             return self.grid_key(key, event_loop);
         }
@@ -5619,7 +5703,15 @@ impl App {
                 let strip = Strip::for_height(height);
                 let panel = self.list_panel().filter(|panel| (x as i32) < panel.width && (y as i32) < panel.bottom);
                 let inside = |b: &Button| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32));
-                if let Some(command) = self.list_buttons().iter().find(|button| inside(button)).map(|button| button.command) {
+                // A click in the search box of the file list puts the
+                // keyboard there, and one anywhere else takes it away.
+                let in_field = self.list_field().is_some_and(|[fx, fy, w, h]| (fx..fx + w).contains(&(x as i32)) && (fy..fy + h).contains(&(y as i32)));
+                if !in_field {
+                    self.list_search = None;
+                }
+                if in_field {
+                    self.focus_list_search();
+                } else if let Some(command) = self.list_buttons().iter().find(|button| inside(button)).map(|button| button.command) {
                     // One of the buttons at the head of the file list.
                     self.execute(command, event_loop);
                 } else if let Some(pos) = self.list_star_at(x, y) {
@@ -7241,6 +7333,10 @@ impl App {
         // The cross, at the right of the heading.
         let side = px * 3 / 2;
         let mut buttons = vec![Button { x: panel.width - side - px / 2, y: px / 2, width: side, height: side, command: Command::ToggleList }];
+        // Beside it, the search: a button that opens the box to type in,
+        // or, with the list narrowed, the one that widens it again.
+        let beside = if self.list_searching() { Command::ShowAllHere } else { Command::ListSearch };
+        buttons.push(Button { x: panel.width - 2 * side - px / 2 - px / 3, y: px / 2, width: side, height: side, command: beside });
         // The orders, sharing the width of the row under the heading.
         let orders = [Command::SortBy(Sort::Name), Command::SortBy(Sort::Newest), Command::SortBy(Sort::Smallest), Command::Shuffle, Command::ReverseOrder];
         let (gap, height) = (px / 3, Text::line_height(panel.px) + px / 4);
@@ -7270,21 +7366,57 @@ impl App {
         // buttons for the order: the one in force filled in, like the
         // buttons under the grid in look, and lighting up under the pointer.
         let buttons = self.list_buttons();
-        let heading = match &self.filter {
-            Some((typed, all)) => format!("{} of {}   {typed}", self.list.len(), all.len()),
-            None => format!("{} files", self.list.len()),
-        };
-        let heading = clipped(text, &heading, panel.width - px as i32 * 4, px);
-        text.draw(canvas, pad * 2, px as i32 * 3 / 4, px, TEXT_COLOR, &heading);
-        canvas.fill(pad, panel.top - pad / 2, panel.width - 2 * pad, 1, MENU_EDGE_COLOR);
         let small = (px * 5 / 6).max(11);
+        match self.list_field() {
+            // The search box: a magnifying glass, what is typed, and at its
+            // right how many files that leaves of how many.
+            Some([x, y, w, h]) => {
+                let typing = self.list_search.as_ref();
+                canvas.round_fill(x, y, w, h, h / 2, 0x111111, 256);
+                let (edge, color) = if typing.is_some() { (2, accent()) } else { (1, MENU_EDGE_COLOR) };
+                canvas.round_outline(x, y, w, h, h / 2, edge, color);
+                let glass = commands::icons::SEARCH;
+                let line = y + (h - Text::line_height(px)) / 2;
+                text.draw(canvas, x + pad, line, px, DIM_TEXT_COLOR, glass);
+                let left = x + pad + text.width(glass, px) + pad;
+                let count = self.filter.as_ref().map(|(_, all)| format!("{} of {}", self.list.len(), all.len())).unwrap_or_default();
+                let count_left = x + w - pad - text.width(&count, small);
+                text.draw(canvas, count_left, y + (h - Text::line_height(small)) / 2, small, DIM_TEXT_COLOR, &count);
+                let room = count_left - left - pad;
+                match typing {
+                    Some(field) => {
+                        draw_selection(canvas, text, field, left, line, px);
+                        let typed = clipped(text, &field.string(), room, px);
+                        text.draw(canvas, left, line, px, TEXT_COLOR, &typed);
+                        let before: String = field.text[..field.cursor].iter().collect();
+                        let cursor = left + text.width(&before, px).min(room);
+                        canvas.fill(cursor, line, (px as i32 / 10).max(2), Text::line_height(px), TEXT_COLOR);
+                    }
+                    None => {
+                        let typed = self.filter.as_ref().map(|(typed, _)| typed.clone()).unwrap_or_default();
+                        let typed = clipped(text, &typed, room, px);
+                        text.draw(canvas, left, line, px, TEXT_COLOR, &typed);
+                    }
+                }
+            }
+            None => {
+                let heading = format!("{} files", self.list.len());
+                let heading = clipped(text, &heading, panel.width - px as i32 * 6, px);
+                text.draw(canvas, pad * 2, px as i32 * 3 / 4, px, TEXT_COLOR, &heading);
+            }
+        }
+        canvas.fill(pad, panel.top - pad / 2, panel.width - 2 * pad, 1, MENU_EDGE_COLOR);
         for button in &buttons {
             let over = (button.x..button.x + button.width).contains(&mouse.0) && (button.y..button.y + button.height).contains(&mouse.1);
             let on = self.is_checked(button.command);
-            if button.command == Command::ToggleList {
+            if matches!(button.command, Command::ToggleList | Command::ListSearch | Command::ShowAllHere) {
                 // The cross is a round button, as the grid's is.
                 canvas.round_fill(button.x, button.y, button.width, button.height, button.width / 2, if over { accent() } else { PLACEHOLDER_COLOR }, 256);
-                let cross = commands::icons::X;
+                let cross = match button.command {
+                    Command::ListSearch => commands::icons::SEARCH,
+                    Command::ShowAllHere => commands::icons::LIST_X,
+                    _ => commands::icons::X,
+                };
                 let inset = ((button.width - text.width(cross, small)) / 2, (button.height - Text::line_height(small)) / 2);
                 text.draw(canvas, button.x + inset.0, button.y + inset.1, small, if over { on_accent() } else { TEXT_COLOR }, cross);
                 continue;
