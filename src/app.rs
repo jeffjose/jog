@@ -76,6 +76,8 @@ const SPEEDS: [f64; 9] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
 const SEEK_JUMP: f64 = 60.0;
 /// How long after a seek the player's reported position cannot be trusted.
 const SEEK_SETTLE: Duration = Duration::from_millis(500);
+/// How close to its length, in seconds, a video counts as at its end.
+const VIDEO_END: f64 = 0.25;
 
 /// How often the debug overlay asks the player for its figures.
 const VIDEO_STATS_EVERY: Duration = Duration::from_millis(250);
@@ -182,8 +184,10 @@ struct Video {
     /// last one that did land took.
     seek_asked: Option<Instant>,
     seek_took: Option<Duration>,
-    /// When the user last seeked, stepped or paused, or a seek landed.
-    touched: Option<Instant>,
+    /// When the user last took the video to its end, by seeking there or
+    /// stepping forward a frame, or such a seek landed. A seek elsewhere
+    /// takes it away.
+    to_end: Option<Instant>,
 }
 
 /// The last time the image layer was scaled afresh.
@@ -1473,7 +1477,7 @@ impl App {
         if let Some(video) = &mut self.video {
             video.seeking = Some((Instant::now(), target));
             video.seek_asked.get_or_insert_with(Instant::now);
-            video.touched = Some(Instant::now());
+            video.to_end = (target >= length - VIDEO_END).then(Instant::now);
         }
         self.redraw();
     }
@@ -1554,7 +1558,7 @@ impl App {
             player.play(&self.files[id], from);
             // Until the player reports for itself, this is where it is.
             let seeking = from.map(|seconds| (started, seconds));
-            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, touched: None });
+            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, to_end: None });
             self.perf.video_lines = None;
             self.apply_video_view();
         }
@@ -1610,7 +1614,7 @@ impl App {
                 // Every seek ends with the player announcing frames again.
                 if let Some(asked) = video.seek_asked.take() {
                     video.seek_took = Some(asked.elapsed());
-                    video.touched = Some(Instant::now());
+                    video.to_end = video.to_end.map(|_| Instant::now());
                 }
             }
             video.showing = showing;
@@ -1627,8 +1631,9 @@ impl App {
         }
         // A video that played to its end makes way for the next file. One
         // taken to its end by hand, by seeking or stepping there, stays; and
-        // the event may be left over from the file before this one.
-        let by_hand = video.seek_asked.is_some() || video.touched.is_some_and(|at| at.elapsed() < SEEK_SETTLE);
+        // the event may be left over from the file before this one. A seek
+        // to short of the end is not that: what plays out after it goes on.
+        let by_hand = video.to_end.is_some_and(|at| video.seek_asked.is_some() || at.elapsed() < SEEK_SETTLE);
         if video.showing {
             self.redraw();
         }
@@ -1683,10 +1688,13 @@ impl App {
             Key::Named(NamedKey::ArrowDown) => VideoAction::Volume(-5),
             _ => return false,
         };
-        // Forward from the end goes on to the next file. Only on a fresh
-        // press: a key held down to reach the end stops there.
-        let forward = matches!(action, VideoAction::Seek(seconds) if seconds > 0.0);
-        let action = if forward && !repeat && self.at_video_end() { VideoAction::File(true) } else { action };
+        // Forward from the end goes on to the next file, and so does a seek
+        // that would run off the end. Only on a fresh press: a key held down
+        // to reach the end stops there.
+        let action = match action {
+            VideoAction::Seek(seconds) if seconds > 0.0 && !repeat && (self.at_video_end() || self.seek_runs_out(seconds)) => VideoAction::File(true),
+            _ => action,
+        };
         self.video_action(action);
         true
     }
@@ -1695,12 +1703,19 @@ impl App {
     fn at_video_end(&self) -> bool {
         let Some(player) = &self.player else { return false };
         let ended = player.flag("eof-reached") == Some(true);
-        ended || self.video_time().is_some_and(|(position, length)| position >= length - 0.25)
+        ended || self.video_time().is_some_and(|(position, length)| position >= length - VIDEO_END)
+    }
+
+    /// Whether seeking this far on would take a playing video to its end,
+    /// where it would only make way for the next file.
+    fn seek_runs_out(&self, seconds: f64) -> bool {
+        let playing = self.player.as_ref().is_some_and(|player| player.flag("pause") != Some(true));
+        let follows = self.options.autoplay && self.slide_at.is_none() && self.pos + 1 < self.list.len();
+        playing && follows && self.video_time().is_some_and(|(position, length)| position + seconds >= length - VIDEO_END)
     }
 
     fn video_action(&mut self, action: VideoAction) {
         let (Some(player), Some(video)) = (&self.player, &mut self.video) else { return };
-        video.touched = Some(Instant::now());
         match action {
             VideoAction::File(forward) => return self.step(forward),
             VideoAction::Pause => player.command(&[b"cycle", b"pause"]),
@@ -1713,11 +1728,16 @@ impl App {
                     _ => player.number("time-pos").unwrap_or(0.0),
                 };
                 let length = player.number("duration").unwrap_or(0.0);
-                video.seeking = Some((Instant::now(), (from + seconds).clamp(0.0, length)));
+                let target = (from + seconds).clamp(0.0, length);
+                video.seeking = Some((Instant::now(), target));
+                video.to_end = (target >= length - VIDEO_END).then(Instant::now);
                 video.seek_asked.get_or_insert_with(Instant::now);
             }
             // Both leave the video paused on the frame they land on.
-            VideoAction::Frame(true) => player.command(&[b"frame-step"]),
+            VideoAction::Frame(true) => {
+                player.command(&[b"frame-step"]);
+                video.to_end = Some(Instant::now());
+            }
             VideoAction::Frame(false) => player.command(&[b"frame-back-step"]),
             VideoAction::Volume(change) => {
                 player.command(&[b"add", b"volume", change.to_string().as_bytes()]);
