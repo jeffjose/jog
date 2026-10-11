@@ -651,7 +651,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("PgDn  PgUp", "Jump 5% forward / back"),
                 ("}  {", "Next / previous folder"),
                 ("Wheel", "Next / previous file"),
-                ("z", "Shuffle the list around this file"),
+                ("z", "Shuffle: on to another file, or around this one in the grid, filmstrip or list"),
                 ("s", "Sort: name, newest, size, reverse"),
             ],
         ),

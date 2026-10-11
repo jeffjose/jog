@@ -3062,23 +3062,35 @@ impl App {
         }
     }
 
-    /// Shuffles the viewing order around the file in hand: the one on
-    /// view, or in the grid the one under the cursor. It stays where it
-    /// is in the list, and everything before and after it changes.
+    /// Shuffles the viewing order. Where the list can be seen, in the grid,
+    /// the filmstrip or the file list, the file in hand stays where it is
+    /// and everything before and after it changes. With only the one file
+    /// to be seen, another takes its place and is shown.
     fn shuffle(&mut self) {
         (self.sort, self.reversed, self.shuffled) = (None, false, true);
         let held = self.list[self.focus()];
+        let stays = self.grid.is_some() || self.strip_visible() || self.show_list;
+        let pos = self.pos;
         let mut rng = std::mem::replace(&mut self.rng, Rng::from_clock());
         self.reorder(|ids, _| {
             let place = ids.iter().position(|id| *id == held);
             rng.shuffle(ids);
-            // Back to the place it had, whatever landed there going where
-            // the shuffle had put it.
-            if let (Some(place), Some(at)) = (place, ids.iter().position(|id| *id == held)) {
+            let (Some(place), Some(at)) = (place, ids.iter().position(|id| *id == held)) else { return };
+            if stays {
+                // Back to the place it had, whatever landed there going
+                // where the shuffle had put it.
                 ids.swap(place, at);
+            } else if place == at {
+                // Out of the place it had, so that another has it.
+                let other = (place + 1) % ids.len();
+                ids.swap(place, other);
             }
         });
         self.rng = rng;
+        if !stays {
+            // `reorder` followed the file; this goes back to its place.
+            self.go_to(pos, true);
+        }
     }
 
     /// Puts the list in a different order, and with it the files a kept
