@@ -141,6 +141,8 @@ where they were left unless --no-resume is given. While one is up:
   Shift+Left / Shift+Right   step one frame      Up / Down     volume (m mutes)
   b                          back to the start of the video
   Ctrl+Left / Ctrl+Right, or , . < > n           previous / next file
+  Seeking past the end of a video carries on into the next file, and back
+  past its start into the one before, as though they lay end to end.
 
 Mouse: drag to pan, middle-drag to zoom, wheel for next/previous,
 Ctrl+wheel to zoom, double click for fullscreen, bottom edge for the

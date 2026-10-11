@@ -78,6 +78,9 @@ const SEEK_JUMP: f64 = 60.0;
 const SEEK_SETTLE: Duration = Duration::from_millis(500);
 /// How close to its length, in seconds, a video counts as at its end.
 const VIDEO_END: f64 = 0.25;
+/// How far back past its start, in seconds, a seek has to aim to leave a
+/// video for the file before it.
+const VIDEO_START: f64 = 0.5;
 
 /// How often the debug overlay asks the player for its figures.
 const VIDEO_STATS_EVERY: Duration = Duration::from_millis(250);
@@ -748,6 +751,9 @@ pub struct App {
     preview_busy: Option<Instant>,
     /// How many times in a row a seek key has repeated from being held.
     held: u32,
+    /// Where the next video started is to begin, when a seek carried over
+    /// from the file beside it: seconds in, or negative, from its end.
+    enter_at: Option<f64>,
     /// Playback speed, kept from one video to the next.
     speed: f64,
     muted: bool,
@@ -1123,6 +1129,7 @@ impl App {
             preview_sent: None,
             preview_busy: None,
             held: 0,
+            enter_at: None,
             speed: 1.0,
             muted: false,
             toast: None,
@@ -1549,20 +1556,24 @@ impl App {
         }
         // The video being left, if this replaces one.
         self.remember_position();
-        let from = match self.options.resume {
+        // A seek carried over from the file beside this one says where to
+        // begin; otherwise it is where the video was left.
+        let carried = self.enter_at.take();
+        let from = carried.or_else(|| match self.options.resume {
             true => self.positions.get_or_insert_with(Positions::load).get(&self.files[id]),
             false => None,
-        };
+        });
         if let Some(player) = &self.player {
             let started = Instant::now();
             player.play(&self.files[id], from);
             // Until the player reports for itself, this is where it is.
-            let seeking = from.map(|seconds| (started, seconds));
+            // One counted from the end has to wait for the length.
+            let seeking = from.filter(|seconds| *seconds >= 0.0).map(|seconds| (started, seconds));
             self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, to_end: None });
             self.perf.video_lines = None;
             self.apply_video_view();
         }
-        if let Some(seconds) = from {
+        if let Some(seconds) = from.filter(|_| carried.is_none()) {
             self.toast(format!("Resumed at {}", clock(seconds)));
         }
     }
@@ -1688,30 +1699,39 @@ impl App {
             Key::Named(NamedKey::ArrowDown) => VideoAction::Volume(-5),
             _ => return false,
         };
-        // Forward from the end goes on to the next file, and so does a seek
-        // that would run off the end. Only on a fresh press: a key held down
-        // to reach the end stops there.
-        let action = match action {
-            VideoAction::Seek(seconds) if seconds > 0.0 && !repeat && (self.at_video_end() || self.seek_runs_out(seconds)) => VideoAction::File(true),
-            _ => action,
-        };
+        // The files lie end to end as one timeline: a seek that would run
+        // off either end of this video lands that far into the one next to
+        // it, however the key came to be pressed.
+        if let VideoAction::Seek(seconds) = action {
+            if let Some(enter) = self.seek_across(seconds) {
+                // A held key starts again from its slowest in the new file.
+                self.held = 0;
+                self.enter_at = Some(enter);
+                self.step(seconds > 0.0);
+                self.enter_at = None;
+                return true;
+            }
+        }
         self.video_action(action);
         true
     }
 
-    /// Whether the video has played, or been taken, to its last frame.
-    fn at_video_end(&self) -> bool {
-        let Some(player) = &self.player else { return false };
-        let ended = player.flag("eof-reached") == Some(true);
-        ended || self.video_time().is_some_and(|(position, length)| position >= length - VIDEO_END)
-    }
-
-    /// Whether seeking this far on would take a playing video to its end,
-    /// where it would only make way for the next file.
-    fn seek_runs_out(&self, seconds: f64) -> bool {
-        let playing = self.player.as_ref().is_some_and(|player| player.flag("pause") != Some(true));
-        let follows = self.options.autoplay && self.slide_at.is_none() && self.pos + 1 < self.list.len();
-        playing && follows && self.video_time().is_some_and(|(position, length)| position + seconds >= length - VIDEO_END)
+    /// Where a seek of this many seconds lands in the file after or before
+    /// this one, when it would run off the end or the start of the video:
+    /// seconds from the start of the next, or as a negative number from
+    /// the end of the previous. `None` when it stays within this video.
+    fn seek_across(&self, seconds: f64) -> Option<f64> {
+        let (position, length) = self.video_time()?;
+        let ended = self.player.as_ref().is_some_and(|player| player.flag("eof-reached") == Some(true));
+        let to = if ended { length } else { position } + seconds;
+        if self.list.len() < 2 {
+            None
+        } else if seconds > 0.0 && to >= length - VIDEO_END {
+            Some((to - length).max(0.0))
+        } else {
+            // Less than this short of the start is the start.
+            (seconds < 0.0 && to < -VIDEO_START).then_some(to)
+        }
     }
 
     fn video_action(&mut self, action: VideoAction) {
