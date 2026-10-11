@@ -44,6 +44,49 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Draws `frame` as `image` does, with rounded corners, whatever lies
+    /// behind it showing through outside the curve.
+    pub fn image_rounded(&mut self, frame: &Frame, x: i32, y: i32, w: i32, h: i32, radius: i32) {
+        let radius = radius.min(w / 2).min(h / 2).max(0);
+        // Only the four corner squares need keeping, to be put back.
+        let corners = [(x, y), (x + w - radius, y), (x, y + h - radius), (x + w - radius, y + h - radius)];
+        let behind: Vec<Vec<u32>> = corners.iter().map(|&(cx, cy)| self.copy(cx, cy, radius, radius)).collect();
+        self.image(frame, x, y, w, h);
+        for (&(cx, cy), was) in corners.iter().zip(&behind) {
+            // A corner partly off the window is left square.
+            if was.len() != (radius * radius) as usize {
+                continue;
+            }
+            for (at, was) in was.iter().enumerate() {
+                let (px, py) = (cx + at as i32 % radius, cy + at as i32 / radius);
+                let outside = 1.0 - rounded_cover(px, py, x, y, w, h, radius, 0.0);
+                self.cover(px, py, *was, (outside * 256.0) as u32);
+            }
+        }
+    }
+
+    /// Darkens a rectangle more and more towards its bottom, from all of
+    /// the brightness kept at the top to `keep`/256 of it. The change is
+    /// spread by a fine pattern, so that it shows no steps.
+    pub fn fade_down(&mut self, x: i32, y: i32, w: i32, h: i32, keep: u32) {
+        // An ordered dither: which of two neighbouring levels a pixel
+        // takes depends on where it is in a 4 x 4 tile.
+        const TILE: [[f64; 4]; 4] =
+            [[0.0, 8.0, 2.0, 10.0], [12.0, 4.0, 14.0, 6.0], [3.0, 11.0, 1.0, 9.0], [15.0, 7.0, 13.0, 5.0]];
+        let top = y.clamp(0, self.height);
+        for (row, pixels) in self.rows(x, y, w, h).enumerate() {
+            let down = (f64::from(top + row as i32 - y) / f64::from(h.max(1))).clamp(0.0, 1.0);
+            // Gently at first and at the last, as a shadow falls off.
+            let eased = down * down * (3.0 - 2.0 * down);
+            let level = 256.0 - (256.0 - f64::from(keep)) * eased;
+            let tile = &TILE[(top as usize + row) % 4];
+            for (column, pixel) in pixels.iter_mut().enumerate() {
+                let amount = (level + tile[column % 4] / 16.0).floor().clamp(0.0, 256.0) as u32;
+                *pixel = mix(0, *pixel, amount);
+            }
+        }
+    }
+
     /// Darkens a rectangle, keeping `keep`/256 of the brightness.
     pub fn shade(&mut self, x: i32, y: i32, w: i32, h: i32, keep: u32) {
         for pixel in self.rows(x, y, w, h).flatten() {
@@ -250,10 +293,15 @@ const FONT_PATHS: &[&str] = &[
     "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
 ];
 
-/// Text rendering with a system font. Loading the font takes a while, so
+/// Which font the icons are, where the others are counted from 0.
+const ICONS: usize = usize::MAX;
+
+/// Text rendering with the font jog carries. Loading it takes a while, so
 /// this is only created once something needs to draw text.
 pub struct Text {
     font: Option<fontdue::Font>,
+    /// The icons, which are letters of a font of their own.
+    icons: Option<fontdue::Font>,
     /// Fonts for the letters the main one lacks, Korean say, each found
     /// through fontconfig the first time such a letter comes up. A font
     /// for a large script takes a while to load, so that happens on
@@ -267,14 +315,19 @@ pub struct Text {
 
 impl Text {
     pub fn load() -> Self {
-        let font = font_files().find_map(|path| {
-            let bytes = std::fs::read(path).ok()?;
-            fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).ok()
-        });
+        // The interface font is carried along, so that jog looks the same
+        // everywhere; `JOG_FONT` names another, and the system's are what
+        // is left if neither can be used.
+        let load = |bytes: Vec<u8>| fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).ok();
+        let chosen = std::env::var_os("JOG_FONT").and_then(|path| load(std::fs::read(path).ok()?));
+        let font = chosen
+            .or_else(|| load(include_bytes!("../assets/Geist-Regular.ttf").to_vec()))
+            .or_else(|| font_files().find_map(|path| load(std::fs::read(path).ok()?)));
         if font.is_none() {
             eprintln!("jog: no usable font found, text will not be drawn (set JOG_FONT to a .ttf file)");
         }
-        Text { font, others: Vec::new(), loading: None, sought: HashSet::new(), glyphs: HashMap::new() }
+        let icons = load(include_bytes!("../assets/lucide.ttf").to_vec());
+        Text { font, icons, others: Vec::new(), loading: None, sought: HashSet::new(), glyphs: HashMap::new() }
     }
 
     pub fn line_height(px: u32) -> i32 {
@@ -290,6 +343,10 @@ impl Text {
     /// Which font has letter `c`: 0 for the main one, otherwise one of the
     /// others, counted from 1. Looks for a font that has it if none does.
     fn font_with(&mut self, c: char) -> usize {
+        // The icons have a font, and a part of Unicode, to themselves.
+        if ('\u{e000}'..='\u{f8ff}').contains(&c) {
+            return ICONS;
+        }
         let has = |font: &fontdue::Font| font.lookup_glyph_index(c) != 0;
         if self.font.as_ref().is_none_or(has) || c.is_control() {
             return 0;
@@ -312,14 +369,24 @@ impl Text {
     }
 
     fn font(&self, which: usize) -> Option<&fontdue::Font> {
-        if which == 0 { self.font.as_ref() } else { self.others.get(which - 1) }
+        match which {
+            0 => self.font.as_ref(),
+            ICONS => self.icons.as_ref(),
+            other => self.others.get(other - 1),
+        }
+    }
+
+    /// The size a letter is drawn at: icons a little larger than the text
+    /// they sit in, which they would otherwise look small beside.
+    fn size(which: usize, px: u32) -> f32 {
+        if which == ICONS { px as f32 * 1.15 } else { px as f32 }
     }
 
     pub fn width(&mut self, text: &str, px: u32) -> i32 {
         let mut width = 0.0;
         for c in text.chars() {
             let which = self.font_with(c);
-            width += self.font(which).map_or(0.0, |font| font.metrics(c, px as f32).advance_width);
+            width += self.font(which).map_or(0.0, |font| font.metrics(c, Self::size(which, px)).advance_width);
         }
         width.ceil() as i32
     }
@@ -337,12 +404,18 @@ impl Text {
             if !self.glyphs.contains_key(&(c, px)) {
                 let which = self.font_with(c);
                 let Some(font) = self.font(which) else { continue };
-                let glyph = font.rasterize(c, px as f32);
+                let glyph = font.rasterize(c, Self::size(which, px));
                 self.glyphs.insert((c, px), glyph);
             }
             let (metrics, coverage) = &self.glyphs[&(c, px)];
             let left = pen.round() as i32 + metrics.xmin;
-            let top = baseline - metrics.ymin - metrics.height as i32;
+            // An icon sits in the middle of the line, whatever its font
+            // takes for a baseline; letters stand on the text's.
+            let icon = ('\u{e000}'..='\u{f8ff}').contains(&c);
+            let top = match icon {
+                true => y + (Self::line_height(px) - metrics.height as i32) / 2,
+                false => baseline - metrics.ymin - metrics.height as i32,
+            };
             for (row, line) in coverage.chunks_exact(metrics.width.max(1)).enumerate() {
                 for (column, &amount) in line.iter().enumerate() {
                     if amount > 0 {

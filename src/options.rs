@@ -17,6 +17,9 @@ Window:
   -g, --geometry WxH         start in a window of this size
   -x, --borderless           no window decorations
   -B, --image-bg COLOR       background: black, white or RRGGBB
+      --accent COLOR         colour of selections and highlights: RRGGBB, or one of
+                             the Radix colours such as indigo (the default),
+                             blue, violet, crimson, orange, grass or teal
   -Y, --hide-pointer         hide the mouse pointer
 
 Zoom:
@@ -46,7 +49,7 @@ Slideshow and actions:
   -A, --action CMD           shell command for Enter / 0; %f is the path,
                              %n the file name
       --action1..9 CMD       shell commands for keys 1 to 9
-  -o, --output-dir DIR       folder that v copies and m moves images into
+  -o, --output-dir DIR       folder that V copies and M moves files into
       --print-marked         print the marked files on exit
       --verbose              print each file as it comes up: its place in the
                              list, dimensions, size and how long it took
@@ -59,6 +62,7 @@ Overlays:
       --draw-exif            show EXIF data
       --draw-actions         show the defined actions
   -t, --filmstrip            keep the filmstrip open
+  -G, --grid                 start in the grid, with nothing playing
       --no-grid-titles       leave the names out from under the grid's pictures
                              (config: grid-titles = false; i in the grid toggles)
 
@@ -91,14 +95,14 @@ Keys:
   [ / ]                      slower / faster     \\             normal speed
   f fullscreen  t filmstrip  i info  e EXIF  a actions  o pointer
   p                          file list down the side; click a name to go to it
-  d                          delete (asks first; marked images, or the current one)
+  D                          delete (asks first; marked images, or the current one)
   g                          grid view           ?             list of shortcuts
                              in the grid: Ctrl with + or - for larger or smaller
                              pictures; going past the end of a page slides the
                              next one in from the side
   Tab or right click         menu                h             slideshow
   x                          mark / unmark       c / C         copy file name / full path
-  v / m                      copy / move marked images (or the current one) to -o DIR
+  V / M                      copy / move marked files (or the current one) to -o DIR
   u                          undo copy, move, rename or convert
   F2                         rename              r F5          refresh: look for
                              new and deleted files, and read this one again
@@ -111,7 +115,7 @@ Videos (mp4, mkv, webm and so on; needs libmpv) play in place, picking up
 where they were left unless --no-resume is given. While one is up:
   Space                      play / pause        Left / Right  seek 5 seconds (faster held)
   PgUp / PgDn                seek 1 minute       pointer at the bottom: seek bar with previews
-  Shift+Left / Shift+Right   step one frame      Up / Down     volume
+  Shift+Left / Shift+Right   step one frame      Up / Down     volume (m mutes)
   b                          back to the start of the video
   Ctrl+Left / Ctrl+Right, or , . < > n           previous / next file
 
@@ -134,6 +138,8 @@ pub struct Options {
     pub geometry: Option<(u32, u32)>,
     pub borderless: bool,
     pub background: u32,
+    /// The colour of what is picked out: selections, the grid's cursor.
+    pub accent: u32,
     pub hide_pointer: bool,
     pub zoom: Zoom,
     pub auto_zoom: bool,
@@ -145,6 +151,8 @@ pub struct Options {
     pub autoplay: bool,
     /// Whether the grid shows each file's title under its picture.
     pub grid_titles: bool,
+    /// Whether to start in the grid.
+    pub grid: bool,
     pub actions: [Option<String>; 10],
     pub draw_info: bool,
     pub draw_exif: bool,
@@ -169,6 +177,7 @@ pub enum Parsed {
 fn short_flag(flag: char) -> Option<&'static str> {
     Some(match flag {
         'F' => "fullscreen",
+        'G' => "grid",
         'w' => "windowed",
         'g' => "geometry",
         'x' => "borderless",
@@ -196,7 +205,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
 
 fn takes_value(name: &str) -> bool {
     let valued = [
-        "geometry", "image-bg", "zoom", "sort", "start-at", "filelist", "slideshow-delay", "on-last-slide",
+        "geometry", "image-bg", "accent", "zoom", "sort", "start-at", "filelist", "slideshow-delay", "on-last-slide",
         "output-dir",
     ];
     valued.contains(&name) || name.starts_with("action")
@@ -206,7 +215,7 @@ fn is_switch(name: &str) -> bool {
     let switches = [
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
-        "cycle-once", "autoplay", "no-autoplay", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
+        "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
         "debug", "verbose", "watch", "resume", "no-resume",
     ];
     switches.contains(&name)
@@ -229,6 +238,7 @@ fn parse_with(
         geometry: None,
         borderless: false,
         background: 0x000000,
+        accent: 0x3E63DD,
         hide_pointer: false,
         zoom: Zoom::Fit,
         auto_zoom: true,
@@ -238,6 +248,7 @@ fn parse_with(
         on_last_slide: LastSlide::Resume,
         autoplay: true,
         grid_titles: true,
+        grid: false,
         actions: Default::default(),
         draw_info: false,
         draw_exif: false,
@@ -323,6 +334,7 @@ fn apply(
         "geometry" => options.geometry = Some(parse_geometry(&value()?)?),
         "borderless" => options.borderless = true,
         "image-bg" => options.background = parse_color(&value()?)?,
+        "accent" => options.accent = parse_accent(&value()?)?,
         "hide-pointer" => options.hide_pointer = true,
         // Fitting large images and natural sorting are always on.
         "scale-down" | "version-sort" | "quiet" => {}
@@ -353,6 +365,7 @@ fn apply(
         "cycle-once" => options.on_last_slide = LastSlide::Quit,
         "autoplay" => options.autoplay = true,
         "no-autoplay" => options.autoplay = false,
+        "grid" => options.grid = true,
         "grid-titles" => options.grid_titles = true,
         "no-grid-titles" => options.grid_titles = false,
         // feh's name for it; here the file name is part of the info overlay.
@@ -462,6 +475,35 @@ fn parse_color(text: &str) -> Result<u32, String> {
             color.ok_or_else(|| format!("invalid colour '{text}', expected black, white or RRGGBB"))
         }
     }
+}
+
+/// An accent colour: one of the Radix colours by name, at the step meant
+/// for solid backgrounds, or any colour as `RRGGBB`.
+fn parse_accent(text: &str) -> Result<u32, String> {
+    let named = match text.to_lowercase().as_str() {
+        "tomato" => 0xE54D2E,
+        "red" => 0xE5484D,
+        "ruby" => 0xE54666,
+        "crimson" => 0xE93D82,
+        "pink" => 0xD6409F,
+        "plum" => 0xAB4ABA,
+        "purple" => 0x8E4EC6,
+        "violet" => 0x6E56CF,
+        "iris" => 0x5B5BD6,
+        "indigo" => 0x3E63DD,
+        "blue" => 0x0090FF,
+        "cyan" => 0x00A2C7,
+        "teal" => 0x12A594,
+        "jade" => 0x29A383,
+        "green" => 0x30A46C,
+        "grass" => 0x46A758,
+        "orange" => 0xF76B15,
+        "brown" => 0xAD7F58,
+        "bronze" => 0xA18072,
+        "gold" => 0x978365,
+        _ => return parse_color(text).map_err(|_| format!("invalid accent '{text}', expected a Radix colour name such as indigo, or RRGGBB")),
+    };
+    Ok(named)
 }
 
 fn parse_zoom(text: &str) -> Result<Zoom, String> {

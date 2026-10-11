@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{self, AtomicBool};
+use std::sync::atomic::{self, AtomicBool, AtomicU32};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -61,6 +61,9 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// most pictures it can be set to show across.
 const GRID_SCROLL: Duration = Duration::from_millis(260);
 const GRID_COLUMNS: (i32, i32) = (2, 12);
+/// How long the grid's cursor must rest on a video before its trailer
+/// begins.
+const TRAILER_DELAY: Duration = Duration::from_millis(300);
 /// How long a thumbnail in the grid takes to give way to its trailer.
 const TRAILER_FADE: Duration = Duration::from_millis(350);
 /// How many videos' frames are kept at once.
@@ -81,8 +84,24 @@ const TEXT_COLOR: u32 = 0xEEEEEE;
 const DIM_TEXT_COLOR: u32 = 0x9A9A9A;
 const MENU_COLOR: u32 = 0x1E1E1E;
 const MENU_EDGE_COLOR: u32 = 0x555555;
-const HIGHLIGHT_COLOR: u32 = 0x2D5B9A;
-const HELP_TITLE_COLOR: u32 = 0x8AB4F8;
+/// The colour of what is picked out, as `--accent` set it. It is read all
+/// over the drawing code, which has no other tie to the options.
+static ACCENT: AtomicU32 = AtomicU32::new(0x3E63DD);
+
+fn accent() -> u32 {
+    ACCENT.load(atomic::Ordering::Relaxed)
+}
+
+/// A lighter tint of the accent, for words and thin lines on the dark
+/// panels, where the accent itself would be hard to read.
+fn accent_soft() -> u32 {
+    let toward_white = |shift: u32| {
+        let channel = accent() >> shift & 0xFF;
+        (channel + (255 - channel) * 45 / 100) << shift
+    };
+    toward_white(16) | toward_white(8) | toward_white(0)
+}
+const DANGER_COLOR: u32 = 0xD64545;
 const PLACEHOLDER_COLOR: u32 = 0x2A2A2A;
 const MARK_COLOR: u32 = 0xFFB020;
 const GRID_COLOR: u32 = 0x101010;
@@ -492,6 +511,11 @@ pub struct App {
     list_scroll: Option<(usize, usize, usize)>,
     /// The list position under the pointer, in the file list.
     list_hover: Option<usize>,
+    /// The list position of the filmstrip cell under the pointer.
+    strip_over: Option<usize>,
+    /// Which of the grid's buttons the pointer is over, counting those
+    /// under it and then those at its sides.
+    grid_over: Option<usize>,
     /// Video lengths, found out on another thread as their rows come up.
     /// Asked for but not yet known ones are `None`.
     durations: HashMap<usize, Option<f64>>,
@@ -542,6 +566,9 @@ pub struct App {
     picture_due: Option<Instant>,
     /// When to draw again to see whether a font being loaded has come.
     font_due: Option<Instant>,
+    /// The video the grid's cursor has come to rest on, and when its
+    /// trailer is to begin if the cursor is still there.
+    trailer_due: Option<(usize, Instant)>,
     /// The image layer as last rendered, reused when only overlays change.
     scene: Vec<u32>,
     scene_key: Option<SceneKey>,
@@ -585,6 +612,7 @@ pub struct App {
     held: u32,
     /// Playback speed, kept from one video to the next.
     speed: f64,
+    muted: bool,
     toast: Option<(String, Instant)>,
     /// While set, the video's time and a larger progress bar are shown.
     time_until: Option<Instant>,
@@ -725,6 +753,9 @@ struct Grid {
     from: f64,
     target: f64,
     since: Instant,
+    /// Whether the cursor has been moved since the grid came up by
+    /// itself, with `--grid`: until then no trailer plays.
+    moved: bool,
 }
 
 /// Grid placement: equal cells filling the window above a footer line.
@@ -795,7 +826,7 @@ impl Grid {
     /// A grid showing the page `cursor` is on.
     fn at(cursor: usize, layout: &GridLayout) -> Grid {
         let page = layout.page_of(cursor);
-        Grid { cursor, from: page, target: page, since: Instant::now() }
+        Grid { cursor, from: page, target: page, since: Instant::now(), moved: true }
     }
 
     /// Which page is at the window's left just now, and how far on to the
@@ -830,6 +861,7 @@ fn ui_px(window_height: u32) -> u32 {
 impl App {
     pub fn new(options: Options, files: Vec<PathBuf>, start: usize, loader: Loader, proxy: EventLoopProxy<Event>) -> Self {
         let slide_delay = Duration::from_secs_f64(options.slideshow_delay.unwrap_or(DEFAULT_SLIDE_DELAY));
+        ACCENT.store(options.accent, atomic::Ordering::Relaxed);
         App {
             marks: HashSet::new(),
             undo: Vec::new(),
@@ -845,6 +877,8 @@ impl App {
             grid_due: None,
             list_scroll: None,
             list_hover: None,
+            strip_over: None,
+            grid_over: None,
             durations: HashMap::new(),
             prober: None,
             stories: None,
@@ -874,6 +908,7 @@ impl App {
             picture: 0,
             picture_due: None,
             font_due: None,
+            trailer_due: None,
             scene: Vec::new(),
             scene_key: None,
             show_info: options.draw_info,
@@ -903,6 +938,7 @@ impl App {
             preview_busy: None,
             held: 0,
             speed: 1.0,
+            muted: false,
             toast: None,
             time_until: None,
             meta: None,
@@ -1117,6 +1153,8 @@ impl App {
             return;
         }
         self.pos = pos;
+        // The filmstrip has moved under the pointer.
+        self.strip_over = self.strip_cell_at(self.mouse.0, self.mouse.1);
         self.forward = forward;
         self.error = None;
         self.reset_view();
@@ -1270,6 +1308,7 @@ impl App {
         match player {
             Ok(player) => {
                 player.set("speed", &self.speed.to_string());
+                player.set("mute", if self.muted { "yes" } else { "no" });
                 self.player = Some(player);
                 *self.video_view_sent.borrow_mut() = None;
                 // A video may already be waiting for it.
@@ -1860,6 +1899,25 @@ impl App {
             }
             ToggleWatch => self.set_watch(self.watch.is_none()),
             ToggleList => self.show_list = !self.show_list,
+            OpenFromGrid => self.open_from_grid(),
+            GridLarger => self.zoom_grid(true),
+            GridSmaller => self.zoom_grid(false),
+            ToggleGridTitles => self.grid_titles = !self.grid_titles,
+            GridMenu => {
+                // At the cell, not wherever the pointer happens to be.
+                if let Some(cursor) = self.grid.as_ref().map(|grid| grid.cursor) {
+                    let layout = self.grid_layout(self.window_size());
+                    let [left, top, width, height] = self.grid_area(&layout, cursor, self.window_size().1);
+                    self.menu = Some(self.build_menu(commands::GRID_MENU, None, (left + width / 2, top + height / 2)));
+                }
+            }
+            ToggleMute => {
+                self.muted = !self.muted;
+                if let Some(player) = &self.player {
+                    player.set("mute", if self.muted { "yes" } else { "no" });
+                }
+                self.toast(if self.muted { "Muted" } else { "Sound on" });
+            }
             Search | Palette => self.open_palette(),
             Remove => self.remove_current(event_loop),
             Trash => self.trash(event_loop),
@@ -1976,6 +2034,8 @@ impl App {
             ToggleDebug => self.show_debug,
             ToggleWatch => self.watch.is_some(),
             ToggleList => self.show_list,
+            ToggleGridTitles => self.grid_titles,
+            ToggleMute => self.muted,
             SortBy(sort) => self.sort == Some(sort),
             ReverseOrder => self.reversed,
             ToggleVerbose => self.options.verbose,
@@ -2453,7 +2513,7 @@ impl App {
         let keys_width = items.map(|i| text.width(i.keys, px)).max().unwrap_or(0);
         let title_width = title.as_ref().map_or(0, |title| text.width(title, px));
         // Padding, a gutter for check marks, the label, a gap and the keys.
-        let content_width = (px as i32 + label_width + px as i32 * 2 + keys_width).max(title_width);
+        let content_width = (px as i32 * 2 + label_width + px as i32 * 2 + keys_width).max(title_width);
         let menu_width = content_width + 2 * pad;
 
         let mut top = pad + if title.is_some() { row_height } else { 0 };
@@ -2576,7 +2636,7 @@ impl App {
         // Start afresh around the cursor: the rows are not what they were.
         let layout = self.grid_layout(self.window_size());
         if let Some(grid) = &mut self.grid {
-            *grid = Grid::at(grid.cursor, &layout);
+            *grid = Grid { moved: grid.moved, ..Grid::at(grid.cursor, &layout) };
         }
         self.toast(format!("{columns} across"));
         self.request();
@@ -2600,8 +2660,12 @@ impl App {
     /// of the list. The page on show follows the cursor.
     fn move_cursor(&mut self, by: i64) {
         let last = self.list.len() as i64 - 1;
+        let layout = self.grid_layout(self.window_size());
         let Some(grid) = &mut self.grid else { return };
         grid.cursor = (grid.cursor as i64).saturating_add(by).clamp(0, last) as usize;
+        grid.moved = true;
+        // At once, so that what happens next finds the right page on show.
+        grid.follow(&layout);
         self.request();
         self.redraw();
     }
@@ -2617,7 +2681,7 @@ impl App {
             return false;
         };
         if pos != grid.cursor {
-            grid.cursor = pos;
+            (grid.cursor, grid.moved) = (pos, true);
             self.redraw();
         }
         true
@@ -2632,16 +2696,27 @@ impl App {
         self.redraw();
     }
 
-    /// Moves the grid cursor one cell. Sideways it goes along the list, as
-    /// left and right do everywhere: the end of a row leads on to the start
-    /// of the next, and the end of a page to the page beside it, which
-    /// slides in. Up and down stay within the page.
+    /// Moves the grid cursor one cell. Sideways the rows run on from page
+    /// to page: going right from the end of a row lands at the start of
+    /// the same row on the next page, which slides in, and left likewise.
+    /// Up and down stay within the page.
     fn step_cursor(&mut self, dx: i64, dy: i64) {
         let layout = self.grid_layout(self.window_size());
         let Some(grid) = &self.grid else { return };
         let (columns, per_page) = (i64::from(layout.columns), layout.per_page() as i64);
         let (cursor, last) = (grid.cursor as i64, self.list.len() as i64 - 1);
-        let target = cursor + dx + dy * columns;
+        let column = cursor % per_page % columns;
+        let mut target = cursor + dx + dy * columns;
+        if dx > 0 && column == columns - 1 {
+            // Nothing beyond the last page; a short one may not reach
+            // this row, in which case its last picture is taken.
+            if (cursor / per_page + 1) * per_page > last {
+                return;
+            }
+            target = (cursor + per_page - (columns - 1)).min(last);
+        } else if dx < 0 && column == 0 {
+            target = cursor - per_page + (columns - 1);
+        }
         let same_page = target.div_euclid(per_page) == cursor / per_page;
         if (0..=last).contains(&target) && (dy == 0 || same_page) {
             self.move_cursor(target - cursor);
@@ -3130,7 +3205,7 @@ impl App {
             let focused = palette.focus == at + 1;
             let (button_w, button_h) = (text.width(label, px) + pad, line + pad / 2);
             let (button_x, button_y) = (right - button_w, y - pad / 4);
-            let fill = if focused { HIGHLIGHT_COLOR } else { PLACEHOLDER_COLOR };
+            let fill = if focused { accent() } else { PLACEHOLDER_COLOR };
             canvas.round_fill(button_x, button_y, button_w, button_h, pad / 3, fill, 256);
             canvas.round_outline(button_x, button_y, button_w, button_h, pad / 3, 1, if focused { TEXT_COLOR } else { MENU_EDGE_COLOR });
             text.draw(canvas, button_x + pad / 2, y, px, TEXT_COLOR, label);
@@ -3146,7 +3221,7 @@ impl App {
             let at = layout.first + row;
             let top = layout.top + layout.head + row as i32 * layout.row_height;
             if at == palette.selected {
-                canvas.round_fill(layout.left + pad / 3, top, layout.width - 2 * (pad / 3), layout.row_height, pad / 2, HIGHLIGHT_COLOR, 256);
+                canvas.round_fill(layout.left + pad / 3, top, layout.width - 2 * (pad / 3), layout.row_height, pad / 2, accent(), 256);
             }
             // A command: what it is called, a mark if it is on, and its key.
             if let Some((name, keys, command)) = palette.commands.get(at) {
@@ -3211,6 +3286,7 @@ impl App {
         let layout = self.grid_layout(self.window_size());
         match key {
             Key::Named(NamedKey::Escape) => return self.toggle_grid(),
+            Key::Named(NamedKey::Tab) => return self.execute(Command::GridMenu, event_loop),
             Key::Named(NamedKey::ArrowUp) => return self.step_cursor(0, -1),
             Key::Named(NamedKey::ArrowDown) => return self.step_cursor(0, 1),
             // Ctrl with + or - makes the pictures larger or smaller.
@@ -3330,11 +3406,24 @@ impl App {
         }
         if self.grid.is_some() {
             self.point_cursor();
+            // The buttons light up under the pointer.
+            let inside = |b: &Button| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32));
+            let arrows = self.grid_arrows();
+            let over = self.grid_buttons.iter().chain(arrows.iter().map(|(place, _)| place)).position(inside);
+            if over != self.grid_over {
+                self.grid_over = over;
+                self.redraw();
+            }
             return;
         }
         let hover = self.list_row_at(x, y);
         if hover != self.list_hover {
             self.list_hover = hover;
+            self.redraw();
+        }
+        let over = self.strip_cell_at(x, y);
+        if over != self.strip_over {
+            self.strip_over = over;
             self.redraw();
         }
         match &mut self.drag {
@@ -3413,13 +3502,25 @@ impl App {
             return;
         }
         if self.grid.is_some() && self.menu.is_none() {
-            if button == MouseButton::Left && pressed {
-                let hit = |b: &&Button| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32));
-                if let Some(command) = self.grid_buttons.iter().find(hit).map(|button| button.command) {
-                    self.execute(command, event_loop);
-                } else if self.point_cursor() {
-                    self.open_from_grid();
+            let hit = |b: &&Button| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32));
+            match (button, pressed) {
+                (MouseButton::Left, true) => {
+                    // The buttons under the grid, then those at its sides
+                    // for the pages either way, then the pictures.
+                    let arrow = self.grid_arrows().into_iter().find(|(place, _)| hit(&place)).map(|(_, forward)| forward);
+                    if let Some(command) = self.grid_buttons.iter().find(hit).map(|button| button.command) {
+                        self.execute(command, event_loop);
+                    } else if let Some(forward) = arrow {
+                        let per_page = self.grid_layout(self.window_size()).per_page() as i64;
+                        self.move_cursor(if forward { per_page } else { -per_page });
+                    } else if self.point_cursor() {
+                        self.open_from_grid();
+                    }
                 }
+                // A right click on a picture brings up what can be done
+                // with it.
+                (MouseButton::Right, true) if self.point_cursor() => self.open_menu(commands::GRID_MENU, None),
+                _ => {}
             }
             return;
         }
@@ -3449,7 +3550,7 @@ impl App {
                 }
             }
             (MouseButton::Left, true) => {
-                let (width, height) = self.window_size();
+                let height = self.window_size().1;
                 let strip = Strip::for_height(height);
                 let panel = self.list_panel().filter(|panel| (x as i32) < panel.width && (y as i32) < panel.bottom);
                 if panel.is_some() {
@@ -3458,11 +3559,8 @@ impl App {
                         self.go_to(pos, pos > self.pos);
                     }
                 } else if self.strip_visible() && y >= f64::from(strip.top) {
-                    let first_cell = f64::from(width as i32 / 2 - strip.cell_w / 2 - strip.pad / 2);
-                    let offset = ((x - first_cell) / f64::from(strip.pitch())).floor() as i64;
-                    let pos = self.pos as i64 + offset;
-                    if (0..self.list.len() as i64).contains(&pos) {
-                        self.go_to(pos as usize, offset > 0);
+                    if let Some(pos) = self.strip_cell_at(x, y) {
+                        self.go_to(pos, pos > self.pos);
                     }
                 } else {
                     // A second click in the same spot does what `f` does.
@@ -3842,10 +3940,10 @@ impl App {
             let line = Text::line_height(px);
             let thickness = unit * 2 / 3;
             let top = bar.middle - thickness / 2;
-            // Darken the picture behind it, fading in from above.
-            for band in 0..6 {
-                canvas.shade(0, bar.middle - unit * 4 + band * unit, width, unit, (230 - 22 * band) as u32);
-            }
+            // Darken the picture behind it, more and more towards the
+            // bottom edge.
+            let shade_top = bar.middle - unit * 6;
+            canvas.fade_down(0, shade_top, width, height - shade_top, 70);
             let done = (f64::from(bar.width) * position / length) as i32;
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 72, bar.width);
             canvas.pill(bar.x, top, bar.width, thickness, TEXT_COLOR, 256, done.max(thickness / 2));
@@ -3875,14 +3973,12 @@ impl App {
                     let (w, h) = (frame.width as i32, frame.height as i32);
                     let left = (at - w / 2).clamp(unit, (width - unit - w).max(unit));
                     let picture_top = label_top - unit / 2 - h;
-                    canvas.fill(left - 2, picture_top - 2, w + 4, h + 4, MENU_EDGE_COLOR);
-                    canvas.image(frame, left, picture_top, w, h);
+                    let round = unit / 2;
+                    canvas.image_rounded(frame, left, picture_top, w, h, round);
+                    canvas.round_outline(left - 2, picture_top - 2, w + 4, h + 4, round + 2, 2, MENU_EDGE_COLOR);
                 }
             } else if self.time_until.is_some() {
-                // To the hundredth while paused, where single frames matter.
-                let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
-                let now = if paused { clock_precise(position) } else { clock(position) };
-                time.push(format!("{now} / {}", clock(length)));
+                time.push(format!("{} / {}", clock(position), clock(length)));
             }
         }
         let exif = if viewing && self.show_exif {
@@ -3909,7 +4005,7 @@ impl App {
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty();
         let panel = if viewing { self.list_panel() } else { None };
         let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some();
-        let boxes = boxes || self.palette.is_some();
+        let boxes = boxes || self.palette.is_some() || self.strip_over.is_some();
         if nothing_to_write && !boxes && !self.help {
             return;
         }
@@ -3918,6 +4014,9 @@ impl App {
         self.draw_grid_footer(canvas, &mut text, &footer, px);
         // What sits on the left moves over to make room for the file list.
         let left = margin + panel.as_ref().map_or(0, |panel| panel.width);
+        if let Some(strip) = &strip {
+            self.draw_strip_tip(canvas, &mut text, strip, px);
+        }
         if let Some(panel) = &panel {
             for pos in panel.first..panel.first + panel.rows {
                 self.want_duration(self.list[pos]);
@@ -4048,11 +4147,32 @@ impl App {
             }
             // The cursor is ringed brightly, the image being viewed quietly.
             if pos == grid.cursor || pos == self.pos {
-                let color = if pos == grid.cursor { TEXT_COLOR } else { HIGHLIGHT_COLOR };
+                let color = if pos == grid.cursor { TEXT_COLOR } else { accent() };
                 let gap = edge * 2;
                 canvas.round_outline(x - gap, y - gap, w + 2 * gap, h + 2 * gap, radius + gap, edge, color);
             }
         }
+    }
+
+    /// The round buttons at the grid's left and right edges, for the page
+    /// before and the page after: where each is, and whether it goes
+    /// forward. Only those with a page to go to.
+    fn grid_arrows(&self) -> Vec<(Button, bool)> {
+        let Some(grid) = &self.grid else { return Vec::new() };
+        let (width, height) = self.window_size();
+        let layout = self.grid_layout((width, height));
+        let pages = self.list.len().div_ceil(layout.per_page());
+        let size = ui_px(height) as i32 * 3;
+        let y = (height as i32 - GridLayout::footer_height(height) - size) / 2;
+        let button = |x: i32| Button { x, y, width: size, height: size, command: Command::Next };
+        let mut arrows = Vec::new();
+        if grid.target >= 1.0 {
+            arrows.push((button(size / 4), false));
+        }
+        if (grid.target as usize) + 1 < pages {
+            arrows.push((button(width as i32 - size - size / 4), true));
+        }
+        arrows
     }
 
     /// The words on the grid: under each picture its title, when those are
@@ -4081,10 +4201,32 @@ impl App {
                 text.draw(canvas, left, area[1] + area[3] + layout.pad / 2, px, color, &title);
             }
         }
+        // A bar above the footer shows where among the pages this one is.
+        let pages = self.list.len().div_ceil(layout.per_page());
+        if let (Some(grid), true) = (&self.grid, pages > 1) {
+            let (track, thick) = (canvas.width / 3, (px as i32 / 4).max(3));
+            let (track_left, track_top) = ((canvas.width - track) / 2, canvas.height - GridLayout::footer_height(canvas.height as u32) - thick);
+            let thumb = (track / pages as i32).max(px as i32 * 2);
+            let along = (grid.scroll() / (pages - 1) as f64).clamp(0.0, 1.0);
+            let thumb_left = track_left + (f64::from(track - thumb) * along).round() as i32;
+            canvas.round_fill(track_left, track_top, track, thick, thick / 2, TEXT_COLOR, 40);
+            canvas.round_fill(thumb_left, track_top, thumb, thick, thick / 2, TEXT_COLOR, 200);
+        }
+        // The buttons for the pages either way, brighter under the pointer.
+        let (mouse_x, mouse_y) = (self.mouse.0 as i32, self.mouse.1 as i32);
+        for (place, forward) in self.grid_arrows() {
+            let over = (place.x..place.x + place.width).contains(&mouse_x) && (place.y..place.y + place.height).contains(&mouse_y);
+            canvas.round_fill(place.x, place.y, place.width, place.height, place.width / 2, if over { accent() } else { 0x000000 }, if over { 256 } else { 170 });
+            canvas.round_outline(place.x, place.y, place.width, place.height, place.width / 2, 1, MENU_EDGE_COLOR);
+            let (arrow, big) = (if forward { commands::icons::CHEVRON_RIGHT } else { commands::icons::CHEVRON_LEFT }, px * 3 / 2);
+            let inset = ((place.width - text.width(arrow, big)) / 2, (place.height - Text::line_height(big)) / 2);
+            text.draw(canvas, place.x + inset.0, place.y + inset.1, big, TEXT_COLOR, arrow);
+        }
     }
 
     /// Draws the line under the grid. While images are marked it also has
-    /// the count and a row of buttons for acting on them.
+    /// the count and a row of buttons for acting on them: each an icon,
+    /// what it does, and its key.
     fn draw_grid_footer(&mut self, canvas: &mut Canvas, text: &mut Text, footer: &[String], px: u32) {
         self.grid_buttons.clear();
         let Some(label) = footer.first() else { return };
@@ -4092,12 +4234,19 @@ impl App {
         let height = Text::line_height(px) + pad;
         let actions = if self.marks.is_empty() { &[][..] } else { commands::GRID_ACTIONS };
         let count = format!("{} marked", self.marks.len());
+        let small = (px * 5 / 6).max(11);
 
-        let button_width = |text: &mut Text, label: &str| text.width(label, px) + 2 * pad;
+        // A button's parts: the icon, what it does, and the key for it.
+        let parts = |text: &mut Text, label: &'static str, command: Command| {
+            let (name, key) = label.split_once("  ").unwrap_or((label, ""));
+            let icon = commands::command_icon(command);
+            let widths = (text.width(icon, px), text.width(name, px), text.width(key, small));
+            (icon, name, key, widths, 2 * pad + widths.0 + pad / 2 + widths.1 + pad + widths.2)
+        };
         let mut width = text.width(label, px);
         if !actions.is_empty() {
             width += gap + text.width(&count, px) + gap - pad;
-            width += actions.iter().map(|(label, _)| button_width(text, label) + pad).sum::<i32>();
+            width += actions.iter().map(|&(label, command)| parts(text, label, command).4 + pad).sum::<i32>();
         }
         let footer_height = GridLayout::footer_height(canvas.height as u32);
         // Nothing of the pictures shows behind this line.
@@ -4105,7 +4254,6 @@ impl App {
         let mut x = (canvas.width - width) / 2;
         let y = canvas.height - footer_height + (footer_height - height) / 2;
 
-        canvas.shade(x - pad, y, width + 2 * pad, height, 80);
         text.draw(canvas, x, y + pad / 2, px, TEXT_COLOR, label);
         if actions.is_empty() {
             return;
@@ -4113,11 +4261,22 @@ impl App {
         x += text.width(label, px) + gap;
         text.draw(canvas, x, y + pad / 2, px, MARK_COLOR, &count);
         x += text.width(&count, px) + gap;
+        let (mouse_x, mouse_y) = (self.mouse.0 as i32, self.mouse.1 as i32);
         for &(label, command) in actions {
-            let width = button_width(text, label);
-            canvas.fill(x, y, width, height, MENU_COLOR);
-            canvas.outline(x, y, width, height, 1, MENU_EDGE_COLOR);
-            text.draw(canvas, x + pad, y + pad / 2, px, TEXT_COLOR, label);
+            let (icon, name, key, widths, width) = parts(text, label, command);
+            let over = (x..x + width).contains(&mouse_x) && (y..y + height).contains(&mouse_y);
+            // The one that cannot be taken back is marked as such.
+            let danger = command == Command::Delete;
+            let fill = if over && danger { DANGER_COLOR } else if over { accent() } else { PLACEHOLDER_COLOR };
+            canvas.round_fill(x, y, width, height, height / 2, fill, 256);
+            canvas.round_outline(x, y, width, height, height / 2, 1, if over { fill } else { MENU_EDGE_COLOR });
+            let mut at = x + pad;
+            text.draw(canvas, at, y + pad / 2, px, if danger && !over { DANGER_COLOR } else { TEXT_COLOR }, icon);
+            at += widths.0 + pad / 2;
+            text.draw(canvas, at, y + pad / 2, px, TEXT_COLOR, name);
+            at += widths.1 + pad;
+            let key_top = y + (height - Text::line_height(small)) / 2;
+            text.draw(canvas, at, key_top, small, if over { TEXT_COLOR } else { DIM_TEXT_COLOR }, key);
             self.grid_buttons.push(Button { x, y, width, height, command });
             x += width + pad;
         }
@@ -4261,35 +4420,85 @@ impl App {
         None
     }
 
+    /// Where in the window the filmstrip's cell for a list position is:
+    /// its left edge. The file on view sits in the middle.
+    fn strip_left(&self, strip: &Strip, pos: usize, window_width: i32) -> i32 {
+        let middle = window_width / 2 - strip.cell_w / 2;
+        middle + (pos as i64 - self.pos as i64) as i32 * strip.pitch()
+    }
+
+    /// The list position of the filmstrip cell at a window position.
+    fn strip_cell_at(&self, x: f64, y: f64) -> Option<usize> {
+        let (width, height) = self.window_size();
+        let strip = Strip::for_height(height);
+        if self.grid.is_some() || !self.strip_visible() || y < f64::from(strip.top) {
+            return None;
+        }
+        let first_cell = f64::from(width as i32 / 2 - strip.cell_w / 2 - strip.pad / 2);
+        let pos = self.pos as i64 + ((x - first_cell) / f64::from(strip.pitch())).floor() as i64;
+        (0..self.list.len() as i64).contains(&pos).then_some(pos as usize)
+    }
+
     fn draw_strip(&self, canvas: &mut Canvas, strip: Strip) {
         canvas.shade(0, strip.top, canvas.width, strip.height, 64);
-        let middle = canvas.width / 2 - strip.cell_w / 2;
         let reach = i64::from(canvas.width / 2 / strip.pitch() + 1);
         let top = strip.top + strip.pad;
+        let round = (strip.pad * 2 / 3).max(3);
+        let edge = (strip.pad / 4).max(2);
 
         for offset in -reach..=reach {
             let pos = self.pos as i64 + offset;
             if !(0..self.list.len() as i64).contains(&pos) {
                 continue;
             }
-            let left = middle + offset as i32 * strip.pitch();
-            match self.loader.thumb(self.list[pos as usize]) {
+            let pos = pos as usize;
+            let left = self.strip_left(&strip, pos, canvas.width);
+            // Where the picture goes in its cell, for what is drawn round it.
+            let [x, y, w, h] = match self.loader.thumb(self.list[pos]) {
                 Some(thumb) => {
                     let bounds = (strip.cell_w as u32, strip.cell_h as u32);
                     let (w, h) = fit_size((thumb.width, thumb.height), bounds, false);
                     let (w, h) = (w as i32, h as i32);
-                    canvas.image(&thumb, left + (strip.cell_w - w) / 2, top + (strip.cell_h - h) / 2, w, h);
+                    let place = [left + (strip.cell_w - w) / 2, top + (strip.cell_h - h) / 2, w, h];
+                    canvas.image_rounded(&thumb, place[0], place[1], w, h, round);
+                    place
                 }
-                None => canvas.fill(left, top, strip.cell_w, strip.cell_h, PLACEHOLDER_COLOR),
+                None => {
+                    canvas.round_fill(left, top, strip.cell_w, strip.cell_h, round, PLACEHOLDER_COLOR, 256);
+                    [left, top, strip.cell_w, strip.cell_h]
+                }
+            };
+            if self.marks.contains(&self.list[pos]) {
+                let dot = strip.pad;
+                canvas.round_fill(x + dot / 3, y + dot / 3, dot, dot, dot / 2, MARK_COLOR, 256);
             }
-            if self.marks.contains(&self.list[pos as usize]) {
-                canvas.fill(left, top, strip.pad, strip.pad, MARK_COLOR);
-            }
-            if offset == 0 {
-                let edge = (strip.pad / 3).max(2);
-                canvas.outline(left - edge, top - edge, strip.cell_w + 2 * edge, strip.cell_h + 2 * edge, edge, TEXT_COLOR);
+            // The file on view is ringed brightly, the one under the
+            // pointer quietly.
+            let ring = if offset == 0 { Some(TEXT_COLOR) } else { (self.strip_over == Some(pos)).then_some(accent_soft()) };
+            if let Some(color) = ring {
+                canvas.round_outline(x - edge, y - edge, w + 2 * edge, h + 2 * edge, round + edge, edge, color);
             }
         }
+    }
+
+    /// Over the filmstrip cell under the pointer: what the file is called,
+    /// and for a video how long it is.
+    fn draw_strip_tip(&mut self, canvas: &mut Canvas, text: &mut Text, strip: &Strip, px: u32) {
+        let Some(pos) = self.strip_over else { return };
+        let id = self.list[pos];
+        self.want_duration(id);
+        let mut tip = format!("{}   {}/{}", title_of(&self.files[id]), pos + 1, self.list.len());
+        if let Some(length) = self.durations.get(&id).copied().flatten() {
+            tip.push_str(&format!("   {}", clock(length)));
+        }
+        let pad = px as i32 / 2;
+        let tip = clipped(text, &tip, canvas.width - 4 * pad, px);
+        let (width, height) = (text.width(&tip, px) + 2 * pad, Text::line_height(px) + pad);
+        let centre = self.strip_left(strip, pos, canvas.width) + strip.cell_w / 2;
+        let left = (centre - width / 2).clamp(pad, (canvas.width - width - pad).max(pad));
+        let top = strip.top - height - pad / 2;
+        panel(canvas, left, top, width, height, pad);
+        text.draw(canvas, left + pad, top + pad / 2, px, TEXT_COLOR, &tip);
     }
 
     /// Where the file list goes, when it is open: down the left side, above
@@ -4344,7 +4553,8 @@ impl App {
 
     /// The video the grid plays a trailer of: the one under its cursor.
     fn trailer_subject(&self) -> Option<usize> {
-        let id = self.list[self.grid.as_ref().filter(|_| self.palette.is_none())?.cursor];
+        let grid = self.grid.as_ref().filter(|grid| grid.moved && self.palette.is_none())?;
+        let id = self.list[grid.cursor];
         files::is_video(&self.files[id]).then_some(id)
     }
 
@@ -4354,6 +4564,7 @@ impl App {
     fn tend_trailer(&mut self) {
         let subject = self.trailer_subject();
         if self.trailer.as_ref().map(|trailer| trailer.id) == subject {
+            self.trailer_due = None;
             return;
         }
         if self.trailer.take().is_some() {
@@ -4361,7 +4572,14 @@ impl App {
                 trailers.stop();
             }
         }
-        let Some(id) = subject else { return };
+        let Some(id) = subject else { return self.trailer_due = None };
+        // Not for a video the cursor is only passing over: opening one
+        // is work, and a trailer flashing up for a moment is a nuisance.
+        match self.trailer_due {
+            Some((due, at)) if due == id && at <= Instant::now() => self.trailer_due = None,
+            Some((due, _)) if due == id => return,
+            _ => return self.trailer_due = Some((id, Instant::now() + TRAILER_DELAY)),
+        }
         let proxy = self.proxy.clone();
         let window = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
         let bounds = self.grid_layout(window).thumb_size();
@@ -4415,7 +4633,7 @@ impl App {
             let id = self.list[pos];
             let top = panel.top + row as i32 * panel.row_height;
             if pos == self.pos {
-                canvas.fill(0, top, panel.width, panel.row_height, HIGHLIGHT_COLOR);
+                canvas.fill(0, top, panel.width, panel.row_height, accent());
             } else if self.list_hover == Some(pos) {
                 canvas.fill(0, top, panel.width, panel.row_height, MENU_EDGE_COLOR);
             }
@@ -4447,14 +4665,16 @@ impl App {
                 continue;
             };
             if menu.selected == Some(index) {
-                canvas.round_fill(menu.x + pad / 2, top, menu.width - pad, row.height, pad / 2, HIGHLIGHT_COLOR, 256);
-            }
-            if self.is_checked(item.command) {
-                let mark = px as i32 / 2;
-                canvas.fill(menu.x + pad + mark / 4, top + (row.height - mark) / 2, mark, mark, TEXT_COLOR);
+                canvas.round_fill(menu.x + pad / 2, top, menu.width - pad, row.height, pad / 2, accent(), 256);
             }
             let line = top + (row.height - Text::line_height(px)) / 2;
-            text.draw(canvas, menu.x + pad + px as i32, line, px, TEXT_COLOR, item.label);
+            // In the gutter: a tick on what is switched on, otherwise the
+            // item's own small picture.
+            let (sign, color) = if self.is_checked(item.command) { (commands::icons::CHECK, TEXT_COLOR) } else { (commands::icon(item), DIM_TEXT_COLOR) };
+            let gutter = px as i32 * 2;
+            let sign_left = menu.x + pad + (gutter - pad - text.width(sign, px)) / 2;
+            text.draw(canvas, sign_left, line, px, color, sign);
+            text.draw(canvas, menu.x + pad + gutter, line, px, TEXT_COLOR, item.label);
             let keys_left = menu.x + menu.width - pad - text.width(item.keys, px);
             text.draw(canvas, keys_left, line, px, DIM_TEXT_COLOR, item.keys);
         }
@@ -4540,29 +4760,42 @@ fn text_block(canvas: &mut Canvas, text: &mut Text, lines: &[String], px: u32, p
     }
 }
 
-/// Draws the delete confirmation in the middle of the window: the question
-/// above a No and a Yes button, one of them highlighted.
+/// Draws the delete confirmation in the middle of the window: a warning
+/// sign and the question, above a Cancel and a Delete button. The one that
+/// Enter would press is filled in, Delete in red.
 fn draw_confirm(canvas: &mut Canvas, text: &mut Text, confirm: &Confirm, px: u32) {
     let pad = px as i32;
     let line_height = Text::line_height(px);
-    let button_width = px as i32 * 6;
+    let (sign, sign_px) = (commands::icons::TRIANGLE_ALERT, px * 3 / 2);
+    let sign_width = text.width(sign, sign_px) + pad;
+    let note = "This cannot be undone.";
+    let button_width = px as i32 * 7;
     let button_height = line_height + pad;
     let buttons_width = 2 * button_width + pad;
-    let width = (text.width(&confirm.question, px).max(buttons_width) + 2 * pad).min(canvas.width);
-    let height = line_height + button_height + 3 * pad;
+    let words = text.width(&confirm.question, px).max(text.width(note, px));
+    let width = ((sign_width + words).max(buttons_width) + 3 * pad).min(canvas.width);
+    let height = 2 * line_height + button_height + 4 * pad;
     let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
 
-    canvas.fill(left, top, width, height, MENU_COLOR);
-    canvas.outline(left, top, width, height, 1, MENU_EDGE_COLOR);
-    text.draw(canvas, left + pad, top + pad, px, TEXT_COLOR, &confirm.question);
+    panel(canvas, left, top, width, height, pad);
+    let words_left = left + 3 * pad / 2 + sign_width;
+    text.draw(canvas, left + 3 * pad / 2, top + 3 * pad / 2, sign_px, DANGER_COLOR, sign);
+    text.draw(canvas, words_left, top + 3 * pad / 2, px, TEXT_COLOR, &confirm.question);
+    text.draw(canvas, words_left, top + 3 * pad / 2 + line_height, px, DIM_TEXT_COLOR, note);
 
-    let buttons_left = left + (width - buttons_width) / 2;
-    let buttons_top = top + 2 * pad + line_height;
-    for (index, (label, selected)) in [("No", !confirm.yes), ("Yes", confirm.yes)].into_iter().enumerate() {
+    // The buttons sit at the right, as the last thing read.
+    let buttons_top = top + height - 3 * pad / 2 - button_height;
+    let buttons_left = left + width - 3 * pad / 2 - buttons_width;
+    let buttons = [("Cancel", !confirm.yes, accent()), ("Delete", confirm.yes, DANGER_COLOR)];
+    for (index, (label, selected, color)) in buttons.into_iter().enumerate() {
         let button_left = buttons_left + index as i32 * (button_width + pad);
-        let fill = if selected { HIGHLIGHT_COLOR } else { MENU_COLOR };
-        canvas.fill(button_left, buttons_top, button_width, button_height, fill);
-        canvas.outline(button_left, buttons_top, button_width, button_height, 1, MENU_EDGE_COLOR);
+        let round = pad / 2;
+        if selected {
+            canvas.round_fill(button_left, buttons_top, button_width, button_height, round, color, 256);
+        } else {
+            canvas.round_fill(button_left, buttons_top, button_width, button_height, round, PLACEHOLDER_COLOR, 256);
+            canvas.round_outline(button_left, buttons_top, button_width, button_height, round, 1, MENU_EDGE_COLOR);
+        }
         let label_left = button_left + (button_width - text.width(label, px)) / 2;
         text.draw(canvas, label_left, buttons_top + pad / 2, px, TEXT_COLOR, label);
     }
@@ -4577,7 +4810,7 @@ fn draw_selection(canvas: &mut Canvas, text: &mut Text, field: &TextField, x: i3
     let Some((from, to)) = field.selection() else { return };
     let mut upto = |at: usize| text.width(&field.text[..at].iter().collect::<String>(), px);
     let (left, right) = (upto(from), upto(to));
-    canvas.fill(x + left, y, right - left, Text::line_height(px), HIGHLIGHT_COLOR);
+    canvas.fill(x + left, y, right - left, Text::line_height(px), accent());
 }
 
 /// Draws a box to type in, with any buttons in a row to its right, and
@@ -4623,7 +4856,7 @@ fn draw_prompt(
     let mut drawn = Vec::new();
     for (at, (button, button_width)) in buttons.iter().zip(widths).enumerate() {
         let focused = focus == at + 1;
-        canvas.fill(x, top, button_width, height, if focused { HIGHLIGHT_COLOR } else { MENU_COLOR });
+        canvas.fill(x, top, button_width, height, if focused { accent() } else { MENU_COLOR });
         canvas.outline(x, top, button_width, height, 1, if focused { TEXT_COLOR } else { MENU_EDGE_COLOR });
         text.draw(canvas, x + pad, top + pad, px, TEXT_COLOR, button);
         drawn.push([x, top, button_width, height]);
@@ -4678,7 +4911,7 @@ fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32) {
     for (sections, (keys_width, labels_width, _)) in commands::HELP.iter().zip(columns) {
         let mut y = top + pad + head;
         for (title, entries) in sections.iter() {
-            text.draw(canvas, x, y, px, HELP_TITLE_COLOR, title);
+            text.draw(canvas, x, y, px, accent_soft(), title);
             canvas.fill(x, y + row - row / 5, keys_width + gap + labels_width, 1, MENU_EDGE_COLOR);
             y += row;
             for (keys, label) in entries.iter() {
@@ -4721,12 +4954,6 @@ fn clock(seconds: f64) -> String {
     } else {
         format!("{minutes}:{seconds:02}")
     }
-}
-
-/// A playback time to the hundredth of a second, as `m:ss.cc`.
-fn clock_precise(seconds: f64) -> String {
-    let hundredths = (seconds.max(0.0).fract() * 100.0) as u64;
-    format!("{}.{hundredths:02}", clock(seconds))
 }
 
 /// Fills in an action template: `%f` is the path and `%n` the file name,
@@ -4785,6 +5012,13 @@ impl ApplicationHandler<Event> for App {
         self.surface = Some(Surface::new(&context, window.clone()).expect("failed to create surface"));
         self.window = Some(window);
         self.update_monitor();
+        // With --grid the grid is what comes up, and nothing plays until
+        // a picture is gone to: not the first video, nor its trailer.
+        if std::mem::take(&mut self.options.grid) {
+            let layout = self.grid_layout(self.window_size());
+            self.grid = Some(Grid { moved: false, ..Grid::at(self.pos, &layout) });
+            self.request();
+        }
         self.refresh();
         // Have the player ready before the first video is reached.
         if self.files.iter().any(|file| files::is_video(file)) {
@@ -4931,6 +5165,10 @@ impl ApplicationHandler<Event> for App {
             self.font_due = None;
             self.redraw();
         }
+        // A trailer waiting for the cursor to settle may now begin.
+        if self.trailer_due.is_some_and(|(_, at)| at <= now) {
+            self.tend_trailer();
+        }
         if self.grid_due.is_some_and(|due| due <= now) {
             self.grid_due = None;
             self.redraw();
@@ -4941,7 +5179,7 @@ impl ApplicationHandler<Event> for App {
         }
 
         let toast_until = self.toast.as_ref().map(|(_, until)| *until);
-        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.font_due, self.grid_due];
+        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.font_due, self.grid_due, self.trailer_due.map(|(_, at)| at)];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

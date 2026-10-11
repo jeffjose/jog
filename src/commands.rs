@@ -37,6 +37,14 @@ pub enum Command {
     ToggleFilmstrip,
     /// The panel of file names down the left side.
     ToggleList,
+    /// In the grid: open the file under the cursor, show its pictures
+    /// larger or smaller, name them or not, and the menu for a cell.
+    OpenFromGrid,
+    GridLarger,
+    GridSmaller,
+    ToggleGridTitles,
+    GridMenu,
+    ToggleMute,
     ToggleInfo,
     ToggleDebug,
     /// What `--verbose` and `--debug` print on the terminal.
@@ -164,14 +172,14 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "R" => Render,
             "f" => ToggleFullscreen,
             "t" => ToggleFilmstrip,
-            "d" => Delete,
+            "D" => Delete,
             "i" => ToggleInfo,
             "I" => ToggleDebug,
             "e" => ToggleExif,
             "a" => ToggleActions,
             "o" => TogglePointer,
-            "m" => MoveTo,
-            "v" => CopyTo,
+            "M" => MoveTo,
+            "V" => CopyTo,
             "u" => Undo,
             "x" => Mark,
             "X" => MarkMenu,
@@ -184,6 +192,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "r" => Reload,
             "s" => Save,
             "S" => SortMenu,
+            "m" => ToggleMute,
             "b" => Restart,
             "W" => ToggleWatch,
             "L" => SaveFilelist,
@@ -227,7 +236,162 @@ const fn video_item(label: &'static str, keys: &'static str, command: Command) -
 }
 
 const fn submenu(label: &'static str, sub: &'static [Option<MenuItem>], applies: Applies) -> Option<MenuItem> {
-    Some(MenuItem { label, keys: "\u{25B8}", command: Command::ToggleMenu, applies, sub })
+    Some(MenuItem { label, keys: icons::CHEVRON_RIGHT, command: Command::ToggleMenu, applies, sub })
+}
+
+/// Icons from Lucide (lucide.dev), which jog carries as a font: each is
+/// the letter that font has it at.
+pub mod icons {
+    pub const ARROW_RIGHT: &str = "\u{e04d}";
+    pub const ARROW_LEFT: &str = "\u{e04c}";
+    pub const SEARCH: &str = "\u{e154}";
+    pub const SHUFFLE: &str = "\u{e161}";
+    pub const PLAY: &str = "\u{e13f}";
+    pub const ROTATE_CCW: &str = "\u{e14b}";
+    pub const ROTATE_CW: &str = "\u{e14c}";
+    pub const CHEVRONS_RIGHT: &str = "\u{e077}";
+    pub const CHEVRONS_LEFT: &str = "\u{e076}";
+    pub const GAUGE: &str = "\u{e1be}";
+    pub const VOLUME_2: &str = "\u{e1aa}";
+    pub const VOLUME_1: &str = "\u{e1a9}";
+    pub const VOLUME_X: &str = "\u{e1ab}";
+    pub const ZOOM_IN: &str = "\u{e1b5}";
+    pub const ZOOM_OUT: &str = "\u{e1b6}";
+    pub const SCAN: &str = "\u{e256}";
+    pub const MAXIMIZE: &str = "\u{e115}";
+    pub const EXPAND: &str = "\u{e219}";
+    pub const SHRINK: &str = "\u{e21f}";
+    pub const FULLSCREEN: &str = "\u{e538}";
+    pub const FLIP_VERTICAL: &str = "\u{e362}";
+    pub const FLIP_HORIZONTAL: &str = "\u{e360}";
+    pub const LAYOUT_GRID: &str = "\u{e104}";
+    pub const FILM: &str = "\u{e0d4}";
+    pub const LIST: &str = "\u{e10b}";
+    pub const IMAGES: &str = "\u{e5c8}";
+    pub const EYE: &str = "\u{e0be}";
+    pub const INFO: &str = "\u{e0fe}";
+    pub const CAMERA: &str = "\u{e068}";
+    pub const ARROW_UP_DOWN: &str = "\u{e380}";
+    pub const SORT: &str = "\u{e04b}";
+    pub const STAR: &str = "\u{e179}";
+    pub const STAR_OFF: &str = "\u{e2af}";
+    pub const FLAG: &str = "\u{e0d6}";
+    pub const COPY: &str = "\u{e0a2}";
+    pub const FOLDER_INPUT: &str = "\u{e337}";
+    pub const FOLDER_PLUS: &str = "\u{e0de}";
+    pub const PENCIL: &str = "\u{e1f8}";
+    pub const REFRESH: &str = "\u{e148}";
+    pub const UNDO: &str = "\u{e2a0}";
+    pub const CLIPBOARD: &str = "\u{e089}";
+    pub const MINUS: &str = "\u{e11f}";
+    pub const TRASH: &str = "\u{e18d}";
+    pub const CIRCLE_X: &str = "\u{e088}";
+    pub const BUG: &str = "\u{e20b}";
+    pub const TERMINAL: &str = "\u{e184}";
+    pub const KEYBOARD: &str = "\u{e283}";
+    pub const LOG_OUT: &str = "\u{e111}";
+    pub const EXTERNAL_LINK: &str = "\u{e0bd}";
+    pub const CHECK: &str = "\u{e070}";
+    pub const CHEVRON_RIGHT: &str = "\u{e073}";
+    pub const CHEVRON_LEFT: &str = "\u{e072}";
+    pub const TRIANGLE_ALERT: &str = "\u{e192}";
+    pub const TYPE: &str = "\u{e197}";
+    pub const MONITOR_PLAY: &str = "\u{e489}";
+    pub const FILE: &str = "\u{e0c4}";
+    pub const STEP_FORWARD: &str = "\u{e3ed}";
+    pub const STEP_BACK: &str = "\u{e3ec}";
+    pub const FAST_FORWARD: &str = "\u{e0c1}";
+    pub const REWIND: &str = "\u{e14a}";
+    pub const SKIP_BACK: &str = "\u{e162}";
+    pub const REPLACE: &str = "\u{e3de}";
+    pub const LIST_FILTER: &str = "\u{e464}";
+    pub const LIST_X: &str = "\u{e23f}";
+}
+
+/// The icon drawn beside a menu item.
+pub fn icon(item: &MenuItem) -> &'static str {
+    use icons::*;
+    if !item.sub.is_empty() {
+        return match item.label {
+            "Playback" => MONITOR_PLAY,
+            "Zoom" => ZOOM_IN,
+            "Rotate" => ROTATE_CW,
+            "View" => EYE,
+            "Sort" => SORT,
+            "Marks" => STAR,
+            "File" => FILE,
+            "Debug" => BUG,
+            _ => "",
+        };
+    }
+    command_icon(item.command)
+}
+
+/// The icon for a command, wherever it is offered.
+pub fn command_icon(command: Command) -> &'static str {
+    use icons::*;
+    use Command::*;
+    match command {
+        Next => ARROW_RIGHT,
+        Previous => ARROW_LEFT,
+        Search | Palette => SEARCH,
+        ClearFilter => LIST_X,
+        ClearMarks => STAR_OFF,
+        Shuffle => SHUFFLE,
+        PlayPause => PLAY,
+        SeekForward => FAST_FORWARD,
+        SeekBack => REWIND,
+        FrameForward => STEP_FORWARD,
+        FrameBack => STEP_BACK,
+        Restart => SKIP_BACK,
+        SpeedUp => CHEVRONS_RIGHT,
+        SpeedDown => CHEVRONS_LEFT,
+        SpeedReset => GAUGE,
+        VolumeUp => VOLUME_2,
+        VolumeDown => VOLUME_1,
+        ToggleMute => VOLUME_X,
+        ZoomIn | GridLarger => ZOOM_IN,
+        ZoomOut | GridSmaller => ZOOM_OUT,
+        ZoomActual => SCAN,
+        ZoomFit => SHRINK,
+        ZoomFill => EXPAND,
+        ToggleEnlarge => MAXIMIZE,
+        RotateRight => ROTATE_CW,
+        RotateLeft => ROTATE_CCW,
+        Flip => FLIP_VERTICAL,
+        Mirror => FLIP_HORIZONTAL,
+        ToggleFullscreen => FULLSCREEN,
+        ToggleGrid => LAYOUT_GRID,
+        ToggleFilmstrip => FILM,
+        ToggleList => LIST,
+        ToggleSlideshow => IMAGES,
+        ToggleWatch => EYE,
+        ToggleInfo => INFO,
+        ToggleExif => CAMERA,
+        ToggleGridTitles => TYPE,
+        SortBy(_) => SORT,
+        ReverseOrder => ARROW_UP_DOWN,
+        Mark | MarkAll => STAR,
+        MarkMenu | InvertMarks => FLAG,
+        OnlyMarked => LIST_FILTER,
+        CopyTo => FOLDER_PLUS,
+        MoveTo => FOLDER_INPUT,
+        Rename => PENCIL,
+        Convert(_) => REPLACE,
+        Undo => UNDO,
+        CopyName | SaveFilelist => COPY,
+        CopyPath => CLIPBOARD,
+        Reload => REFRESH,
+        Remove => MINUS,
+        Trash => TRASH,
+        Delete => CIRCLE_X,
+        ToggleDebug => BUG,
+        ToggleVerbose | ToggleDebugLog => TERMINAL,
+        ToggleHelp => KEYBOARD,
+        OpenFromGrid => EXTERNAL_LINK,
+        Quit => LOG_OUT,
+        _ => "",
+    }
 }
 
 /// The right-click menu. `None` is a separator.
@@ -267,6 +431,7 @@ const PLAYBACK: &[Option<MenuItem>] = &[
     None,
     video_item("Volume up", "Up", Command::VolumeUp),
     video_item("Volume down", "Down", Command::VolumeDown),
+    video_item("Mute", "m", Command::ToggleMute),
 ];
 
 const ZOOM: &[Option<MenuItem>] = &[
@@ -316,8 +481,8 @@ const MARKS: &[Option<MenuItem>] = &[
 ];
 
 const FILE: &[Option<MenuItem>] = &[
-    item("Copy to folder", "v", Command::CopyTo),
-    item("Move to folder", "m", Command::MoveTo),
+    item("Copy to folder", "V", Command::CopyTo),
+    item("Move to folder", "M", Command::MoveTo),
     item("Rename", "F2", Command::Rename),
     image_item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
     image_item("Convert to PNG", "", Command::Convert(Format::Png)),
@@ -330,7 +495,7 @@ const FILE: &[Option<MenuItem>] = &[
     item("Refresh", "r", Command::Reload),
     item("Remove from list", "Del", Command::Remove),
     item("Move to trash", "Ctrl+Del", Command::Trash),
-    item("Delete...", "d", Command::Delete),
+    item("Delete...", "D", Command::Delete),
 ];
 
 const DEBUG: &[Option<MenuItem>] = &[
@@ -339,10 +504,36 @@ const DEBUG: &[Option<MenuItem>] = &[
     item("Print timings to terminal", "", Command::ToggleDebugLog),
 ];
 
+/// The menu for a file in the grid, on a right click or Tab.
+pub const GRID_MENU: &[Option<MenuItem>] = &[
+    item("Open", "Enter", Command::OpenFromGrid),
+    item("Mark", "x", Command::Mark),
+    None,
+    item("Copy to folder", "V", Command::CopyTo),
+    item("Move to folder", "M", Command::MoveTo),
+    item("Rename", "F2", Command::Rename),
+    image_item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
+    None,
+    item("Copy file name", "c", Command::CopyName),
+    item("Copy full path", "C", Command::CopyPath),
+    None,
+    item("Move to trash", "Ctrl+Del", Command::Trash),
+    item("Delete...", "D", Command::Delete),
+    None,
+    item("Find...", "/", Command::Search),
+    submenu("Sort", SORT, Applies::Always),
+    submenu("Marks", MARKS, Applies::Always),
+    None,
+    item("Larger pictures", "Ctrl++", Command::GridLarger),
+    item("Smaller pictures", "Ctrl+-", Command::GridSmaller),
+    item("Titles", "i", Command::ToggleGridTitles),
+    item("Close the grid", "g", Command::ToggleGrid),
+];
+
 /// The `X` menu: what can be done with the marked images.
 pub const MARK_MENU: &[Option<MenuItem>] = &[
-    item("Copy to folder", "v", Command::CopyTo),
-    item("Move to folder", "m", Command::MoveTo),
+    item("Copy to folder", "V", Command::CopyTo),
+    item("Move to folder", "M", Command::MoveTo),
     None,
     item("Copy file names", "c", Command::CopyName),
     item("Copy full paths", "C", Command::CopyPath),
@@ -353,7 +544,7 @@ pub const MARK_MENU: &[Option<MenuItem>] = &[
     image_item("Convert to WebP", "", Command::Convert(Format::WebP)),
     None,
     item("Move to trash", "Ctrl+Del", Command::Trash),
-    item("Delete...", "d", Command::Delete),
+    item("Delete...", "D", Command::Delete),
     None,
     item("Mark all", "", Command::MarkAll),
     item("Invert marks", "", Command::InvertMarks),
@@ -362,10 +553,10 @@ pub const MARK_MENU: &[Option<MenuItem>] = &[
 
 /// The buttons under the grid while images are marked.
 pub const GRID_ACTIONS: &[(&str, Command)] = &[
-    ("Copy  v", Command::CopyTo),
-    ("Move  m", Command::MoveTo),
-    ("Names  c", Command::CopyName),
-    ("Delete  d", Command::Delete),
+    ("Copy to folder  V", Command::CopyTo),
+    ("Move to folder  M", Command::MoveTo),
+    ("Copy names  c", Command::CopyName),
+    ("Delete  D", Command::Delete),
     ("More  X", Command::MarkMenu),
 ];
 
@@ -405,6 +596,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             &[
                 ("g", "Open / close the grid"),
                 ("Arrows  Enter", "Move, open"),
+                ("Tab  Right click", "Menu for the file"),
                 ("Ctrl++  Ctrl+-", "Bigger / smaller pictures"),
                 ("i", "Titles under the pictures"),
             ],
@@ -420,7 +612,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Shift+Left  Shift+Right", "Step one frame"),
                 ("b", "Back to the start"),
                 ("]  [  \\", "Faster / slower / normal speed"),
-                ("Up  Down", "Volume"),
+                ("Up  Down  m", "Volume, mute"),
                 ("Ctrl+Left  Ctrl+Right", "Previous / next file"),
                 ("Pointer at the bottom", "Seek bar with previews"),
                 ("At the end", "The next file plays"),
@@ -461,13 +653,13 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             &[
                 ("x", "Mark / unmark"),
                 ("X", "Menu for the marked"),
-                ("v  m", "Copy / move to the -o folder"),
+                ("V  M", "Copy / move to the -o folder"),
                 ("c  C", "Copy name / full path"),
                 ("F2", "Rename"),
                 ("u", "Undo copy, move or rename"),
                 ("Delete", "Remove from the list"),
                 ("Ctrl+Delete", "Move to trash"),
-                ("d", "Delete for good (asks)"),
+                ("D", "Delete for good (asks)"),
                 ("s  L", "Save a copy / the file list"),
                 ("Enter  1-9", "Run an action"),
             ],
