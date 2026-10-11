@@ -737,6 +737,8 @@ struct GridLayout {
     pad: i32,
     left: i32,
     top: i32,
+    /// How wide the window is: how far apart two pages lie.
+    width: i32,
 }
 
 impl GridLayout {
@@ -757,6 +759,7 @@ impl GridLayout {
             pad: (cell_w / 24).max(2),
             left: (width - columns * cell_w) / 2,
             top: (usable - rows * cell_h) / 2,
+            width,
         }
     }
 
@@ -773,37 +776,31 @@ impl GridLayout {
         ((self.cell_w - 2 * self.pad).max(1) as u32, (self.cell_h - 2 * self.pad).max(1) as u32)
     }
 
-    /// The list position of the cell at a window position, with the grid
-    /// scrolled `scroll` rows down.
-    fn cell_at(&self, x: f64, y: f64, scroll: f64) -> Option<usize> {
+    /// The list position of the cell at a window position, with `page` on
+    /// show.
+    fn cell_at(&self, x: f64, y: f64, page: f64) -> Option<usize> {
         let column = ((x - f64::from(self.left)) / f64::from(self.cell_w)).floor() as i32;
-        let down = (y - f64::from(self.top)) / f64::from(self.cell_h);
-        let row = (down + scroll).floor();
-        let inside = (0..self.columns).contains(&column) && (0.0..f64::from(self.rows)).contains(&down) && row >= 0.0;
-        inside.then(|| row as usize * self.columns as usize + column as usize)
+        let row = ((y - f64::from(self.top)) / f64::from(self.cell_h)).floor() as i32;
+        let inside = (0..self.columns).contains(&column) && (0..self.rows).contains(&row);
+        inside.then(|| page as usize * self.per_page() + (row * self.columns + column) as usize)
     }
 
-    /// The row a list position is in.
-    fn row_of(&self, pos: usize) -> f64 {
-        (pos / self.columns as usize) as f64
-    }
-
-    /// The furthest down the grid scrolls: the last row at the bottom.
-    fn last_scroll(&self, images: usize) -> f64 {
-        (images.div_ceil(self.columns as usize) as f64 - f64::from(self.rows)).max(0.0)
+    /// The page a list position is on.
+    fn page_of(&self, pos: usize) -> f64 {
+        (pos / self.per_page()) as f64
     }
 }
 
 impl Grid {
-    /// A grid showing the row of `cursor` in the middle.
-    fn at(cursor: usize, layout: &GridLayout, images: usize) -> Grid {
-        let row = layout.row_of(cursor) - f64::from(layout.rows / 2);
-        let scroll = row.clamp(0.0, layout.last_scroll(images));
-        Grid { cursor, from: scroll, target: scroll, since: Instant::now() }
+    /// A grid showing the page `cursor` is on.
+    fn at(cursor: usize, layout: &GridLayout) -> Grid {
+        let page = layout.page_of(cursor);
+        Grid { cursor, from: page, target: page, since: Instant::now() }
     }
 
-    /// How many rows down the grid is scrolled just now: on its way from
-    /// where it was to where it is going, fast at first and settling in.
+    /// Which page is at the window's left just now, and how far on to the
+    /// next: on its way from where it was to where it is going, fast at
+    /// first and settling in.
     fn scroll(&self) -> f64 {
         let part = (self.since.elapsed().as_secs_f64() / GRID_SCROLL.as_secs_f64()).min(1.0);
         self.from + (self.target - self.from) * (1.0 - (1.0 - part).powi(3))
@@ -813,19 +810,16 @@ impl Grid {
         self.since.elapsed() < GRID_SCROLL && self.from != self.target
     }
 
-    /// Sets the grid scrolling to `target` rows down from where it is now.
+    /// Sets the grid sliding to page `target` from where it is now.
     fn scroll_to(&mut self, target: f64) {
         if target != self.target {
             (self.from, self.target, self.since) = (self.scroll(), target, Instant::now());
         }
     }
 
-    /// Scrolls just far enough to bring the cursor's row into view.
-    fn follow(&mut self, layout: &GridLayout, images: usize) {
-        let row = layout.row_of(self.cursor);
-        let last_shown = self.target + f64::from(layout.rows) - 1.0;
-        let target = if row < self.target { row } else if row > last_shown { row - f64::from(layout.rows) + 1.0 } else { self.target };
-        self.scroll_to(target.clamp(0.0, layout.last_scroll(images)));
+    /// Slides to the page the cursor is on.
+    fn follow(&mut self, layout: &GridLayout) {
+        self.scroll_to(layout.page_of(self.cursor));
     }
 }
 
@@ -1015,12 +1009,11 @@ impl App {
         let mut thumbs = Vec::new();
         let thumb_size = self.grid_layout(self.monitor).thumb_size();
         if let Some(grid) = &self.grid {
-            // The rows on show, then a screenful below and one above.
-            let layout = self.grid_layout(self.window_size());
-            let (columns, shown) = (i64::from(layout.columns), i64::from(layout.rows) + 1);
-            let top = grid.target.floor() as i64;
-            for rows in [top..top + shown, top + shown..top + 2 * shown, top - shown..top] {
-                let positions = (rows.start * columns).clamp(0, len)..(rows.end * columns).clamp(0, len);
+            // The page on show, then the pages either side of it.
+            let per_page = self.grid_layout(self.window_size()).per_page() as i64;
+            let page = grid.target as i64;
+            for page in [page, page + 1, page - 1] {
+                let positions = (page * per_page).clamp(0, len)..((page + 1) * per_page).clamp(0, len);
                 thumbs.extend(positions.map(|at| self.list[at as usize]));
             }
         } else if self.strip_used {
@@ -2583,7 +2576,7 @@ impl App {
         // Start afresh around the cursor: the rows are not what they were.
         let layout = self.grid_layout(self.window_size());
         if let Some(grid) = &mut self.grid {
-            *grid = Grid::at(grid.cursor, &layout, self.list.len());
+            *grid = Grid::at(grid.cursor, &layout);
         }
         self.toast(format!("{columns} across"));
         self.request();
@@ -2594,7 +2587,7 @@ impl App {
         let layout = self.grid_layout(self.window_size());
         self.grid = match self.grid {
             Some(_) => None,
-            None => Some(Grid::at(self.pos, &layout, self.list.len())),
+            None => Some(Grid::at(self.pos, &layout)),
         };
         self.menu = None;
         self.drag = None;
@@ -2639,17 +2632,19 @@ impl App {
         self.redraw();
     }
 
-    /// Moves the grid cursor one cell: along the list sideways, so that
-    /// the end of a row leads on to the start of the next, and by a row up
-    /// or down. Going down from above a short last row lands on its end.
+    /// Moves the grid cursor one cell. Sideways it goes along the list, as
+    /// left and right do everywhere: the end of a row leads on to the start
+    /// of the next, and the end of a page to the page beside it, which
+    /// slides in. Up and down stay within the page.
     fn step_cursor(&mut self, dx: i64, dy: i64) {
-        let columns = i64::from(self.grid_layout(self.window_size()).columns);
+        let layout = self.grid_layout(self.window_size());
         let Some(grid) = &self.grid else { return };
+        let (columns, per_page) = (i64::from(layout.columns), layout.per_page() as i64);
         let (cursor, last) = (grid.cursor as i64, self.list.len() as i64 - 1);
         let target = cursor + dx + dy * columns;
-        let below = dy > 0 && target > last && cursor / columns < last / columns;
-        if (0..=last).contains(&target) || below {
-            self.move_cursor(target.min(last) - cursor);
+        let same_page = target.div_euclid(per_page) == cursor / per_page;
+        if (0..=last).contains(&target) && (dy == 0 || same_page) {
+            self.move_cursor(target - cursor);
         }
     }
 
@@ -3535,16 +3530,9 @@ impl App {
         self.scrolled -= steps;
         for _ in 0..steps.abs() as u32 {
             if self.grid.is_some() {
-                // A row at a time, the cursor going with the grid so that
-                // it stays where it was in the window.
-                let layout = self.grid_layout(self.window_size());
-                let (rows, images) = (if steps < 0.0 { 1.0 } else { -1.0 }, self.list.len());
-                if let Some(grid) = &mut self.grid {
-                    let target = (grid.target + rows).clamp(0.0, layout.last_scroll(images));
-                    let moved = ((target - grid.target) * f64::from(layout.columns)) as i64;
-                    grid.scroll_to(target);
-                    self.move_cursor(moved);
-                }
+                // A page at a time.
+                let per_page = self.grid_layout(self.window_size()).per_page() as i64;
+                self.move_cursor(if steps < 0.0 { per_page } else { -per_page });
             } else {
                 self.step(steps < 0.0);
             }
@@ -3746,11 +3734,10 @@ impl App {
                 // The grid slides after its cursor; while it does, it is
                 // drawn again and again.
                 let layout = self.grid_layout(window);
-                let images = self.list.len();
                 let mut moved = false;
                 if let Some(grid) = &mut self.grid {
                     let was = grid.target;
-                    grid.follow(&layout, images);
+                    grid.follow(&layout);
                     moved = grid.target != was;
                     if grid.scrolling() {
                         self.grid_due = Some(Instant::now() + Duration::from_millis(8));
@@ -3984,22 +3971,24 @@ impl App {
     }
 
     /// The list positions whose cells are in view, or partly so while the
-    /// grid slides: the rows on show and the one coming in below.
+    /// grid slides: the page on show and the one coming in beside it.
     fn grid_shown(&self, layout: &GridLayout) -> std::ops::Range<usize> {
         let scroll = self.grid.as_ref().map_or(0.0, Grid::scroll);
-        let columns = layout.columns as usize;
-        let first = scroll.floor().max(0.0) as usize * columns;
-        first.min(self.list.len())..(first + (layout.rows as usize + 1) * columns).min(self.list.len())
+        let first = scroll.floor().max(0.0) as usize * layout.per_page();
+        first.min(self.list.len())..(first + 2 * layout.per_page()).min(self.list.len())
     }
 
     /// The space a grid cell gives its picture: left, top, width and
     /// height. With titles on, a line under it is kept for the name.
     fn grid_area(&self, layout: &GridLayout, pos: usize, window_height: u32) -> [i32; 4] {
         let scroll = self.grid.as_ref().map_or(0.0, Grid::scroll);
-        let column = (pos % layout.columns as usize) as i32;
+        let cell = (pos % layout.per_page()) as i32;
+        let (column, row) = (cell % layout.columns, cell / layout.columns);
         let title = if self.grid_titles { Text::line_height(ui_px(window_height)) + layout.pad / 2 } else { 0 };
-        let left = layout.left + column * layout.cell_w + layout.pad;
-        let top = layout.top + ((layout.row_of(pos) - scroll) * f64::from(layout.cell_h)).round() as i32 + layout.pad;
+        // Pages lie side by side; the one on show is at the window's left.
+        let slid = ((layout.page_of(pos) - scroll) * f64::from(layout.width)).round() as i32;
+        let left = layout.left + column * layout.cell_w + layout.pad + slid;
+        let top = layout.top + row * layout.cell_h + layout.pad;
         [left, top, layout.cell_w - 2 * layout.pad, (layout.cell_h - 2 * layout.pad - title).max(1)]
     }
 
@@ -4111,7 +4100,7 @@ impl App {
             width += actions.iter().map(|(label, _)| button_width(text, label) + pad).sum::<i32>();
         }
         let footer_height = GridLayout::footer_height(canvas.height as u32);
-        // The row coming in from below stops short of this line.
+        // Nothing of the pictures shows behind this line.
         canvas.fill(0, canvas.height - footer_height, canvas.width, footer_height, GRID_COLOR);
         let mut x = (canvas.width - width) / 2;
         let y = canvas.height - footer_height + (footer_height - height) / 2;
@@ -4139,7 +4128,13 @@ impl App {
         let grid = self.grid.as_ref()?;
         let path = &self.files[self.list[grid.cursor]];
         let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
-        Some(format!("{name}   [{}/{}]", grid.cursor + 1, self.list.len()))
+        let layout = self.grid_layout(self.window_size());
+        let pages = self.list.len().div_ceil(layout.per_page()).max(1);
+        let mut footer = format!("{name}   [{}/{}]", grid.cursor + 1, self.list.len());
+        if pages > 1 {
+            footer.push_str(&format!("      Page {} of {pages}", grid.cursor / layout.per_page() + 1));
+        }
+        Some(footer)
     }
 
     fn info_line(&mut self) -> String {

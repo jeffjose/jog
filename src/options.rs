@@ -94,7 +94,8 @@ Keys:
   d                          delete (asks first; marked images, or the current one)
   g                          grid view           ?             list of shortcuts
                              in the grid: Ctrl with + or - for larger or smaller
-                             pictures; it scrolls by the row as the cursor moves
+                             pictures; going past the end of a page slides the
+                             next one in from the side
   Tab or right click         menu                h             slideshow
   x                          mark / unmark       c / C         copy file name / full path
   v / m                      copy / move marked images (or the current one) to -o DIR
