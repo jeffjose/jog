@@ -6241,12 +6241,17 @@ impl App {
         let bar_wanted = viewing && (self.hover.is_some() || self.time_until.is_some());
         // It rises from the bottom edge and sinks back into it.
         let bar_level = self.glide(&self.bar_rise, if bar_wanted { 1.0 } else { 0.0 }, EASE);
+        // Where the bar stands on a strip it comes up from behind it. What
+        // the strip shows is kept while the bar is on its way, and put back
+        // over whatever of the bar was drawn across it.
+        let onto = (self.strip_pinned && strip.is_some()) || scene_strip.is_some();
+        let band_top = Strip::for_height(height as u32).top;
+        let behind = (onto && bar_level > 0.01 && bar_level < 0.999).then(|| canvas.copy(0, band_top, width, height - band_top));
         if let Some((position, length)) = (bar_level > 0.01).then(|| self.video_time()).flatten() {
             let mut bar = self.seek_bar();
-            // From the bottom edge; or, where it stands on a strip, down
-            // onto it from a little above: it does not come up across one.
-            let onto = self.strip_pinned || self.scenes_shown();
-            let travel = if onto { -bar.unit * 2 } else { bar.unit * 6 };
+            // Up from the bottom edge, or from behind the strip it stands
+            // on: the same way either way.
+            let travel = if onto { bar.unit * 5 } else { bar.unit * 6 };
             bar.middle += ((1.0 - bar_level) * f64::from(travel)) as i32;
             let unit = bar.unit;
             let line = Text::line_height(px);
@@ -6366,14 +6371,7 @@ impl App {
         }
         if let Some(strip) = &strip {
             self.draw_strip_lengths(canvas, &mut text, strip, px);
-            // A cross above its right end closes it.
-            if let Some(place) = self.strip_close() {
-                let over = (place.x..place.x + place.width).contains(&(self.mouse.0 as i32)) && (place.y..place.y + place.height).contains(&(self.mouse.1 as i32));
-                canvas.round_fill(place.x, place.y, place.width, place.height, place.width / 2, if over { accent() } else { 0x000000 }, if over { 256 } else { 170 });
-                let (cross, small) = (commands::icons::X, (px * 5 / 6).max(11));
-                let inset = ((place.width - text.width(cross, small)) / 2, (place.height - Text::line_height(small)) / 2);
-                text.draw(canvas, place.x + inset.0, place.y + inset.1, small, if over { on_accent() } else { TEXT_COLOR }, cross);
-            }
+            self.draw_strip_close(canvas, &mut text, px);
             self.draw_strip_tip(canvas, &mut text, strip, px);
         }
         if let Some(panel) = &panel {
@@ -6421,6 +6419,17 @@ impl App {
                 Ordering::Greater => *anchor,
             };
             text.draw(canvas, left, *top, px, TEXT_COLOR, label);
+        }
+        if let Some(behind) = &behind {
+            canvas.dissolve(0, band_top, width, height - band_top, behind, 256);
+            // Its words went with it, and are written again.
+            if let Some(strip) = &scene_strip {
+                self.draw_scene_labels(canvas, &mut text, strip, px);
+            }
+            if let Some(strip) = &strip {
+                self.draw_strip_lengths(canvas, &mut text, strip, px);
+                self.draw_strip_close(canvas, &mut text, px);
+            }
         }
         text_block(canvas, &mut text, &error, px, |w, h| ((width - w) / 2, (height - h) / 2));
         // A menu or a box comes up over a moment: what was there is kept
@@ -7020,6 +7029,16 @@ impl App {
                 canvas.round_outline(x - edge, y - edge, w + 2 * edge, h + 2 * edge, round + edge, edge, color);
             }
         }
+    }
+
+    /// The cross in the corner of the filmstrip, which closes it.
+    fn draw_strip_close(&self, canvas: &mut Canvas, text: &mut Text, px: u32) {
+        let Some(place) = self.strip_close() else { return };
+        let over = (place.x..place.x + place.width).contains(&(self.mouse.0 as i32)) && (place.y..place.y + place.height).contains(&(self.mouse.1 as i32));
+        canvas.round_fill(place.x, place.y, place.width, place.height, place.width / 2, if over { accent() } else { 0x000000 }, if over { 256 } else { 170 });
+        let (cross, small) = (commands::icons::X, (px * 5 / 6).max(11));
+        let inset = ((place.width - text.width(cross, small)) / 2, (place.height - Text::line_height(small)) / 2);
+        text.draw(canvas, place.x + inset.0, place.y + inset.1, small, if over { on_accent() } else { TEXT_COLOR }, cross);
     }
 
     /// In the corner of each video in the filmstrip, how long it is, as the
