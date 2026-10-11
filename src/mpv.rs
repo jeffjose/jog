@@ -24,6 +24,7 @@ const EVENT_PLAYBACK_RESTART: c_int = 21;
 const EVENT_PROPERTY_CHANGE: c_int = 22;
 const RENDER_PARAM_END: c_int = 0;
 const RENDER_PARAM_API_TYPE: c_int = 1;
+const RENDER_PARAM_BLOCK_FOR_TARGET_TIME: c_int = 12;
 const RENDER_PARAM_SW_SIZE: c_int = 17;
 const RENDER_PARAM_SW_FORMAT: c_int = 18;
 const RENDER_PARAM_SW_STRIDE: c_int = 19;
@@ -203,6 +204,13 @@ impl Player {
                 ("osc", "no"),
                 ("terminal", "no"),
                 ("audio-client-name", "jog"),
+                // After a seek the player otherwise waits for its first
+                // frame to have been drawn before it does anything else,
+                // answering questions included. Whoever draws it here is
+                // as likely as not asking one just then, and each waits on
+                // the other until the player gives up a fifth of a second
+                // later: a pause after every seek.
+                ("video-latency-hacks", "yes"),
             ];
             // A preview only ever shows single frames near where it is asked
             // to look, so it trades accuracy and picture quality for speed.
@@ -221,7 +229,11 @@ impl Player {
                 Role::Playback { silent: true } => &[("ao", "null")],
                 Role::Preview => preview,
             };
-            for (name, value) in options.iter().chain(extra) {
+            // `JOG_MPV` sets further options of the player, as `name=value`
+            // with commas between: for trying things out.
+            let tried = std::env::var("JOG_MPV").unwrap_or_default();
+            let tried = tried.split(',').filter_map(|pair| pair.split_once('='));
+            for (name, value) in options.iter().chain(extra).copied().chain(tried) {
                 (api.set_option_string)(handle, c_string(name).as_ptr(), c_string(value).as_ptr());
             }
             if (api.initialize)(handle) < 0 {
@@ -395,6 +407,12 @@ impl Player {
         }
         let mut size = [width as c_int, height as c_int];
         let mut stride = width as usize * 4;
+        // Left to itself the call waits until the frame is due on screen,
+        // which holds up whoever called for as long as a frame lasts, and
+        // for a fifth of a second when a seek does away with the frame
+        // being waited on. The player says when each frame is to be drawn
+        // anyway, so nothing is gained by waiting here as well.
+        let mut wait: c_int = 0;
         // In memory a little-endian `0RGB` pixel is blue, green, red, unused.
         let format: &CStr = c"bgr0";
         let mut params = [
@@ -402,6 +420,7 @@ impl Player {
             RenderParam { kind: RENDER_PARAM_SW_FORMAT, data: format.as_ptr() as *mut c_void },
             RenderParam { kind: RENDER_PARAM_SW_STRIDE, data: (&mut stride as *mut usize).cast() },
             RenderParam { kind: RENDER_PARAM_SW_POINTER, data: pixels.as_mut_ptr().cast() },
+            RenderParam { kind: RENDER_PARAM_BLOCK_FOR_TARGET_TIME, data: (&mut wait as *mut c_int).cast() },
             RenderParam { kind: RENDER_PARAM_END, data: ptr::null_mut() },
         ];
         // SAFETY: the buffer holds `height` rows of `stride` bytes, checked
