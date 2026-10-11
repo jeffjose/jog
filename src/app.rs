@@ -262,14 +262,24 @@ impl SeekBar {
     /// The square at the far left holding the play / pause symbol, as its
     /// top-left corner and side.
     fn symbol(&self) -> (i32, i32, i32) {
+        self.control(1)
+    }
+
+    /// One of the three squares at the far left: the file before, play or
+    /// pause, and the file after, counted from 0.
+    fn control(&self, which: i32) -> (i32, i32, i32) {
         let side = self.unit * 5 / 4;
-        (self.unit * 3 / 2, self.middle - side / 2, side)
+        (self.unit * 3 / 2 + which * (side + self.unit), self.middle - side / 2, side)
     }
 
     /// Whether a window position is on the symbol, with some slack around
     /// it to make it easy to hit.
     fn on_symbol(&self, x: f64, y: f64) -> bool {
-        let (left, top, side) = self.symbol();
+        self.on_control(1, x, y)
+    }
+
+    fn on_control(&self, which: i32, x: f64, y: f64) -> bool {
+        let (left, top, side) = self.control(which);
         let slack = f64::from(self.unit / 2);
         let within = |at: f64, from: i32| at >= f64::from(from) - slack && at < f64::from(from + side) + slack;
         within(x, left) && within(y, top)
@@ -565,8 +575,13 @@ pub struct App {
     list_scroll: Option<(usize, usize, usize)>,
     /// The list position under the pointer, in the file list.
     list_hover: Option<usize>,
+    list_button_over: Option<usize>,
     /// The list position of the filmstrip cell under the pointer.
     strip_over: Option<usize>,
+    /// How many files along from the one on view the filmstrip has been
+    /// moved with the wheel. Going to a file puts it back.
+    strip_scroll: i64,
+    strip_close_over: bool,
     /// Which of the grid's buttons the pointer is over, counting those
     /// under it and then those at its sides.
     grid_over: Option<usize>,
@@ -759,7 +774,7 @@ struct Strip {
 
 impl Strip {
     fn for_height(window_height: u32) -> Strip {
-        let height = (window_height as i32 / 12).clamp(64, 220).min(window_height as i32);
+        let height = (window_height as i32 / 12).clamp(110, 220).min(window_height as i32);
         let pad = height / 10;
         let cell_h = height - 2 * pad;
         Strip { top: window_height as i32 - height, height, pad, cell_w: cell_h * 3 / 2, cell_h }
@@ -934,7 +949,10 @@ impl App {
             grid_due: None,
             list_scroll: None,
             list_hover: None,
+            list_button_over: None,
             strip_over: None,
+            strip_scroll: 0,
+            strip_close_over: false,
             grid_over: None,
             durations: HashMap::new(),
             prober: None,
@@ -1111,7 +1129,8 @@ impl App {
             }
         } else if self.strip_used {
             for distance in 0..=THUMB_RADIUS {
-                for at in [pos + distance, pos - distance] {
+                let centre = self.strip_centre();
+                for at in [centre + distance, centre - distance] {
                     if (0..len).contains(&at) && !thumbs.contains(&self.list[at as usize]) {
                         thumbs.push(self.list[at as usize]);
                     }
@@ -1210,7 +1229,9 @@ impl App {
             return;
         }
         self.pos = pos;
-        // The filmstrip has moved under the pointer.
+        // The filmstrip comes back to the file on view, and has moved
+        // under the pointer.
+        self.strip_scroll = 0;
         self.strip_over = self.strip_cell_at(self.mouse.0, self.mouse.1);
         self.forward = forward;
         self.error = None;
@@ -1341,7 +1362,8 @@ impl App {
         let base = if self.strip_pinned { Strip::for_height(height).top } else { height as i32 };
         // Room on the left for the play / pause symbol and the elapsed
         // time, and on the right for the duration.
-        SeekBar { x: unit * 8, width: (width as i32 - unit * 14).max(1), middle: base - unit * 2, unit }
+        // Room on the left for the three buttons and the elapsed time.
+        SeekBar { x: unit * 13, width: (width as i32 - unit * 19).max(1), middle: base - unit * 2, unit }
     }
 
     /// Tracks the pointer over the seek bar: shows it at full size, and the
@@ -2015,7 +2037,7 @@ impl App {
             Action(slot) => self.run_action(slot),
             Mark => self.toggle_mark(),
             MarkMenu => self.open_mark_menu(),
-            SortMenu => self.open_menu(commands::SORT, Some("Sort".to_string())),
+            SortMenu => self.open_palette_with(">sort "),
             SortBy(sort) => self.sort_by(sort),
             Shuffle => {
                 self.shuffle();
@@ -3045,6 +3067,16 @@ impl App {
 
     /// Opens the box for finding files, on `/` and Ctrl+K. A search kept
     /// earlier comes back as it was typed, ready to be changed.
+    /// Opens the box with something already typed: `>sort `, say, to
+    /// pick among the ways of sorting by typing a few letters.
+    fn open_palette_with(&mut self, typed: &str) {
+        self.open_palette();
+        if let Some(palette) = &mut self.palette {
+            palette.field = TextField::new(typed.chars().collect(), typed.chars().count());
+        }
+        self.palette_changed();
+    }
+
     fn open_palette(&mut self) {
         let text: Vec<char> = self.filter.as_ref().map(|(typed, _)| typed.chars().collect()).unwrap_or_default();
         let field = TextField::new(text.clone(), text.len());
@@ -3595,13 +3627,17 @@ impl App {
             return;
         }
         let hover = self.list_row_at(x, y);
-        if hover != self.list_hover {
-            self.list_hover = hover;
+        // The buttons at the head of the file list light up as well.
+        let on_button = self.list_buttons().iter().position(|b| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32)));
+        if hover != self.list_hover || on_button != self.list_button_over {
+            (self.list_hover, self.list_button_over) = (hover, on_button);
             self.redraw();
         }
         let over = self.strip_cell_at(x, y);
-        if over != self.strip_over {
-            self.strip_over = over;
+        // The cross above the strip lights up under the pointer too.
+        let on_close = self.strip_close().is_some_and(|place| (place.x..place.x + place.width).contains(&(x as i32)) && (place.y..place.y + place.height).contains(&(y as i32)));
+        if over != self.strip_over || on_close != self.strip_close_over {
+            (self.strip_over, self.strip_close_over) = (over, on_close);
             self.redraw();
         }
         match &mut self.drag {
@@ -3633,7 +3669,9 @@ impl App {
                 let height = self.window_size().1;
                 // A thin strip at the bottom edge opens the filmstrip; once
                 // open, it stays while the pointer is anywhere over it.
-                let zone = if self.strip_visible() { Strip::for_height(height).height } else { (height as i32 / 50).max(6) };
+                // The button that closes it sits just above it.
+                let reach = ui_px(height) as i32 * 2;
+                let zone = if self.strip_visible() { Strip::for_height(height).height + reach } else { (height as i32 / 50).max(6) };
                 self.set_strip_hover(y >= f64::from(height as i32 - zone));
             }
         }
@@ -3750,7 +3788,11 @@ impl App {
             }
             (MouseButton::Left, true) if self.hover.is_some() => {
                 let bar = self.seek_bar();
-                if bar.on_symbol(x, y) {
+                if bar.on_control(0, x, y) {
+                    self.step(false);
+                } else if bar.on_control(2, x, y) {
+                    self.step(true);
+                } else if bar.on_symbol(x, y) {
                     self.video_action(VideoAction::Pause);
                 } else if bar.on_track(x) {
                     // Click to jump there; keep the button down to scrub.
@@ -3762,14 +3804,26 @@ impl App {
                 let height = self.window_size().1;
                 let strip = Strip::for_height(height);
                 let panel = self.list_panel().filter(|panel| (x as i32) < panel.width && (y as i32) < panel.bottom);
-                if self.list_close_at(x, y) {
-                    self.show_list = false;
+                let inside = |b: &Button| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32));
+                if let Some(command) = self.list_buttons().iter().find(|button| inside(button)).map(|button| button.command) {
+                    // One of the buttons at the head of the file list.
+                    self.execute(command, event_loop);
+                } else if let Some(pos) = self.list_star_at(x, y) {
+                    // The star at the end of a row marks that file, or
+                    // takes its mark away.
+                    let id = self.list[pos];
+                    if !self.marks.remove(&id) {
+                        self.marks.insert(id);
+                    }
                     self.redraw();
                 } else if panel.is_some() {
                     // A click on a name goes to that file.
                     if let Some(pos) = self.list_row_at(x, y) {
                         self.go_to(pos, pos > self.pos);
                     }
+                } else if self.strip_close().is_some_and(|place| (place.x..place.x + place.width).contains(&(x as i32)) && (place.y..place.y + place.height).contains(&(y as i32))) {
+                    (self.strip_pinned, self.strip_hover, self.strip_over) = (false, false, None);
+                    self.redraw();
                 } else if self.strip_visible() && y >= f64::from(strip.top) {
                     if let Some(pos) = self.strip_cell_at(x, y) {
                         self.go_to(pos, pos > self.pos);
@@ -3826,6 +3880,16 @@ impl App {
             if let (Some(palette), Some(row)) = (&mut self.palette, under) {
                 palette.selected = row;
             }
+            self.request();
+            return self.redraw();
+        }
+        // Over the filmstrip it moves the strip along, to look at what is
+        // further off without leaving the file on view. A click goes there.
+        if self.strip_cell_at(self.mouse.0, self.mouse.1).is_some() {
+            let last = self.list.len() as i64 - 1;
+            let centre = (self.strip_centre() - (lines * 2.0).round() as i64).clamp(0, last);
+            self.strip_scroll = centre - self.pos as i64;
+            self.strip_over = self.strip_cell_at(self.mouse.0, self.mouse.1);
             self.request();
             return self.redraw();
         }
@@ -4188,6 +4252,11 @@ impl App {
             // The symbol shows the state: a triangle while playing, two bars
             // while paused.
             let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
+            // Either side of it: the file before and the file after.
+            for (control, icon) in [(0, commands::icons::SKIP_BACK), (2, commands::icons::SKIP_FORWARD)] {
+                let (left, top, side) = bar.control(control);
+                labels.push((left + side / 2, top + (side - line) / 2, Ordering::Equal, icon.to_string()));
+            }
             let (symbol_left, symbol_top, side) = bar.symbol();
             if paused {
                 canvas.pause_symbol(symbol_left, symbol_top, side, TEXT_COLOR);
@@ -4253,6 +4322,14 @@ impl App {
         let left = margin + panel.as_ref().map_or(0, |panel| panel.width);
         if let Some(strip) = &strip {
             self.draw_strip_lengths(canvas, &mut text, strip, px);
+            // A cross above its right end closes it.
+            if let Some(place) = self.strip_close() {
+                let over = (place.x..place.x + place.width).contains(&(self.mouse.0 as i32)) && (place.y..place.y + place.height).contains(&(self.mouse.1 as i32));
+                canvas.round_fill(place.x, place.y, place.width, place.height, place.width / 2, if over { accent() } else { 0x000000 }, if over { 256 } else { 170 });
+                let (cross, small) = (commands::icons::X, (px * 5 / 6).max(11));
+                let inset = ((place.width - text.width(cross, small)) / 2, (place.height - Text::line_height(small)) / 2);
+                text.draw(canvas, place.x + inset.0, place.y + inset.1, small, if over { on_accent() } else { TEXT_COLOR }, cross);
+            }
             self.draw_strip_tip(canvas, &mut text, strip, px);
         }
         if let Some(panel) = &panel {
@@ -4267,7 +4344,7 @@ impl App {
         text_block(canvas, &mut text, &actions, px, |w, h| (width - margin - w, bottom - h));
         text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w, margin));
         // Twice the usual size, centred just above the seek bar.
-        text_block(canvas, &mut text, &time, px * 2, |w, h| ((width - w) / 2, time_bottom - h));
+        text_block(canvas, &mut text, &time, px, |w, h| ((width - w) / 2, time_bottom - h));
         for (anchor, top, side, label) in &labels {
             let label_width = text.width(label, px);
             let left = match side {
@@ -4281,15 +4358,15 @@ impl App {
         if let Some(menu) = &self.menu {
             self.draw_menu(canvas, &mut text, menu);
         }
-        // Above the filmstrip or, in the grid, above the line under it.
-        let box_bottom = if viewing { bottom } else { height - GridLayout::footer_height(height as u32) };
         if let Some(prompt) = &self.prompt {
-            let label = match prompt.kind {
-                PromptKind::Rename => "Rename:   ",
-                PromptKind::SendTo { moving: true } => "Move to:   ",
-                PromptKind::SendTo { moving: false } => "Copy to:   ",
+            let count = self.targets().len();
+            let files = if count == 1 { self.name_of(prompt.id) } else { format!("{count} files") };
+            let (icon, title, hint) = match prompt.kind {
+                PromptKind::Rename => (commands::icons::PENCIL, "Rename".to_string(), "Enter to rename"),
+                PromptKind::SendTo { moving: true } => (commands::icons::FOLDER_INPUT, format!("Move {files} to"), "Enter to move, the folder is made if need be"),
+                PromptKind::SendTo { moving: false } => (commands::icons::FOLDER_PLUS, format!("Copy {files} to"), "Enter to copy, the folder is made if need be"),
             };
-            draw_prompt(canvas, &mut text, label, &prompt.field, "", &[], 0, px, box_bottom);
+            draw_prompt(canvas, &mut text, icon, &title, &prompt.field, hint, px);
         }
         if let Some(layout) = self.palette_layout() {
             for id in self.palette_shown() {
@@ -4432,16 +4509,10 @@ impl App {
         self.grid.as_ref()?;
         let (width, height) = self.window_size();
         let size = ui_px(height) as i32 * 2;
-        Some(Button { x: width as i32 - size - size / 3, y: size / 3, width: size, height: size, command: Command::ToggleGrid })
+        // In from the corner a little, both ways.
+        Some(Button { x: width as i32 - size - size, y: size, width: size, height: size, command: Command::ToggleGrid })
     }
 
-    /// Whether a window position is on the cross that closes the file list.
-    fn list_close_at(&self, x: f64, y: f64) -> bool {
-        self.list_panel().is_some_and(|panel| {
-            let reach = panel.px as i32 * 2;
-            (panel.width - reach..panel.width).contains(&(x as i32)) && (0..panel.top).contains(&(y as i32))
-        })
-    }
 
     /// The round buttons at the grid's left and right edges, for the page
     /// before and the page after: where each is, and whether it goes
@@ -4737,9 +4808,25 @@ impl App {
 
     /// Where in the window the filmstrip's cell for a list position is:
     /// its left edge. The file on view sits in the middle.
+    /// The list position in the middle of the filmstrip: the file on view,
+    /// unless the wheel has moved the strip along to look further afield.
+    fn strip_centre(&self) -> i64 {
+        (self.pos as i64 + self.strip_scroll).clamp(0, self.list.len() as i64 - 1)
+    }
+
+    /// The small round button above the filmstrip's right end that
+    /// closes it.
+    fn strip_close(&self) -> Option<Button> {
+        let (width, height) = self.window_size();
+        let strip = Strip::for_height(height);
+        let size = ui_px(height) as i32 * 3 / 2;
+        let shown = self.grid.is_none() && self.strip_visible();
+        shown.then_some(Button { x: width as i32 - size - size / 2, y: strip.top - size - size / 3, width: size, height: size, command: Command::ToggleFilmstrip })
+    }
+
     fn strip_left(&self, strip: &Strip, pos: usize, window_width: i32) -> i32 {
         let middle = window_width / 2 - strip.cell_w / 2;
-        middle + (pos as i64 - self.pos as i64) as i32 * strip.pitch()
+        middle + (pos as i64 - self.strip_centre()) as i32 * strip.pitch()
     }
 
     /// The list position of the filmstrip cell at a window position.
@@ -4750,7 +4837,7 @@ impl App {
             return None;
         }
         let first_cell = f64::from(width as i32 / 2 - strip.cell_w / 2 - strip.pad / 2);
-        let pos = self.pos as i64 + ((x - first_cell) / f64::from(strip.pitch())).floor() as i64;
+        let pos = self.strip_centre() + ((x - first_cell) / f64::from(strip.pitch())).floor() as i64;
         (0..self.list.len() as i64).contains(&pos).then_some(pos as usize)
     }
 
@@ -4762,7 +4849,7 @@ impl App {
         let edge = (strip.pad / 4).max(2);
 
         for offset in -reach..=reach {
-            let pos = self.pos as i64 + offset;
+            let pos = self.strip_centre() + offset;
             if !(0..self.list.len() as i64).contains(&pos) {
                 continue;
             }
@@ -4789,7 +4876,7 @@ impl App {
             }
             // The file on view is ringed brightly, the one under the
             // pointer quietly.
-            let ring = if offset == 0 { Some(TEXT_COLOR) } else { (self.strip_over == Some(pos)).then_some(accent_soft()) };
+            let ring = if pos == self.pos { Some(TEXT_COLOR) } else { (self.strip_over == Some(pos)).then_some(accent_soft()) };
             if let Some(color) = ring {
                 canvas.round_outline(x - edge, y - edge, w + 2 * edge, h + 2 * edge, round + edge, edge, color);
             }
@@ -4803,7 +4890,7 @@ impl App {
         let reach = i64::from(canvas.width / 2 / strip.pitch() + 1);
         let (top, pad) = (strip.top + strip.pad, (small as i32 / 4).max(2));
         for offset in -reach..=reach {
-            let pos = self.pos as i64 + offset;
+            let pos = self.strip_centre() + offset;
             if !(0..self.list.len() as i64).contains(&pos) {
                 continue;
             }
@@ -4849,13 +4936,13 @@ impl App {
         let (width, height) = self.window_size();
         let px = ui_px(height);
         let bottom = if self.strip_visible() { Strip::for_height(height).top } else { height as i32 };
-        let row_height = Text::line_height(px) + px as i32 / 4;
-        // The first row's worth of space holds the heading.
-        let top = row_height + px as i32;
+        let row_height = Text::line_height(px) + px as i32 / 2;
+        // Above the rows, a heading with the buttons at its right.
+        let top = Text::line_height(px) + px as i32 * 2;
         let rows = (((bottom - top) / row_height).max(1) as usize).min(self.list.len());
         let scrolled = self.list_scroll.filter(|(pos, len, _)| (*pos, *len) == (self.pos, self.list.len()));
         let first = scrolled.map_or(self.pos.saturating_sub(rows / 2), |(_, _, first)| first).min(self.list.len() - rows);
-        Some(ListPanel { width: (px as i32 * 26).min(width as i32 / 2), bottom, top, row_height, first, rows, px })
+        Some(ListPanel { width: (px as i32 * 30).min(width as i32 / 2), bottom, top, row_height, first, rows, px })
     }
 
     /// Asks for the length of a video, once; `Event::Duration` brings it.
@@ -4974,47 +5061,89 @@ impl App {
         (0..panel.rows as i32).contains(&row).then(|| panel.first + row as usize)
     }
 
+
+    /// The buttons at the right of the file list's heading: sort, shuffle,
+    /// and close.
+    fn list_buttons(&self) -> Vec<Button> {
+        let Some(panel) = self.list_panel() else { return Vec::new() };
+        let (px, side) = (panel.px as i32, panel.px as i32 * 2);
+        let commands = [Command::SortMenu, Command::Shuffle, Command::ToggleList];
+        let left = panel.width - px / 2 - commands.len() as i32 * side;
+        let place = |(at, command): (usize, Command)| Button { x: left + at as i32 * side, y: (panel.top - side) / 2, width: side, height: side, command };
+        commands.into_iter().enumerate().map(place).collect()
+    }
+
+    /// The list position whose star, at the right end of its row, is at a
+    /// window position.
+    fn list_star_at(&self, x: f64, y: f64) -> Option<usize> {
+        let panel = self.list_panel()?;
+        let star = (panel.width - panel.px as i32 * 2..panel.width).contains(&(x as i32));
+        self.list_row_at(x, y).filter(|_| star)
+    }
+
     fn draw_list(&self, canvas: &mut Canvas, text: &mut Text, panel: &ListPanel) {
         let px = panel.px;
         let pad = px as i32 / 2;
-        canvas.shade(0, 0, panel.width, panel.bottom, 40);
+        let mouse = (self.mouse.0 as i32, self.mouse.1 as i32);
+        canvas.shade(0, 0, panel.width, panel.bottom, 36);
+        canvas.fill(panel.width - 1, 0, 1, panel.bottom, MENU_EDGE_COLOR);
+
+        // The heading: how many files, and what they are narrowed to, with
+        // the buttons at its right lighting up under the pointer.
+        let buttons = self.list_buttons();
         let heading = match &self.filter {
-            Some((typed, all)) => format!("{} of {}: {typed}", self.list.len(), all.len()),
+            Some((typed, all)) => format!("{} of {}   {typed}", self.list.len(), all.len()),
             None => format!("{} files", self.list.len()),
         };
-        let heading = clipped(text, &heading, panel.width - 3 * pad, px);
-        text.draw(canvas, pad * 2, pad, px, DIM_TEXT_COLOR, &heading);
-        // A cross at the top right closes the list.
-        let cross = commands::icons::X;
-        let over = self.list_close_at(self.mouse.0, self.mouse.1);
-        let cross_left = panel.width - pad * 2 - text.width(cross, px);
-        text.draw(canvas, cross_left, pad, px, if over { TEXT_COLOR } else { DIM_TEXT_COLOR }, cross);
+        let room = buttons.first().map_or(panel.width, |button| button.x) - 3 * pad;
+        let heading = clipped(text, &heading, room, px);
+        let heading_top = (panel.top - Text::line_height(px)) / 2;
+        text.draw(canvas, pad * 2, heading_top, px, TEXT_COLOR, &heading);
+        canvas.fill(pad, panel.top - pad / 2, panel.width - 2 * pad, 1, MENU_EDGE_COLOR);
+        for button in &buttons {
+            let over = (button.x..button.x + button.width).contains(&mouse.0) && (button.y..button.y + button.height).contains(&mouse.1);
+            if over {
+                canvas.round_fill(button.x, button.y, button.width, button.height, pad, accent(), 256);
+            }
+            let icon = if button.command == Command::ToggleList { commands::icons::X } else { commands::command_icon(button.command) };
+            let inset = ((button.width - text.width(icon, px)) / 2, (button.height - Text::line_height(px)) / 2);
+            text.draw(canvas, button.x + inset.0, button.y + inset.1, px, if over { on_accent() } else { DIM_TEXT_COLOR }, icon);
+        }
+
         let numbers = text.width(&self.list.len().to_string(), px);
+        let star_room = px as i32 * 2;
         for row in 0..panel.rows {
             let pos = panel.first + row;
             let id = self.list[pos];
             let top = panel.top + row as i32 * panel.row_height;
-            if pos == self.pos {
-                canvas.fill(0, top, panel.width, panel.row_height, accent());
-            } else if self.list_hover == Some(pos) {
-                canvas.fill(0, top, panel.width, panel.row_height, MENU_EDGE_COLOR);
-            }
-            if self.marks.contains(&id) {
-                canvas.fill(pad / 2, top + panel.row_height / 4, pad / 2, panel.row_height / 2, MARK_COLOR);
+            let (current, hovered) = (pos == self.pos, self.list_hover == Some(pos));
+            if current {
+                canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, accent(), 256);
+            } else if hovered {
+                canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, TEXT_COLOR, 28);
             }
             let line = top + (panel.row_height - Text::line_height(px)) / 2;
-            // A video's length sits at the right, once it is known.
+            let (main, dim) = row_text(current);
+            // At the right end a star: lit on a marked file, and offered,
+            // faintly, on the row under the pointer, where a click marks it.
+            let marked = self.marks.contains(&id);
+            if marked || hovered {
+                let star = commands::icons::STAR;
+                let color = if marked && !current { MARK_COLOR } else if marked { main } else { dim };
+                let star_left = panel.width - star_room + (star_room - pad - text.width(star, px)) / 2;
+                text.draw(canvas, star_left, line, px, color, star);
+            }
+            // A video's length sits before it, once it is known.
             let length = self.durations.get(&id).copied().flatten().map(clock).unwrap_or_default();
             let length_width = if length.is_empty() { 0 } else { text.width(&length, px) + pad };
-            let (main, dim) = row_text(pos == self.pos);
-            text.draw(canvas, panel.width - length_width, line, px, dim, &length);
+            text.draw(canvas, panel.width - star_room - length_width, line, px, dim, &length);
             // Its number in the list, set against the right of a column
             // wide enough for the largest, and then its name.
             let number = (pos + 1).to_string();
             let number_left = pad * 2 + numbers - text.width(&number, px);
             text.draw(canvas, number_left, line, px, dim, &number);
             let name_left = pad * 2 + numbers + pad;
-            let name = clipped(text, &self.name_of(id), panel.width - name_left - pad - length_width, px);
+            let name = clipped(text, &self.name_of(id), panel.width - star_room - length_width - name_left - pad, px);
             text.draw(canvas, name_left, line, px, main, &name);
         }
     }
@@ -5282,56 +5411,38 @@ fn draw_selection(canvas: &mut Canvas, text: &mut Text, field: &TextField, x: i3
     canvas.fill(x + left, y, right - left, Text::line_height(px), accent());
 }
 
-/// Draws a box to type in, with any buttons in a row to its right, and
-/// returns where each button went. `focus` is 0 while the text has the
-/// keyboard, otherwise the button that has it, counting from 1.
-#[allow(clippy::too_many_arguments)]
-fn draw_prompt(
-    canvas: &mut Canvas,
-    text: &mut Text,
-    label: &str,
-    field: &TextField,
-    note: &str,
-    buttons: &[String],
-    focus: usize,
-    px: u32,
-    bottom: i32,
-) -> Vec<[i32; 4]> {
+/// Draws a box to type in, in the middle of the window: an icon and what
+/// is being asked for, the text in a field of its own, and under it a
+/// word on what Enter does.
+fn draw_prompt(canvas: &mut Canvas, text: &mut Text, icon: &str, title: &str, field: &TextField, hint: &str, px: u32) {
     let typed = field.string();
     let before_cursor: String = field.text[..field.cursor].iter().collect();
     let pad = px as i32;
-    let gap = pad / 2;
     let line_height = Text::line_height(px);
-    let (label_width, note_width) = (text.width(label, px), text.width(note, px));
-    let content = label_width + text.width(&typed, px) + note_width;
-    let widths: Vec<i32> = buttons.iter().map(|button| text.width(button, px) + 2 * pad).collect();
-    let beside: i32 = widths.iter().map(|width| width + gap).sum();
-    let width = (content + 5 * pad).max(px as i32 * 30).min(canvas.width - beside);
-    let height = line_height + 2 * pad;
-    let (left, top) = ((canvas.width - width - beside) / 2, bottom - height);
+    let small = (px * 5 / 6).max(11);
+    let heading = format!("{icon}  {title}");
+    let widest = text.width(&typed, px).max(text.width(&heading, px)).max(text.width(hint, small));
+    let width = (widest + 5 * pad).max(px as i32 * 32).min(canvas.width);
+    let field_height = line_height + pad;
+    let height = 2 * line_height + field_height + 7 * pad / 2;
+    let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
 
-    canvas.fill(left, top, width, height, MENU_COLOR);
-    canvas.outline(left, top, width, height, 1, MENU_EDGE_COLOR);
-    text.draw(canvas, left + pad, top + pad, px, DIM_TEXT_COLOR, label);
-    draw_selection(canvas, text, field, left + pad + label_width, top + pad, px);
-    text.draw(canvas, left + pad + label_width, top + pad, px, TEXT_COLOR, &typed);
-    text.draw(canvas, left + width - pad - note_width, top + pad, px, DIM_TEXT_COLOR, note);
-    if focus == 0 {
-        let cursor = left + pad + label_width + text.width(&before_cursor, px);
-        canvas.fill(cursor, top + pad, (px as i32 / 10).max(2), line_height, TEXT_COLOR);
-    }
+    panel(canvas, left, top, width, height, pad);
+    text.draw(canvas, left + 3 * pad / 2, top + pad, px, TEXT_COLOR, &heading);
 
-    let mut x = left + width + gap;
-    let mut drawn = Vec::new();
-    for (at, (button, button_width)) in buttons.iter().zip(widths).enumerate() {
-        let focused = focus == at + 1;
-        canvas.fill(x, top, button_width, height, if focused { accent() } else { MENU_COLOR });
-        canvas.outline(x, top, button_width, height, 1, if focused { TEXT_COLOR } else { MENU_EDGE_COLOR });
-        text.draw(canvas, x + pad, top + pad, px, if focused { on_accent() } else { TEXT_COLOR }, button);
-        drawn.push([x, top, button_width, height]);
-        x += button_width + gap;
-    }
-    drawn
+    // The field: darker than the panel, edged in the accent as the thing
+    // that has the keyboard.
+    let (field_left, field_top, field_width) = (left + 3 * pad / 2, top + pad + line_height + pad / 2, width - 3 * pad);
+    canvas.round_fill(field_left, field_top, field_width, field_height, pad / 2, 0x111111, 256);
+    canvas.round_outline(field_left, field_top, field_width, field_height, pad / 2, 2, accent());
+    let (text_left, text_top) = (field_left + pad / 2, field_top + pad / 2);
+    draw_selection(canvas, text, field, text_left, text_top, px);
+    text.draw(canvas, text_left, text_top, px, TEXT_COLOR, &typed);
+    let cursor = text_left + text.width(&before_cursor, px);
+    canvas.fill(cursor, text_top, (px as i32 / 10).max(2), line_height, TEXT_COLOR);
+
+    let hint = format!("{hint}   Esc to cancel");
+    text.draw(canvas, left + 3 * pad / 2, field_top + field_height + pad / 2, small, DIM_TEXT_COLOR, &hint);
 }
 
 /// The keys of one line of the shortcuts, each with how wide it is drawn

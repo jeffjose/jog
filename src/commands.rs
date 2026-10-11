@@ -308,6 +308,7 @@ pub mod icons {
     pub const FAST_FORWARD: &str = "\u{e0c1}";
     pub const REWIND: &str = "\u{e14a}";
     pub const SKIP_BACK: &str = "\u{e162}";
+    pub const SKIP_FORWARD: &str = "\u{e163}";
     pub const REPLACE: &str = "\u{e3de}";
     pub const LIST_FILTER: &str = "\u{e464}";
     pub const LIST_X: &str = "\u{e23f}";
