@@ -525,10 +525,98 @@ fn read_config() -> Result<Option<(PathBuf, String)>, String> {
     let Some(path) = config_path() else { return Ok(None) };
     match std::fs::read_to_string(&path) {
         Ok(text) => Ok(Some((path, text))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // The first time, leave a file to start from: every setting,
+            // commented out. Only in the usual place, not one named for
+            // the occasion; and a failure to write it is no failure to run.
+            if std::env::var_os("JOG_CONFIG").is_none() {
+                let made = path.parent().is_some_and(|folder| std::fs::create_dir_all(folder).is_ok());
+                if made && std::fs::write(&path, STARTER_CONFIG).is_ok() {
+                    eprintln!("jog: wrote a config file to start from: {}", path.display());
+                }
+            }
+            Ok(None)
+        }
         Err(error) => Err(format!("cannot read {}: {error}", path.display())),
     }
 }
+
+/// The config file written when there is none: nothing set, everything
+/// that can be set shown commented out with its default.
+const STARTER_CONFIG: &str = r##"# jog: settings.
+#
+# Nothing here is set yet: every line is a comment. Take the # off a line
+# to use it. The names are those of the command line options (see
+# jog --help), and options given there win over this file.
+
+# ---- Look -----------------------------------------------------------
+
+# The colour of what is picked out. A Radix colour by name (tomato, red,
+# ruby, crimson, pink, plum, purple, violet, iris, indigo, blue, cyan,
+# teal, jade, green, grass, orange, brown, bronze, gold) or RRGGBB.
+# accent = "indigo"
+
+# Behind the picture: black, white or RRGGBB.
+# image-bg = "black"
+
+# ---- Window ---------------------------------------------------------
+
+# fullscreen = true
+# geometry = "1600x900"        # a window of this size instead
+# borderless = false
+# hide-pointer = false
+
+# ---- Starting up ----------------------------------------------------
+
+# grid = false                 # start in the grid, with nothing playing
+# recursive = false            # look in the folders inside a folder too
+# sort = "name"                # name, filename, dirname, mtime or size
+# reverse = false
+# randomize = false
+# watch = false                # pick up files as they come and go
+
+# ---- Viewing --------------------------------------------------------
+
+# zoom = "fit"                 # fit, fill, or a percentage such as 100
+# auto-zoom = true             # enlarge small images to fit
+# keep-zoom-vp = false         # keep zoom and place from file to file
+# draw-info = false            # name, size and zoom at the top left (i)
+# draw-exif = false
+# filmstrip = false            # keep the filmstrip open (t)
+# grid-titles = true           # names under the grid's pictures
+
+# ---- Video ----------------------------------------------------------
+
+# autoplay = true              # go on to the next file when one ends
+# resume = true                # pick videos up where they were left
+
+# ---- Slideshow ------------------------------------------------------
+
+# slideshow-delay = 5          # seconds; starts one
+# on-last-slide = "resume"     # resume, hold or quit
+
+# ---- Copying and moving ---------------------------------------------
+
+# Where V copies and M moves files to. Without it they ask for a folder.
+# output-dir = "~/Pictures/picks"
+
+# ---- Actions --------------------------------------------------------
+
+# Shell commands for Enter (action) and the keys 1 to 9. %f is the
+# file's path and %n its name.
+# action  = "xdg-open %f"
+# action1 = "gimp %f"
+
+# ---- Workspaces -----------------------------------------------------
+
+# Folders with names. Ctrl+1 to Ctrl+9 go to them in this order, Ctrl+Tab
+# to the next, and @ in the find box lists them. jog @pictures starts in
+# one. Saving a folder as a workspace from that list adds a line here.
+#
+# [workspaces]
+# pictures = "~/Pictures"
+# clips = { path = "~/Videos/clips", recursive = true, sort = "mtime" }
+"##;
 
 /// Applies a config file. Its keys are the long option names: switches take
 /// `true` or `false`, everything else a string or a number.
@@ -654,6 +742,24 @@ mod tests {
 
     fn parse_args(args: &[&str]) -> Result<Options, String> {
         parse_config("", args)
+    }
+
+    #[test]
+    fn the_starter_config_sets_nothing_and_every_line_of_it_can_be_used() {
+        let untouched = parse_config(STARTER_CONFIG, &[]).unwrap();
+        assert!(untouched.workspaces.is_empty() && untouched.output_dir.is_none() && untouched.fullscreen);
+
+        // With the # taken off every setting, it is still a config file.
+        let setting = |line: &str| {
+            let rest = line.strip_prefix("# ")?;
+            let named = rest.split_once('=').is_some_and(|(key, _)| !key.trim().is_empty() && key.trim().chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+            (named || rest.starts_with('[')).then(|| rest.to_string())
+        };
+        let used: Vec<String> = STARTER_CONFIG.lines().map(|line| setting(line).unwrap_or_else(|| line.to_string())).collect();
+        let options = parse_config(&used.join("\n"), &[]).unwrap();
+        assert_eq!(options.workspaces.len(), 2);
+        assert_eq!(options.accent, 0x3E63DD);
+        assert!(options.actions[1].is_some());
     }
 
     #[test]
