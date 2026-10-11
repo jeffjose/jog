@@ -176,6 +176,17 @@ struct Moved {
     to: PathBuf,
 }
 
+/// What happens when a video has played to its end.
+#[derive(Clone, Copy, PartialEq)]
+enum Looping {
+    /// The next file plays, and the last one stays at its end.
+    Off,
+    /// It plays again.
+    File,
+    /// The next file plays, and after the last one the first.
+    List,
+}
+
 /// The player that is not playing, and the video it has been given to
 /// hold ready: which file, and how many seconds in.
 struct Spare {
@@ -776,6 +787,9 @@ pub struct App {
     /// Playback speed, kept from one video to the next.
     speed: f64,
     muted: bool,
+    /// What a video that has played to its end does, kept from one video
+    /// to the next.
+    looping: Looping,
     toast: Option<(String, Instant)>,
     /// While set, the video's time and a larger progress bar are shown.
     time_until: Option<Instant>,
@@ -1153,6 +1167,7 @@ impl App {
             enter_at: None,
             speed: 1.0,
             muted: false,
+            looping: Looping::Off,
             toast: None,
             time_until: None,
             meta: None,
@@ -1623,6 +1638,7 @@ impl App {
         if let Some(seconds) = from.filter(|_| carried.is_none()) {
             self.toast(format!("Resumed at {}", clock(seconds)));
         }
+        self.apply_loop();
         if held {
             // It may have nothing more to say before its frame is shown.
             self.video_signal(Signal::Events);
@@ -1749,12 +1765,57 @@ impl App {
 
     /// Goes on to the next file after a video, unless that is the
     /// slideshow's job, something is open that the user is in the middle
-    /// of, or it was the last file.
+    /// of, or it was the last file. Looping the list goes on from the last
+    /// file to the first, and does so even where videos otherwise stay.
     fn play_next(&mut self) {
         let open = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some();
         let occupied = open || self.drag.is_some() || self.palette.is_some();
-        if self.options.autoplay && self.slide_at.is_none() && !occupied && self.pos + 1 < self.list.len() {
-            self.step(true);
+        let around = self.looping == Looping::List;
+        if self.slide_at.is_some() || occupied || !(around || self.options.autoplay && self.pos + 1 < self.list.len()) {
+            return;
+        }
+        match self.list.len() {
+            // The whole list is this one video.
+            1 => self.restart_video(),
+            _ => self.step(true),
+        }
+    }
+
+    /// Plays the video from its start, also when it had stopped at its end.
+    fn restart_video(&mut self) {
+        self.seek_to(0.0, true);
+        if let (Some(player), Some(_)) = (&self.player, &self.video) {
+            player.set("pause", "no");
+        }
+    }
+
+    /// Steps on to the next way of looping, and says which it is.
+    fn cycle_loop(&mut self) {
+        self.looping = match self.looping {
+            Looping::Off => Looping::File,
+            Looping::File => Looping::List,
+            Looping::List => Looping::Off,
+        };
+        self.apply_loop();
+        // One already stopped at its end has to be set going again.
+        let ended = self.video.is_some() && self.player.as_ref().is_some_and(|player| player.flag("eof-reached") == Some(true));
+        match self.looping {
+            Looping::File if ended => self.restart_video(),
+            Looping::List if ended => self.play_next(),
+            _ => {}
+        }
+        let (repeat, once) = (commands::icons::REPEAT, commands::icons::REPEAT_1);
+        self.toast(match self.looping {
+            Looping::Off => format!("{repeat}  Loop off"),
+            Looping::File => format!("{once}  Looping this video"),
+            Looping::List => format!("{repeat}  Looping the whole list"),
+        });
+    }
+
+    /// Tells the player whether a video is to play again when it ends.
+    fn apply_loop(&self) {
+        if let Some(player) = &self.player {
+            player.set("loop-file", if self.looping == Looping::File { "inf" } else { "no" });
         }
     }
 
@@ -2385,13 +2446,8 @@ impl App {
             FrameBack => self.video_action(VideoAction::Frame(false)),
             VolumeUp => self.video_action(VideoAction::Volume(5)),
             VolumeDown => self.video_action(VideoAction::Volume(-5)),
-            Restart => {
-                self.seek_to(0.0, true);
-                // One that had played to its end is paused there.
-                if let (Some(player), Some(_)) = (&self.player, &self.video) {
-                    player.set("pause", "no");
-                }
-            }
+            Restart => self.restart_video(),
+            CycleLoop => self.cycle_loop(),
             ClearFilter => self.clear_filter(),
             Quit => event_loop.exit(),
         }
@@ -2431,6 +2487,7 @@ impl App {
             ToggleList => self.show_list,
             ToggleGridTitles => self.grid_titles,
             ToggleMute => self.muted,
+            CycleLoop => self.looping != Looping::Off,
             SortBy(sort) => self.sort == Some(sort),
             ReverseOrder => self.reversed,
             Shuffle => self.shuffled,
@@ -4979,6 +5036,11 @@ impl App {
                 if self.speed != 1.0 {
                     line.push((format!("   {}x", self.speed), soft));
                 }
+                match self.looping {
+                    Looping::Off => {}
+                    Looping::File => line.push((format!("   {} this video", commands::icons::REPEAT_1), soft)),
+                    Looping::List => line.push((format!("   {} the list", commands::icons::REPEAT), soft)),
+                }
                 if self.muted {
                     line.push((format!("   {} muted", commands::icons::VOLUME_X), MARK_COLOR));
                 }
@@ -5533,9 +5595,35 @@ impl App {
             None | Some("no" | "") => "CPU".to_string(),
             Some(decoder) => decoder.to_string(),
         };
+        // The player names every format its reader for this one takes, as
+        // `mov,mp4,m4a`: the file's own ending says which, when it is one.
+        if let Some(formats) = player.text("file-format") {
+            let ending = self.files[video.id].extension().and_then(|ending| ending.to_str()).map(str::to_lowercase);
+            let named = formats.split(',').find(|format| Some(*format) == ending.as_deref());
+            let container = named.or(formats.split(',').next()).unwrap_or_default().to_string();
+            file.push(("container", container));
+        }
+        if let Some(length) = number("duration") {
+            file.push(("length", clock(length)));
+        }
         file.push(("decoder", decoder));
         if let Some(took) = video.start_took {
             file.push(("start", ms(took)));
+        }
+
+        let mut audio = Vec::new();
+        match player.text("audio-codec-name") {
+            Some(codec) => audio.push(("codec", codec)),
+            None => audio.push(("codec", "none".to_string())),
+        }
+        if let Some(channels) = number("audio-params/channel-count") {
+            audio.push(("channels", format!("{channels:.0}")));
+        }
+        if let Some(rate) = number("audio-params/samplerate") {
+            audio.push(("rate", format!("{:.1} kHz", rate / 1000.0)));
+        }
+        if let Some(bits) = number("audio-bitrate").filter(|bits| *bits > 0.0) {
+            audio.push(("bitrate", format!("{:.0} kbps", bits / 1000.0)));
         }
 
         let mut playback = Vec::new();
@@ -5554,7 +5642,7 @@ impl App {
         if self.speed != 1.0 {
             playback.push(("speed", format!("{}x", self.speed)));
         }
-        vec![("Video", file), ("Playback", playback)]
+        vec![("Video", file), ("Audio", audio), ("Playback", playback)]
     }
 
     /// Details of the current file, or `None` while they are being read.

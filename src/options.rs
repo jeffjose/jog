@@ -140,6 +140,7 @@ where they were left unless --no-resume is given. While one is up:
   PgUp / PgDn                seek 1 minute       pointer at the bottom: seek bar with previews
   Shift+Left / Shift+Right   step one frame      Up / Down     volume (m mutes)
   b                          back to the start of the video
+  l                          loop: this video, then the whole list, then off
   Ctrl+Left / Ctrl+Right, or , . < > n           previous / next file
   Seeking past the end of a video starts the next file, and seeking back
   past its start carries on into the one before, as though they lay end to end.

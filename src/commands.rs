@@ -45,6 +45,9 @@ pub enum Command {
     ToggleGridTitles,
     GridMenu,
     ToggleMute,
+    /// Step through no looping, this video over and over, and the whole
+    /// list over and over.
+    CycleLoop,
     /// Put the debug overlay's figures on the clipboard, plainly or as JSON.
     CopyDebug,
     CopyDebugJson,
@@ -217,6 +220,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "S" => Save,
             "s" => SortMenu,
             "m" => ToggleMute,
+            "l" => CycleLoop,
             "b" => Restart,
             "W" => ToggleWatch,
             "L" => SaveFilelist,
@@ -286,6 +290,8 @@ pub mod icons {
     pub const VOLUME_2: &str = "\u{e1aa}";
     pub const VOLUME_1: &str = "\u{e1a9}";
     pub const VOLUME_X: &str = "\u{e1ab}";
+    pub const REPEAT: &str = "\u{e149}";
+    pub const REPEAT_1: &str = "\u{e1fc}";
     pub const ZOOM_IN: &str = "\u{e1b5}";
     pub const ZOOM_OUT: &str = "\u{e1b6}";
     pub const SCAN: &str = "\u{e256}";
@@ -386,6 +392,7 @@ pub fn command_icon(command: Command) -> &'static str {
         VolumeUp => VOLUME_2,
         VolumeDown => VOLUME_1,
         ToggleMute => VOLUME_X,
+        CycleLoop => REPEAT,
         ZoomIn | GridLarger => ZOOM_IN,
         ZoomOut | GridSmaller => ZOOM_OUT,
         ZoomActual => SCAN,
@@ -470,6 +477,8 @@ const PLAYBACK: &[Option<MenuItem>] = &[
     video_item("Volume up", "Up", Command::VolumeUp),
     video_item("Volume down", "Down", Command::VolumeDown),
     video_item("Mute", "m", Command::ToggleMute),
+    None,
+    video_item("Loop: off, this video, all", "l", Command::CycleLoop),
 ];
 
 const ZOOM: &[Option<MenuItem>] = &[
@@ -693,9 +702,10 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("b", "Back to the start"),
                 ("]  [  \\", "Faster / slower / normal speed"),
                 ("Up  Down  m", "Volume, mute"),
+                ("l", "Loop: this video, the whole list, off"),
                 ("Ctrl+Left  Ctrl+Right", "Previous / next file"),
                 ("Pointer at the bottom", "Seek bar with previews"),
-                ("At the end", "The next file plays"),
+                ("At the end", "The next file plays, unless this one loops"),
             ],
         ),
         (
