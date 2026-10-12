@@ -3682,11 +3682,13 @@ impl App {
         });
     }
 
-    /// What a triage has at the top of the picture: a button to reject
-    /// and one to keep, each with its key and filled in when it is what
-    /// was decided about the file on view; between them how many are
-    /// kept, rejected and still to go, over a bar of the same; and at the
-    /// end, to look for files that have come or gone, and to finish.
+    /// What a triage has at the top of the picture: one pill. At its ends
+    /// a button to reject and one to keep, each with its key, and washed
+    /// in its colour when it is what was decided about the file on view.
+    /// Between them how many are rejected, beside the one, and kept,
+    /// beside the other, with a bar that fills from each end and how many
+    /// are still to go written over it. Last, two small ones: to look for
+    /// files that have come or gone, and to finish.
     fn draw_triage(&self, canvas: &mut Canvas, text: &mut Text, px: u32) {
         self.triage_buttons.borrow_mut().clear();
         if !self.triage_on || self.grid.is_some() || self.overview.is_some() {
@@ -3697,93 +3699,98 @@ impl App {
         let decided = self.verdict(self.id());
         let small = (px * 5 / 6).max(11);
         let (pad, line) = (px as i32 * 2 / 3, Text::line_height(px));
-        let side = line + 2 * pad;
-        let gap = pad;
+        // How tall a button is, and how far the pill stands off them.
+        let (side, inset) = (line + pad, pad / 2);
 
-        // What each of the two is: its icon, word, key, colour, and the
-        // decision it stands for.
         let choices = [
             (commands::icons::X_FILLED, "Reject", "x", DANGER_COLOR, Verdict::Rejected, Command::Reject),
             (commands::icons::CHECK_FILLED, "Keep", "Space", KEPT_COLOR, Verdict::Kept, Command::Keep),
         ];
-        let choice_width = |text: &mut Text, (icon, word, key, ..): &(&str, &str, &str, u32, Verdict, Command)| {
-            2 * pad + text.width(icon, px) + pad / 2 + text.width(word, px) + pad + text.width(key, small) + pad
-        };
-        let widths = [choice_width(text, &choices[0]), choice_width(text, &choices[1])];
-        let counts = [(format!("{kept} kept"), KEPT_COLOR), (format!("{rejected} rejected"), DANGER_COLOR), (format!("{undecided} to go"), TEXT_COLOR)];
-        let counts_width: i32 = counts.iter().map(|(words, _)| text.width(words, small) + (small as i32 / 2).max(5) + pad / 2).sum::<i32>() + 2 * gap;
-        let middle = counts_width.max(px as i32 * 14);
-        let w = pad + widths[0] + gap + middle + gap + widths[1] + gap + side + pad / 2 + side + pad;
-        let h = side + 2 * pad;
+        let cap_width = |text: &mut Text, key: &str| text.width(key, small) + pad;
+        let widths: [i32; 2] = std::array::from_fn(|which| {
+            let (icon, word, key, ..) = choices[which];
+            pad + text.width(icon, px) + pad / 2 + text.width(word, px) + pad * 2 / 3 + cap_width(text, key) + pad
+        });
+        let counts = [rejected.to_string(), kept.to_string()];
+        let count_widths = [text.width(&counts[0], px), text.width(&counts[1], px)];
+        let left_words = format!("{undecided} to go");
+        let track = (px as i32 * 9).max(text.width(&left_words, small) + pad);
+        let middle = pad + count_widths[0] + pad + track + pad + count_widths[1] + pad;
+        let w = inset + widths[0] + middle + widths[1] + pad / 2 + side + side + inset;
+        let h = side + 2 * inset;
         let (left, stage) = self.stage();
         let (x, y) = (left + (stage.0 as i32 - w) / 2, px as i32);
-        panel(canvas, x, y, w, h, pad);
+        panel(canvas, x, y, w, h, h / 2);
 
         let over = self.triage_over;
         let mut buttons = Vec::new();
-        let top = y + pad;
+        let top = y + inset;
+        let text_top = top + (side - line) / 2;
         let mut choice = |canvas: &mut Canvas, text: &mut Text, at: i32, which: usize| {
             let (icon, word, key, color, verdict, command) = choices[which];
             let (chosen, hovered) = (decided == Some(verdict), over == Some(buttons.len()));
             let width = widths[which];
-            // Quiet, as the other buttons are: only its icon is in colour,
-            // and when it is what was decided, a wash of that colour and
-            // an edge of it.
-            canvas.round_fill(at, top, width, side, pad, PLACEHOLDER_COLOR, 256);
+            // Nothing behind it until it is chosen or the pointer is on it.
             if chosen {
-                canvas.round_fill(at, top, width, side, pad, color, 44);
+                canvas.round_fill(at, top, width, side, side / 2, color, 46);
             } else if hovered {
-                canvas.round_fill(at, top, width, side, pad, TEXT_COLOR, 24);
+                canvas.round_fill(at, top, width, side, side / 2, TEXT_COLOR, 26);
             }
-            canvas.round_outline(at, top, width, side, pad, 1, if chosen { color } else { MENU_EDGE_COLOR });
             let mut across = at + pad;
-            text.draw(canvas, across, top + pad, px, color, icon);
+            text.draw(canvas, across, text_top, px, color, icon);
             across += text.width(icon, px) + pad / 2;
-            text.draw(canvas, across, top + pad, px, TEXT_COLOR, word);
-            across += text.width(word, px) + pad;
-            text.draw(canvas, across, top + pad + (line - Text::line_height(small)) / 2, small, DIM_TEXT_COLOR, key);
+            text.draw(canvas, across, text_top, px, TEXT_COLOR, word);
+            across += text.width(word, px) + pad * 2 / 3;
+            // Its key, in a small cap.
+            let cap = text.width(key, small) + pad;
+            let cap_height = Text::line_height(small) + pad / 3;
+            canvas.round_fill(across, top + (side - cap_height) / 2, cap, cap_height, pad / 3, TEXT_COLOR, 22);
+            text.draw(canvas, across + pad / 2, top + (side - Text::line_height(small)) / 2, small, DIM_TEXT_COLOR, key);
             buttons.push((command, [at, top, width, side]));
         };
-        let mut at = x + pad;
+        let mut at = x + inset;
         choice(canvas, text, at, 0);
-        at += widths[0] + gap;
+        at += widths[0];
 
-        // Between them: the count of each lot, a dot of its colour before
-        // it, and under them a thin bar in the same colours.
-        let dot = (small as i32 / 2).max(5);
-        let mut across = at + (middle - counts_width) / 2;
-        for (words, color) in &counts {
-            canvas.round_fill(across, top + pad / 3 + (Text::line_height(small) - dot) / 2, dot, dot, dot / 2, *color, if *color == TEXT_COLOR { 90 } else { 256 });
-            text.draw(canvas, across + dot + pad / 2, top + pad / 3, small, DIM_TEXT_COLOR, words);
-            across += dot + pad / 2 + text.width(words, small) + gap;
-        }
+        // Between them, set off by a hairline each side: the count of the
+        // rejected, the bar with what is left over it, the count of the kept.
+        canvas.fill(at, top + side / 5, 1, side - 2 * (side / 5), MENU_EDGE_COLOR);
+        canvas.fill(at + middle - 1, top + side / 5, 1, side - 2 * (side / 5), MENU_EDGE_COLOR);
+        let mut across = at + pad;
+        text.draw(canvas, across, text_top, px, DANGER_COLOR, &counts[0]);
+        across += count_widths[0] + pad;
         let thick = (px as i32 / 5).max(3);
-        let bar_top = top + side - thick - pad / 3;
-        canvas.round_fill(at, bar_top, middle, thick, thick / 2, TEXT_COLOR, 48);
-        let share = |count: usize| (i64::from(middle) * count as i64 / total as i64) as i32;
-        let (kept_w, rejected_w) = (share(kept), share(rejected));
-        if kept_w > 0 {
-            canvas.round_fill(at, bar_top, kept_w.max(thick), thick, thick / 2, KEPT_COLOR, 256);
+        let small_line = Text::line_height(small);
+        let words_top = top + (side - small_line - thick - pad / 4) / 2;
+        let words_left = across + (track - text.width(&left_words, small)) / 2;
+        text.draw(canvas, words_left, words_top, small, DIM_TEXT_COLOR, &left_words);
+        let bar_top = words_top + small_line + pad / 4;
+        canvas.round_fill(across, bar_top, track, thick, thick / 2, TEXT_COLOR, 40);
+        let share = |count: usize| (i64::from(track) * count as i64 / total as i64) as i32;
+        let (rejected_w, kept_w) = (share(rejected), share(kept));
+        if rejected > 0 {
+            canvas.round_fill(across, bar_top, rejected_w.max(thick), thick, thick / 2, DANGER_COLOR, 256);
         }
-        if rejected_w > 0 {
-            canvas.round_fill(at + kept_w, bar_top, rejected_w.max(thick), thick, thick / 2, DANGER_COLOR, 256);
+        if kept > 0 {
+            let kept_w = kept_w.max(thick);
+            canvas.round_fill(across + track - kept_w, bar_top, kept_w, thick, thick / 2, KEPT_COLOR, 256);
         }
-        at += middle + gap;
+        across += track + pad;
+        text.draw(canvas, across, text_top, px, KEPT_COLOR, &counts[1]);
+        at += middle;
         choice(canvas, text, at, 1);
-        at += widths[1] + gap;
+        at += widths[1] + pad / 2;
 
-        // At the end, two small ones: look for files again, and finish.
-        for (icon, command) in [(commands::icons::REFRESH, Command::Reload), (commands::icons::LOG_OUT, Command::Triage)] {
+        // Last, two small round ones: look for files again, and finish.
+        for (icon, command) in [(commands::icons::REFRESH, Command::Reload), (commands::icons::X, Command::Triage)] {
             let hovered = over == Some(buttons.len());
-            canvas.round_fill(at, top, side, side, pad, PLACEHOLDER_COLOR, 256);
             if hovered {
-                canvas.round_fill(at, top, side, side, pad, TEXT_COLOR, 24);
+                canvas.round_fill(at, top, side, side, side / 2, TEXT_COLOR, 26);
             }
-            canvas.round_outline(at, top, side, side, pad, 1, MENU_EDGE_COLOR);
-            let icon_left = at + (side - text.width(icon, px)) / 2;
-            text.draw(canvas, icon_left, top + pad, px, if hovered { TEXT_COLOR } else { DIM_TEXT_COLOR }, icon);
+            let icon_left = at + (side - text.width(icon, small)) / 2;
+            text.draw(canvas, icon_left, top + (side - small_line) / 2, small, if hovered { TEXT_COLOR } else { DIM_TEXT_COLOR }, icon);
             buttons.push((command, [at, top, side, side]));
-            at += side + pad / 2;
+            at += side;
         }
         *self.triage_buttons.borrow_mut() = buttons;
     }
