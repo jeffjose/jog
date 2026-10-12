@@ -1032,8 +1032,10 @@ pub struct App {
     triage_on: bool,
     triage: RefCell<Option<Triage>>,
     verdicts: RefCell<HashMap<usize, Option<Verdict>>>,
-    /// Where the tally of a triage was last drawn, for clicks on it.
-    tally_drawn: Cell<Option<[i32; 4]>>,
+    /// Where the buttons of a triage were last drawn, for clicks on them.
+    triage_buttons: RefCell<Vec<(Command, [i32; 4])>>,
+    /// Which of them the pointer is over.
+    triage_over: Option<usize>,
     list_search: Option<TextField>,
     /// The row of the file list picked out with the arrows while searching.
     list_cursor: Option<usize>,
@@ -1494,7 +1496,8 @@ impl App {
             triage_on: false,
             triage: RefCell::new(None),
             verdicts: RefCell::new(HashMap::new()),
-            tally_drawn: Cell::new(None),
+            triage_buttons: RefCell::new(Vec::new()),
+            triage_over: None,
             list_search: None,
             list_cursor: None,
             row_target: None,
@@ -2908,7 +2911,11 @@ impl App {
                 self.apply_video_view();
                 self.list_search = None;
             }
-            ListSearch => self.focus_list_search(),
+            ListSearch => {
+                // The list comes up for it, if it was not there.
+                self.show_list = true;
+                self.focus_list_search();
+            }
             // The picture has a different part of the window either way,
             // which a video has to be told of.
             ListPin => {
@@ -3090,9 +3097,29 @@ impl App {
             Shell => self.open_palette_with("!"),
             Triage => {
                 self.triage_on = !self.triage_on;
+                // Its filmstrip wants its pictures, as one asked for does.
+                self.strip_used = true;
                 self.request();
                 self.apply_video_view();
                 self.toast(if self.triage_on { "Triage: Space keeps, x rejects; nothing is done to the files" } else { "Triage left: what was decided is kept" });
+            }
+            Keep => self.decide(Verdict::Kept),
+            Reject => self.decide(Verdict::Rejected),
+            OnlyKept | OnlyRejected | OnlyUndecided => {
+                let typed = match command {
+                    OnlyKept => "is:kept",
+                    OnlyRejected => "is:rejected",
+                    _ => "is:undecided",
+                };
+                // The same as typing it into the search box and keeping it.
+                let (matches, _) = self.matching(typed);
+                match matches.first().copied() {
+                    Some(first) => {
+                        let picked = Some(self.id()).filter(|id| matches.contains(id)).or(Some(first));
+                        self.keep_matches(typed.to_string(), matches, picked);
+                    }
+                    None => self.toast("There are none of those"),
+                }
             }
             RunTyped => {
                 if let Some(typed) = self.shell_typed.take() {
@@ -3164,6 +3191,10 @@ impl App {
             ToggleDebugLog => self.options.debug,
             ToggleExif => self.show_exif,
             ToggleSlideshow => self.slide_at.is_some(),
+            ToggleKeepView => self.keep_view,
+            ToggleAntialias => self.antialias,
+            ToggleActions => self.show_actions,
+            TogglePointer => !self.pointer_visible,
             _ => false,
         }
     }
@@ -3592,12 +3623,25 @@ impl App {
     /// the same again takes the decision back, and stays. Nothing is done
     /// to the file either way.
     fn decide(&mut self, verdict: Verdict) {
-        let id = self.id();
+        // The one a menu was brought up on, or the grid's cursor is on,
+        // where it is not the file on view.
+        let id = self.list[self.focus()];
+        let on_view = self.grid.is_none() && id == self.id();
         let to = Some(verdict).filter(|_| self.verdict(id) != Some(verdict));
         self.triage.borrow_mut().get_or_insert_with(Triage::load).decide(&self.files[id], to);
         self.verdicts.borrow_mut().insert(id, to);
-        if to.is_some() && self.pos + 1 < self.list.len() {
-            self.step(true);
+        if on_view && self.triage_on {
+            if to.is_some() && self.pos + 1 < self.list.len() {
+                self.step(true);
+            }
+        } else {
+            // With no tally in sight to show it, it is said.
+            let name = self.name_of(id);
+            self.toast(match to {
+                Some(Verdict::Kept) => format!("{}  Kept {name}", commands::icons::CHECK),
+                Some(Verdict::Rejected) => format!("{}  Rejected {name}", commands::icons::X),
+                None => format!("Undecided again: {name}"),
+            });
         }
         self.redraw();
     }
@@ -3614,42 +3658,128 @@ impl App {
         self.everything().into_iter().filter(|id| self.verdict(*id) == wanted).collect()
     }
 
-    /// The tally of a triage, at the top of the picture while one is on:
-    /// how many are kept, rejected and still to go, with the keys under
-    /// them. A click on it looks for files that have come or gone.
-    fn draw_tally(&self, canvas: &mut Canvas, text: &mut Text, px: u32) {
-        self.tally_drawn.set(None);
+    /// Which button of a triage is at a place in the window.
+    fn triage_button_at(&self, x: f64, y: f64) -> Option<usize> {
+        let on = |[left, top, width, height]: [i32; 4]| (left..left + width).contains(&(x as i32)) && (top..top + height).contains(&(y as i32));
+        self.triage_buttons.borrow().iter().position(|(_, place)| on(*place))
+    }
+
+    /// Looks for files that have come or gone, and says how many did.
+    fn triage_refresh(&mut self, event_loop: &ActiveEventLoop) {
+        let before = self.everything().len();
+        self.execute(Command::Reload, event_loop);
+        let now = self.everything().len();
+        self.toast(match now.cmp(&before) {
+            Ordering::Greater => format!("{}  {} more files", commands::icons::REFRESH, now - before),
+            Ordering::Less => format!("{}  {} files fewer", commands::icons::REFRESH, before - now),
+            Ordering::Equal => format!("{}  No files have come or gone", commands::icons::REFRESH),
+        });
+    }
+
+    /// What a triage has at the top of the picture: a button to reject
+    /// and one to keep, each with its key and filled in when it is what
+    /// was decided about the file on view; between them how many are
+    /// kept, rejected and still to go, over a bar of the same; and at the
+    /// end, to look for files that have come or gone, and to finish.
+    fn draw_triage(&self, canvas: &mut Canvas, text: &mut Text, px: u32) {
+        self.triage_buttons.borrow_mut().clear();
         if !self.triage_on || self.grid.is_some() || self.overview.is_some() {
             return;
         }
         let (kept, rejected, undecided) = self.tally();
-        let parts = [
-            ("Triage".to_string(), DIM_TEXT_COLOR),
-            (format!("{kept} kept"), KEPT_COLOR),
-            (format!("{rejected} rejected"), DANGER_COLOR),
-            (format!("{undecided} to go"), TEXT_COLOR),
-            (commands::icons::REFRESH.to_string(), DIM_TEXT_COLOR),
-        ];
-        let keys = "Space keep     x reject     Q done";
+        let total = (kept + rejected + undecided).max(1);
+        let decided = self.verdict(self.id());
         let small = (px * 5 / 6).max(11);
-        let (pad, gap) = (px as i32 * 2 / 3, px as i32);
-        let across: i32 = parts.iter().map(|(words, _)| text.width(words, px)).sum::<i32>() + gap * (parts.len() as i32 - 1);
-        let (w, h) = (across.max(text.width(keys, small)) + 2 * pad, Text::line_height(px) + Text::line_height(small) + 2 * pad);
+        let (pad, line) = (px as i32 * 2 / 3, Text::line_height(px));
+        let side = line + 2 * pad;
+        let gap = pad;
+
+        // What each of the two is: its icon, word, key, colour, and the
+        // decision it stands for.
+        let choices = [
+            (commands::icons::X, "Reject", "x", DANGER_COLOR, Verdict::Rejected, Command::Reject),
+            (commands::icons::CHECK, "Keep", "Space", KEPT_COLOR, Verdict::Kept, Command::Keep),
+        ];
+        let choice_width = |text: &mut Text, (icon, word, key, ..): &(&str, &str, &str, u32, Verdict, Command)| {
+            2 * pad + text.width(icon, px) + pad / 2 + text.width(word, px) + pad + text.width(key, small) + pad
+        };
+        let widths = [choice_width(text, &choices[0]), choice_width(text, &choices[1])];
+        let counts = [(format!("{kept} kept"), KEPT_COLOR), (format!("{rejected} rejected"), DANGER_COLOR), (format!("{undecided} to go"), TEXT_COLOR)];
+        let counts_width: i32 = counts.iter().map(|(words, _)| text.width(words, small) + (small as i32 / 2).max(5) + pad / 2).sum::<i32>() + 2 * gap;
+        let middle = counts_width.max(px as i32 * 14);
+        let w = pad + widths[0] + gap + middle + gap + widths[1] + gap + side + pad / 2 + side + pad;
+        let h = side + 2 * pad;
         let (left, stage) = self.stage();
         let (x, y) = (left + (stage.0 as i32 - w) / 2, px as i32);
-        let over = (x..x + w).contains(&(self.mouse.0 as i32)) && (y..y + h).contains(&(self.mouse.1 as i32));
-        canvas.round_fill(x, y, w, h, pad, 0x000000, if over { 220 } else { 176 });
-        let mut at = x + (w - across) / 2;
-        for (words, color) in &parts {
-            // The arrows that go round light up under the pointer: they
-            // are what a click here does.
-            let color = if over && words == commands::icons::REFRESH { TEXT_COLOR } else { *color };
-            text.draw(canvas, at, y + pad, px, color, words);
-            at += text.width(words, px) + gap;
+        panel(canvas, x, y, w, h, pad);
+
+        let over = self.triage_over;
+        let mut buttons = Vec::new();
+        let top = y + pad;
+        let mut choice = |canvas: &mut Canvas, text: &mut Text, at: i32, which: usize| {
+            let (icon, word, key, color, verdict, command) = choices[which];
+            let (chosen, hovered) = (decided == Some(verdict), over == Some(buttons.len()));
+            let width = widths[which];
+            // Quiet, as the other buttons are: only its icon is in colour,
+            // and when it is what was decided, a wash of that colour and
+            // an edge of it.
+            canvas.round_fill(at, top, width, side, pad, PLACEHOLDER_COLOR, 256);
+            if chosen {
+                canvas.round_fill(at, top, width, side, pad, color, 44);
+            } else if hovered {
+                canvas.round_fill(at, top, width, side, pad, TEXT_COLOR, 24);
+            }
+            canvas.round_outline(at, top, width, side, pad, 1, if chosen { color } else { MENU_EDGE_COLOR });
+            let mut across = at + pad;
+            text.draw(canvas, across, top + pad, px, color, icon);
+            across += text.width(icon, px) + pad / 2;
+            text.draw(canvas, across, top + pad, px, TEXT_COLOR, word);
+            across += text.width(word, px) + pad;
+            text.draw(canvas, across, top + pad + (line - Text::line_height(small)) / 2, small, DIM_TEXT_COLOR, key);
+            buttons.push((command, [at, top, width, side]));
+        };
+        let mut at = x + pad;
+        choice(canvas, text, at, 0);
+        at += widths[0] + gap;
+
+        // Between them: the count of each lot, a dot of its colour before
+        // it, and under them a thin bar in the same colours.
+        let dot = (small as i32 / 2).max(5);
+        let mut across = at + (middle - counts_width) / 2;
+        for (words, color) in &counts {
+            canvas.round_fill(across, top + pad / 3 + (Text::line_height(small) - dot) / 2, dot, dot, dot / 2, *color, if *color == TEXT_COLOR { 90 } else { 256 });
+            text.draw(canvas, across + dot + pad / 2, top + pad / 3, small, DIM_TEXT_COLOR, words);
+            across += dot + pad / 2 + text.width(words, small) + gap;
         }
-        let keys_left = x + (w - text.width(keys, small)) / 2;
-        text.draw(canvas, keys_left, y + pad + Text::line_height(px), small, DIM_TEXT_COLOR, keys);
-        self.tally_drawn.set(Some([x, y, w, h]));
+        let thick = (px as i32 / 5).max(3);
+        let bar_top = top + side - thick - pad / 3;
+        canvas.round_fill(at, bar_top, middle, thick, thick / 2, TEXT_COLOR, 48);
+        let share = |count: usize| (i64::from(middle) * count as i64 / total as i64) as i32;
+        let (kept_w, rejected_w) = (share(kept), share(rejected));
+        if kept_w > 0 {
+            canvas.round_fill(at, bar_top, kept_w.max(thick), thick, thick / 2, KEPT_COLOR, 256);
+        }
+        if rejected_w > 0 {
+            canvas.round_fill(at + kept_w, bar_top, rejected_w.max(thick), thick, thick / 2, DANGER_COLOR, 256);
+        }
+        at += middle + gap;
+        choice(canvas, text, at, 1);
+        at += widths[1] + gap;
+
+        // At the end, two small ones: look for files again, and finish.
+        for (icon, command) in [(commands::icons::REFRESH, Command::Reload), (commands::icons::LOG_OUT, Command::Triage)] {
+            let hovered = over == Some(buttons.len());
+            canvas.round_fill(at, top, side, side, pad, PLACEHOLDER_COLOR, 256);
+            if hovered {
+                canvas.round_fill(at, top, side, side, pad, TEXT_COLOR, 24);
+            }
+            canvas.round_outline(at, top, side, side, pad, 1, MENU_EDGE_COLOR);
+            let icon_left = at + (side - text.width(icon, px)) / 2;
+            text.draw(canvas, icon_left, top + pad, px, if hovered { TEXT_COLOR } else { DIM_TEXT_COLOR }, icon);
+            buttons.push((command, [at, top, side, side]));
+            at += side + pad / 2;
+        }
+        *self.triage_buttons.borrow_mut() = buttons;
     }
 
     /// Writes the files of this session out in the three lots of a triage,
@@ -6176,6 +6306,12 @@ impl App {
             self.redraw();
         }
         let over = self.strip_cell_at(x, y);
+        // The buttons of a triage light up under the pointer.
+        let on_triage = self.triage_button_at(x, y);
+        if on_triage != self.triage_over {
+            self.triage_over = on_triage;
+            self.redraw();
+        }
         // The cross above the strip lights up under the pointer too.
         let on_close = self.strip_close().is_some_and(|place| (place.x..place.x + place.width).contains(&(x as i32)) && (place.y..place.y + place.height).contains(&(y as i32)));
         if over != self.strip_over || on_close != self.strip_close_over {
@@ -6292,19 +6428,14 @@ impl App {
             }
             return;
         }
-        // A click on the tally of a triage looks for files that have come
-        // or gone since the list was made.
-        let on_tally = self.tally_drawn.get().is_some_and(|[left, top, width, height]| (left..left + width).contains(&(x as i32)) && (top..top + height).contains(&(y as i32)));
-        if on_tally && self.triage_on && self.grid.is_none() && self.menu.is_none() && self.prompt.is_none() {
+        // A click on one of the buttons of a triage presses it.
+        let on_triage = self.triage_button_at(x, y).map(|at| self.triage_buttons.borrow()[at].0);
+        if let Some(command) = on_triage.filter(|_| self.triage_on && self.grid.is_none() && self.menu.is_none() && self.prompt.is_none()) {
             if button == MouseButton::Left && pressed {
-                let before = self.everything().len();
-                self.execute(Command::Reload, event_loop);
-                let now = self.everything().len();
-                self.toast(match now.cmp(&before) {
-                    Ordering::Greater => format!("{}  {} more files", commands::icons::REFRESH, now - before),
-                    Ordering::Less => format!("{}  {} files fewer", commands::icons::REFRESH, before - now),
-                    Ordering::Equal => format!("{}  No files have come or gone", commands::icons::REFRESH),
-                });
+                match command {
+                    Command::Reload => self.triage_refresh(event_loop),
+                    command => self.execute(command, event_loop),
+                }
             }
             return;
         }
@@ -7187,7 +7318,7 @@ impl App {
         };
         let toast_away = (1.0 - toast_in) + toast_out;
         text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w + (toast_away * f64::from(w + margin)) as i32, margin));
-        self.draw_tally(canvas, &mut text, px);
+        self.draw_triage(canvas, &mut text, px);
         // Twice the usual size, centred just above the seek bar.
         text_block(canvas, &mut text, &time, px, |w, h| ((width - w) / 2, time_bottom - h));
         for (centre, top, icon, color) in buttons {

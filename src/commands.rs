@@ -128,6 +128,13 @@ pub enum Command {
     ClearFilter,
     /// Go into deciding about files one after another, or come out of it.
     Triage,
+    /// Keep or reject a file as a triage does, wherever it is asked; and
+    /// narrow the list to one of the three lots a triage makes.
+    Keep,
+    Reject,
+    OnlyKept,
+    OnlyRejected,
+    OnlyUndecided,
     /// Type a shell command to run on the file on view, or on the marked
     /// ones: the find box, set to that.
     Shell,
@@ -406,6 +413,8 @@ pub fn icon(item: &MenuItem) -> &'static str {
             "Marks" => STAR,
             "File" => FILE,
             "Debug" => BUG,
+            "Triage" => FLAG,
+            "Go" => CHEVRONS_RIGHT,
             _ => "",
         };
     }
@@ -423,7 +432,10 @@ pub fn command_icon(command: Command) -> &'static str {
         WorkspaceList | Overview | Workspace(_) | WorkspaceKey(_) | NextWorkspace | PrevWorkspace | HomeWorkspace => FOLDERS,
         SaveWorkspace => FOLDER_PLUS,
         ClearFilter | ShowAllHere => LIST_X,
-        Triage => CHECK,
+        Triage => FLAG,
+        Keep => CHECK,
+        Reject => X,
+        OnlyKept | OnlyRejected | OnlyUndecided => LIST_FILTER,
         Shell | RunTyped | RunShell(_) | RepeatShell => TERMINAL,
         ListSearch => SEARCH,
         ListPin => PIN,
@@ -507,9 +519,10 @@ pub const MENU: &[Option<MenuItem>] = &[
     item("Workspaces", "G", Command::Overview),
     item("Go to workspace...", "@", Command::WorkspaceList),
     item("Run a command on it...", "!", Command::Shell),
-    item("Triage: keep or reject, file by file", "Q", Command::Triage),
     item("Run the last command again", ".", Command::RepeatShell),
+    submenu("Triage", TRIAGE, Applies::Always),
     None,
+    submenu("Go", GO, Applies::Always),
     submenu("Playback", PLAYBACK, Applies::Videos),
     submenu("Zoom", ZOOM, Applies::Always),
     submenu("Rotate", ROTATE, Applies::Always),
@@ -549,6 +562,21 @@ const PLAYBACK: &[Option<MenuItem>] = &[
     video_item("Next audio track", "J", Command::CycleAudio),
 ];
 
+/// Getting about the list further than one file at a time.
+const GO: &[Option<MenuItem>] = &[
+    item("First file", "Home", Command::First),
+    item("Last file", "End", Command::Last),
+    image_item("Forward 5%", "PgDn", Command::JumpForward),
+    image_item("Back 5%", "PgUp", Command::JumpBack),
+    item("Next folder", "}", Command::NextDir),
+    item("Previous folder", "{", Command::PreviousDir),
+    None,
+    item("Find a file or a command...", "Ctrl+K", Command::Palette),
+    item("Next workspace", "Ctrl+Tab", Command::NextWorkspace),
+    item("Previous workspace", "Ctrl+Shift+Tab", Command::PrevWorkspace),
+    item("Back to what jog was started on", "Ctrl+`", Command::HomeWorkspace),
+];
+
 const ZOOM: &[Option<MenuItem>] = &[
     item("Zoom in", "+", Command::ZoomIn),
     item("Zoom out", "-", Command::ZoomOut),
@@ -556,6 +584,9 @@ const ZOOM: &[Option<MenuItem>] = &[
     item("Fit to screen", "0", Command::ZoomFit),
     item("Fill screen", "F", Command::ZoomFill),
     item("Fit small images to screen", "Z", Command::ToggleEnlarge),
+    item("Keep zoom between files", "k", Command::ToggleKeepView),
+    item("Smooth scaling", "A", Command::ToggleAntialias),
+    item("Draw at full quality now", "R", Command::Render),
 ];
 
 const ROTATE: &[Option<MenuItem>] = &[
@@ -570,11 +601,18 @@ const VIEW: &[Option<MenuItem>] = &[
     item("Grid view", "g", Command::ToggleGrid),
     item("Filmstrip", "t", Command::ToggleFilmstrip),
     item("File list", "p", Command::ToggleList),
+    item("File list beside the picture", "", Command::ListPin),
+    item("File list on the other side", "", Command::ListFlip),
+    item("Search the file list", "/", Command::ListSearch),
     item("Slideshow", "h", Command::ToggleSlideshow),
     item("Watch for new files", "W", Command::ToggleWatch),
     None,
     item("Info", "i", Command::ToggleInfo),
     image_item("EXIF data", "e", Command::ToggleExif),
+    item("List of actions", "a", Command::ToggleActions),
+    None,
+    item("Size the window to the picture", "w", Command::SizeToImage),
+    item("Hide the pointer", "o", Command::TogglePointer),
 ];
 
 /// Also the `S` menu.
@@ -590,9 +628,25 @@ pub const SORT: &[Option<MenuItem>] = &[
     item("Reverse", "", Command::ReverseOrder),
 ];
 
+/// Deciding about files, and what can be done with what was decided.
+const TRIAGE: &[Option<MenuItem>] = &[
+    item("Triage, file by file", "Q", Command::Triage),
+    item("Keep", "Space", Command::Keep),
+    item("Reject", "x", Command::Reject),
+    None,
+    item("Show only kept", "", Command::OnlyKept),
+    item("Show only rejected", "", Command::OnlyRejected),
+    item("Show only undecided", "", Command::OnlyUndecided),
+    None,
+    item("Run a command on a lot...", "!", Command::Shell),
+    item("Look for new files", "r", Command::Reload),
+];
+
 const MARKS: &[Option<MenuItem>] = &[
     item("Mark", "x", Command::Mark),
     item("Marked images...", "X", Command::MarkMenu),
+    item("Mark all", "", Command::MarkAll),
+    item("Invert marks", "", Command::InvertMarks),
     item("Show only marked", "", Command::OnlyMarked),
     item("Clear all marks", "", Command::ClearMarks),
 ];
@@ -606,6 +660,9 @@ const FILE: &[Option<MenuItem>] = &[
     image_item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
     image_item("Convert to PNG", "", Command::Convert(Format::Png)),
     image_item("Convert to WebP", "", Command::Convert(Format::WebP)),
+    image_item("Save a copy", "S", Command::Save),
+    video_item("Save this frame", "S", Command::Save),
+    item("Save the file list", "L", Command::SaveFilelist),
     item("Undo", "u", Command::Undo),
     None,
     item("Copy file name", "c", Command::CopyName),
@@ -623,6 +680,8 @@ const DEBUG: &[Option<MenuItem>] = &[
     item("Timings on screen", "I", Command::ToggleDebug),
     item("Print files to terminal", "", Command::ToggleVerbose),
     item("Print timings to terminal", "", Command::ToggleDebugLog),
+    item("Copy the timings", "", Command::CopyDebug),
+    item("Copy the timings as JSON", "", Command::CopyDebugJson),
 ];
 
 /// The menu for a file in the grid, on a right click or Tab.
@@ -630,6 +689,8 @@ pub const GRID_MENU: &[Option<MenuItem>] = &[
     video_item("Play", "Enter", Command::PlayFromGrid),
     image_item("Open", "Enter", Command::OpenFromGrid),
     item("Mark", "x", Command::Mark),
+    item("Keep", "", Command::Keep),
+    item("Reject", "", Command::Reject),
     None,
     item("Copy to folder", "V", Command::CopyTo),
     item("Move to folder", "M", Command::MoveTo),
@@ -640,7 +701,9 @@ pub const GRID_MENU: &[Option<MenuItem>] = &[
     None,
     item("Copy file name", "c", Command::CopyName),
     item("Copy full path", "C", Command::CopyPath),
+    item("Run a command on it...", "!", Command::Shell),
     None,
+    item("Remove from list", "Del", Command::Remove),
     item("Move to trash", "Ctrl+Del", Command::Trash),
     item("Delete...", "D", Command::Delete),
     None,
@@ -660,6 +723,8 @@ pub const LIST_MENU: &[Option<MenuItem>] = &[
     video_item("Play", "Enter", Command::PlayFromGrid),
     image_item("Open", "Enter", Command::OpenFromGrid),
     item("Mark", "x", Command::Mark),
+    item("Keep", "", Command::Keep),
+    item("Reject", "", Command::Reject),
     None,
     item("Copy to folder", "V", Command::CopyTo),
     item("Move to folder", "M", Command::MoveTo),
@@ -670,7 +735,9 @@ pub const LIST_MENU: &[Option<MenuItem>] = &[
     None,
     item("Copy file name", "c", Command::CopyName),
     item("Copy full path", "C", Command::CopyPath),
+    item("Run a command on it...", "!", Command::Shell),
     None,
+    item("Remove from list", "Del", Command::Remove),
     item("Move to trash", "Ctrl+Del", Command::Trash),
     item("Delete...", "D", Command::Delete),
     None,
@@ -687,8 +754,8 @@ pub const GRID_AROUND_MENU: &[Option<MenuItem>] = &[
     item("Workspaces", "G", Command::Overview),
     item("Go to workspace...", "@", Command::WorkspaceList),
     item("Run a command on it...", "!", Command::Shell),
-    item("Triage: keep or reject, file by file", "Q", Command::Triage),
     item("Run the last command again", ".", Command::RepeatShell),
+    submenu("Triage", TRIAGE, Applies::Always),
     item("Save folder as workspace...", "", Command::SaveWorkspace),
     None,
     item("Mark all", "", Command::MarkAll),
@@ -759,8 +826,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("}  {", "Next / previous folder"),
                 ("Wheel", "Next / previous file"),
                 ("z", "Shuffle: on to another file, or around this one in the grid, filmstrip or list"),
-                ("!  .", "Run a shell command on this file, or on the marked ones / the last one again"),
-                ("Q", "Triage: Space keeps, x rejects, each going on to the next; Q again to finish"),
+                ("!  .", "Run a shell command on this file or the marked ones, %f its path / the last one again"),
                 ("s", "Sort: name, newest, size, reverse"),
             ],
         ),
@@ -776,6 +842,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Ctrl+`", "Back to what jog was started on"),
                 ("word  ^start  !not", "Match names"),
                 ("#video  #marked  >10mb", "Match kinds and sizes"),
+                ("is:new  is:kept  is:rejected", "Videos not watched yet, and what a triage decided"),
                 (">sort", "Find a command and run it"),
                 (":42  :1:30  :50%", "Go to a file number or a time"),
             ],
@@ -788,6 +855,8 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Tab  Right click", "Menu for the file"),
                 ("Ctrl++  Ctrl+-", "Bigger / smaller pictures"),
                 ("i", "Titles under the pictures"),
+                ("Space", "Pause the video still playing in its cell"),
+                ("Click its picture", "Bottom left: back to the video that is playing"),
             ],
         ),
     ],
@@ -804,6 +873,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Up  Down  m", "Volume, mute"),
                 ("l", "Loop: this video, the whole list, off"),
                 ("T", "Scenes of this video along the bottom; Left / Right then go by scene"),
+                ("S", "Save the frame on view as a picture"),
                 ("j  J", "Next subtitles, or none / next audio track"),
                 ("Ctrl+Left  Ctrl+Right", "Previous / next file"),
                 ("Pointer at the bottom", "Seek bar with previews"),
@@ -814,9 +884,11 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             "Zoom and turn",
             &[
                 ("+  -", "Zoom in / out"),
-                ("0  *  !", "Fit / actual size / fill"),
+                ("0  *  F", "Fit / actual size / fill"),
+                ("v  Wheel", "Held down: a loupe under the pointer, and how strong it is"),
                 ("Z", "Small images: fit or actual size"),
                 ("k", "Keep zoom between files"),
+                ("A  R", "Smooth scaling on / off; draw at full quality now"),
                 ("Ctrl+arrows  Alt+arrows", "Scroll, by a page"),
                 ("Drag", "Pan"),
                 ("Middle drag  Ctrl+wheel", "Zoom"),
@@ -831,13 +903,26 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             &[
                 ("f  Double click", "Fullscreen"),
                 ("t", "Filmstrip"),
-                ("p", "File list down the side"),
+                ("p", "File list down the side; / searches it, its buttons pin and move it"),
                 ("i", "Info: name, size, zoom"),
+                ("I", "Timings, and what a video is made of"),
                 ("e", "EXIF data"),
+                ("a", "List of the actions there are"),
+                ("w  o", "Size the window to the picture / hide the pointer"),
                 ("Tab  Right click", "Menu"),
                 ("h", "Slideshow"),
                 ("W", "Watch for new files"),
                 ("r  F5", "Refresh the list"),
+            ],
+        ),
+        (
+            "Triage",
+            &[
+                ("Q", "Begin, and finish: nothing is done to the files"),
+                ("Space  x", "Keep / reject, and on to the next; again to take it back"),
+                ("Left  Right", "Move as usual, to look or to decide again"),
+                ("Click the tally", "Look for files that have come or gone"),
+                ("!  Tab", "Run a command on the kept, the rejected or all"),
             ],
         ),
         (
@@ -852,13 +937,13 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Delete", "Remove from the list"),
                 ("Ctrl+Delete", "Move to trash"),
                 ("D", "Delete for good (asks)"),
-                ("S  L", "Save a copy / the file list"),
+                ("S  L", "Save a copy, or of a video the frame / the file list"),
                 ("Enter  1-9", "Run an action"),
             ],
         ),
         (
             "Leaving",
-            &[("q  Esc", "Quit")],
+            &[("?", "These keys"), ("q  Esc", "Quit; jog --resume picks up where it was left")],
         ),
     ],
 ];
