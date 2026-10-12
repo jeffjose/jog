@@ -40,6 +40,8 @@ pub enum Command {
     /// In the grid: open the file under the cursor, show its pictures
     /// larger or smaller, name them or not, and the menu for a cell.
     OpenFromGrid,
+    /// The same for a video, which it plays.
+    PlayFromGrid,
     GridLarger,
     GridSmaller,
     ToggleGridTitles,
@@ -463,6 +465,7 @@ pub fn command_icon(command: Command) -> &'static str {
         ToggleVerbose | ToggleDebugLog => TERMINAL,
         ToggleHelp => KEYBOARD,
         OpenFromGrid => EXTERNAL_LINK,
+        PlayFromGrid => PLAY,
         Quit => LOG_OUT,
         _ => "",
     }
@@ -598,7 +601,8 @@ const DEBUG: &[Option<MenuItem>] = &[
 
 /// The menu for a file in the grid, on a right click or Tab.
 pub const GRID_MENU: &[Option<MenuItem>] = &[
-    item("Open", "Enter", Command::OpenFromGrid),
+    video_item("Play", "Enter", Command::PlayFromGrid),
+    image_item("Open", "Enter", Command::OpenFromGrid),
     item("Mark", "x", Command::Mark),
     None,
     item("Copy to folder", "V", Command::CopyTo),
@@ -622,6 +626,31 @@ pub const GRID_MENU: &[Option<MenuItem>] = &[
     item("Smaller pictures", "Ctrl+-", Command::GridSmaller),
     item("Titles", "i", Command::ToggleGridTitles),
     item("Close the grid", "g", Command::ToggleGrid),
+];
+
+/// The menu for a row of the file list, on a right click: what the grid
+/// has for a picture, without what is only of the grid.
+pub const LIST_MENU: &[Option<MenuItem>] = &[
+    video_item("Play", "Enter", Command::PlayFromGrid),
+    image_item("Open", "Enter", Command::OpenFromGrid),
+    item("Mark", "x", Command::Mark),
+    None,
+    item("Copy to folder", "V", Command::CopyTo),
+    item("Move to folder", "M", Command::MoveTo),
+    item("Copy to...", "", Command::CopyToAsk),
+    item("Move to...", "", Command::MoveToAsk),
+    item("Rename", "F2", Command::Rename),
+    image_item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
+    None,
+    item("Copy file name", "c", Command::CopyName),
+    item("Copy full path", "C", Command::CopyPath),
+    None,
+    item("Move to trash", "Ctrl+Del", Command::Trash),
+    item("Delete...", "D", Command::Delete),
+    None,
+    item("Find...", "/", Command::Search),
+    submenu("Sort", SORT, Applies::Always),
+    submenu("Marks", MARKS, Applies::Always),
 ];
 
 /// The menu for the grid as a whole, on a right click off the pictures.

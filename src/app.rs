@@ -990,6 +990,9 @@ pub struct App {
     list_search: Option<TextField>,
     /// The row of the file list picked out with the arrows while searching.
     list_cursor: Option<usize>,
+    /// The row of the file list a menu was brought up on, which what is
+    /// chosen from it is done to.
+    row_target: Option<usize>,
     scenes_on: bool,
     /// The scene the pointer is on.
     scene_over: Option<usize>,
@@ -1410,6 +1413,7 @@ impl App {
             precise: options.precise_seeking,
             list_search: None,
             list_cursor: None,
+            row_target: None,
             scenes_on: false,
             scene_over: None,
             scenes: HashMap::new(),
@@ -1463,7 +1467,9 @@ impl App {
     /// List position that commands act on: the grid cursor when the grid is
     /// up, otherwise the image being viewed.
     fn focus(&self) -> usize {
-        self.grid.as_ref().map_or(self.pos, |grid| grid.cursor)
+        // A row of the file list a menu was brought up on comes first.
+        let row = self.row_target.filter(|at| *at < self.list.len() && self.grid.is_none());
+        row.unwrap_or_else(|| self.grid.as_ref().map_or(self.pos, |grid| grid.cursor))
     }
 
     /// Files a file command applies to: the marked ones in list order, or
@@ -2814,7 +2820,16 @@ impl App {
                 self.list_search = None;
             }
             ListSearch => self.focus_list_search(),
-            OpenFromGrid => self.open_from_grid(),
+            // From the grid, the picture under its cursor; from the file
+            // list, the row the menu was brought up on.
+            OpenFromGrid | PlayFromGrid if self.grid.is_some() => self.open_from_grid(),
+            OpenFromGrid | PlayFromGrid => {
+                if let Some(at) = self.row_target.take().filter(|at| *at < self.list.len()) {
+                    let first = self.list_panel().map(|panel| panel.first);
+                    self.go_to(at, at > self.pos);
+                    self.list_scroll = first.map(|first| (self.pos, self.list.len(), first));
+                }
+            }
             GridLarger => self.zoom_grid(true),
             GridSmaller => self.zoom_grid(false),
             ToggleGridTitles => self.grid_titles = !self.grid_titles,
@@ -5467,6 +5482,9 @@ impl App {
     // ---- Input ---------------------------------------------------------
 
     fn key_pressed(&mut self, key: Key<&str>, repeat: bool, numpad: bool, event_loop: &ActiveEventLoop) {
+        if self.menu.is_none() && self.prompt.is_none() && self.confirm.is_none() {
+            self.row_target = None;
+        }
         if self.help {
             // Any key dismisses the list of shortcuts.
             self.help = false;
@@ -5697,6 +5715,11 @@ impl App {
 
     fn mouse_button(&mut self, button: MouseButton, pressed: bool, event_loop: &ActiveEventLoop) {
         let (x, y) = self.mouse;
+        // The row a menu was brought up on is done with once the menu and
+        // whatever it asked are.
+        if pressed && self.menu.is_none() && self.prompt.is_none() && self.confirm.is_none() {
+            self.row_target = None;
+        }
         if self.help {
             self.help = !pressed;
             return self.redraw();
@@ -5907,7 +5930,15 @@ impl App {
                     self.execute(Command::ZoomActual, event_loop);
                 }
             }
-            (MouseButton::Right, true) => self.execute(Command::ToggleMenu, event_loop),
+            // On a row of the file list, the menu is of that file.
+            (MouseButton::Right, true) => match self.list_row_at(x, y) {
+                Some(at) => {
+                    self.row_target = Some(at);
+                    self.open_menu(commands::LIST_MENU, None);
+                    self.redraw();
+                }
+                None => self.execute(Command::ToggleMenu, event_loop),
+            },
             _ => {}
         }
     }
@@ -6040,6 +6071,12 @@ impl App {
                     // `{Wheel:N}` turns the wheel N lines, up being positive.
                     if let Some(lines) = name.strip_prefix("Wheel:") {
                         self.mouse_wheel(MouseScrollDelta::LineDelta(0.0, lines.parse().unwrap_or(0.0)));
+                        continue;
+                    }
+                    // `{RightClick}` is the other button.
+                    if name == "RightClick" {
+                        self.mouse_button(MouseButton::Right, true, event_loop);
+                        self.mouse_button(MouseButton::Right, false, event_loop);
                         continue;
                     }
                     if name == "Click" {
@@ -7579,7 +7616,7 @@ impl App {
             let (current, hovered) = (pos == self.pos, self.list_hover == Some(pos));
             // The row the arrows have picked out in a search is ringed and
             // lit, plainly enough to be found at a glance.
-            let picked = self.list_cursor == Some(pos);
+            let picked = self.list_cursor == Some(pos) || self.row_target == Some(pos);
             if current {
                 canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, accent(), 256);
             } else if hovered {
