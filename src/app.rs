@@ -38,6 +38,7 @@ use crate::story::{self, Found, Stories};
 use crate::trailer::{Note, Trailers};
 use crate::ui::{self, Canvas, Text};
 use crate::view::{Layout, View, Zoom};
+use crate::x11;
 
 const ZOOM_STEP: f64 = 1.25;
 /// Thumbnails kept ready on each side of the current image.
@@ -90,6 +91,13 @@ const VIDEO_START: f64 = 0.5;
 const SEEN_AFTER: Duration = Duration::from_secs(5);
 /// How long after a video starts showing its tracks are asked about.
 const TRACKS_AFTER: Duration = Duration::from_millis(300);
+/// How long the window waits for the first image before it is shown.
+const FIRST_FRAME_WAIT: Duration = Duration::from_millis(25);
+/// A file no larger than this decodes within that wait, by and large.
+const QUICK_FILE: u64 = 1500 << 10;
+/// How long the first image serves as the window's background at most,
+/// should the window manager never say the window is up.
+const BACKDROP_AT_MOST: Duration = Duration::from_millis(500);
 /// How long the small movements of the interface take: a toast sliding
 /// in, the seek bar rising, a cursor going from one cell to the next.
 const EASE: Duration = Duration::from_millis(170);
@@ -873,6 +881,13 @@ pub struct App {
     /// Whether the whole window was painted afresh this frame, so that
     /// comparing it with the last would only find everything changed.
     repainted: Cell<bool>,
+    /// The first picture as the window's background, until a frame has
+    /// reached the window the ordinary way; and whether that has been
+    /// done with, and whether the window has had the focus yet, which
+    /// is the window manager done putting it up.
+    backdrop: Option<(x11::Backdrop, Instant)>,
+    backdrop_done: bool,
+    focused_once: bool,
     /// The first row the file list was scrolled to with the wheel, along
     /// with the position and list length it was scrolled at: once either
     /// changes, the list goes back to following the file on view.
@@ -1411,6 +1426,9 @@ impl App {
             presented: Vec::new(),
             animating: Cell::new(false),
             repainted: Cell::new(false),
+            backdrop: None,
+            backdrop_done: false,
+            focused_once: false,
             list_scroll: None,
             list_hover: None,
             list_button_over: None,
@@ -1770,7 +1788,33 @@ impl App {
         if let Some(window) = &self.window {
             window.set_title(&format!("{} [{}/{}] - jog", self.name(), self.pos + 1, self.list.len()));
         }
+        self.first_backdrop();
         self.redraw();
+    }
+
+    /// Hands the first picture to the display as the window's background,
+    /// which the server paints the window with the moment the window
+    /// manager shows it: a frame handed over the ordinary way before then
+    /// is thrown away, and the next waits on the manager being done.
+    fn first_backdrop(&mut self) {
+        let Some(window) = self.window.clone() else { return };
+        // Once the window is up, a frame reaches it the ordinary way at
+        // once, and the background would only be the same picture twice.
+        if self.backdrop_done || self.focused_once || self.perf.shown_in.is_some() || self.snapshot.is_some() || self.shown.is_none() {
+            return;
+        }
+        self.backdrop_done = true;
+        let started = Instant::now();
+        let (width, height) = self.window_size();
+        self.backdrop = x11::Backdrop::new(&window, width, height).map(|mut backdrop| {
+            self.paint(backdrop.pixels(), (width, height));
+            backdrop.show();
+            (backdrop, Instant::now())
+        });
+        if self.options.debug {
+            let how = if self.backdrop.is_some() { "as the window's background" } else { "not as the window's background" };
+            eprintln!("jog: {:>7.1?} start first frame {how}, {:.1?} since the loop began", started.elapsed(), self.perf.arrived.elapsed());
+        }
     }
 
     fn update_monitor(&mut self) {
@@ -6889,6 +6933,15 @@ impl App {
     // ---- Drawing -------------------------------------------------------
 
     fn draw(&mut self) {
+        // While the first image is the window's background and the
+        // window manager has not yet put the window up, a frame handed
+        // over would be thrown away, and the handing over only delays
+        // the server in putting the window up.
+        if let Some((_, since)) = &self.backdrop {
+            if !self.focused_once && since.elapsed() < BACKDROP_AT_MOST {
+                return;
+            }
+        }
         let (Some(window), Some(mut surface)) = (self.window.clone(), self.surface.take()) else { return };
         let size = window.inner_size();
         // A frame nobody here asked for is the system's: the window has
@@ -6960,6 +7013,11 @@ impl App {
                     }
                     self.frame_began = Some(started);
                     self.painted(started, painted);
+                    // A frame has reached the window the ordinary way, and
+                    // the window is up: the background is no longer needed.
+                    if self.focused_once {
+                        self.backdrop = None;
+                    }
                 }
             }
         }
@@ -9060,11 +9118,13 @@ impl ApplicationHandler<Event> for App {
         let context = Context::new(window.clone()).expect("failed to connect to display");
         let connected = creating.elapsed();
         self.surface = Some(Surface::new(&context, window.clone()).expect("failed to create surface"));
+        // Marked fullscreen now, while the display has nothing else of
+        // ours to do: the word with it waits behind the first picture
+        // otherwise, and so then does showing the window.
         if self.options.fullscreen && self.snapshot.is_none() {
-            crate::x11::mark_fullscreen(&window);
-            window.set_visible(true);
+            x11::mark_fullscreen(&window);
         }
-        self.window = Some(window);
+        self.window = Some(window.clone());
         if self.options.debug {
             eprintln!(
                 "jog: {:>7.1?} start window made ({created:.1?} to create, {:.1?} to connect and show), {:.1?} since the loop began",
@@ -9094,7 +9154,27 @@ impl ApplicationHandler<Event> for App {
             self.grid = Some(Grid { moved: false, ..Grid::at(self.pos, &layout) });
             self.request();
         }
+        // The first image goes on the window as its background before the
+        // window is shown, and the server paints it the moment the window
+        // manager shows it. A small file is nearly decoded by now, having
+        // been begun before the display was opened: a moment's wait for it
+        // is worth more than a window put up empty and painted a good
+        // while later. A large one takes far longer than the wait.
+        if self.options.fullscreen && self.snapshot.is_none() {
+            let id = self.id();
+            let small = std::fs::metadata(&self.files[id]).is_ok_and(|meta| meta.len() <= QUICK_FILE);
+            let until = Instant::now() + FIRST_FRAME_WAIT;
+            while small && self.loader.fitted(id).is_none() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         self.refresh();
+        if self.options.fullscreen && self.snapshot.is_none() {
+            window.set_visible(true);
+            if self.options.debug {
+                eprintln!("jog: {:>7.1?} start window shown, {:.1?} since the loop began", creating.elapsed(), self.perf.arrived.elapsed());
+            }
+        }
         // Have the player ready before the first video is reached.
         if self.files.iter().any(|file| files::is_video(file)) {
             self.warm_player();
@@ -9234,6 +9314,8 @@ impl ApplicationHandler<Event> for App {
                     });
                 }
                 self.presented.clear();
+                // Any of these says the window manager has put the window up.
+                self.focused_once = true;
                 self.redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),

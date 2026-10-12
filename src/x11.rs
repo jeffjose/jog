@@ -1,12 +1,20 @@
 //! A word with the X server directly, where the windowing library has
-//! no way of saying it: the `_NET_WM_STATE` of a window that is not yet
-//! shown. Set on the window before it is mapped, the window manager puts
-//! it up fullscreen in one go; asked for afterwards, as the library does,
-//! the window is put up at a size of the manager's own, resized to the
-//! work area and only then to the screen, which takes it tens of
-//! milliseconds and holds up the first frame.
+//! no way of saying it.
+//!
+//! One is the `_NET_WM_STATE` of a window that is not yet shown. Set on
+//! the window before it is mapped, the window manager puts it up
+//! fullscreen in one go; asked for afterwards, as the library does, the
+//! window is put up at a size of the manager's own, resized to the work
+//! area and only then to the screen, which takes it tens of milliseconds
+//! and holds up the first frame.
+//!
+//! The other is the window's first picture as its background: a pixmap
+//! the server itself paints the window with the moment the window
+//! manager shows it. A frame handed over the ordinary way before then is
+//! thrown away, and the next one waits on the manager being done, which
+//! on some managers is a good part of a tenth of a second.
 
-use std::ffi::{c_char, c_int, c_long, c_uchar, c_ulong, c_void};
+use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void};
 
 use libloading::Library;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
@@ -14,12 +22,17 @@ use winit::window::Window;
 
 type Display = *mut c_void;
 
+/// The X11 display and window behind a window, when it is one.
+fn xlib(window: &Window) -> Option<(Display, c_ulong)> {
+    let (Ok(display), Ok(handle)) = (window.display_handle(), window.window_handle()) else { return None };
+    let (RawDisplayHandle::Xlib(display), RawWindowHandle::Xlib(handle)) = (display.as_raw(), handle.as_raw()) else { return None };
+    Some((display.display?.as_ptr(), handle.window))
+}
+
 /// Marks a still-hidden X11 window as fullscreen. Does nothing on another
 /// windowing system, or where libX11 cannot be loaded.
 pub fn mark_fullscreen(window: &Window) {
-    let (Ok(display), Ok(handle)) = (window.display_handle(), window.window_handle()) else { return };
-    let (RawDisplayHandle::Xlib(display), RawWindowHandle::Xlib(handle)) = (display.as_raw(), handle.as_raw()) else { return };
-    let Some(display) = display.display else { return };
+    let Some((display, window)) = xlib(window) else { return };
     // SAFETY: loading libX11 runs only its ordinary library initialisers,
     // and each symbol is given the signature its C header declares.
     unsafe {
@@ -27,12 +40,204 @@ pub fn mark_fullscreen(window: &Window) {
         let Ok(intern) = library.get::<unsafe extern "C" fn(Display, *const c_char, c_int) -> c_ulong>(b"XInternAtom\0") else { return };
         let Ok(change) = library.get::<unsafe extern "C" fn(Display, c_ulong, c_ulong, c_ulong, c_int, c_int, *const c_uchar, c_int) -> c_int>(b"XChangeProperty\0") else { return };
         let Ok(flush) = library.get::<unsafe extern "C" fn(Display) -> c_int>(b"XFlush\0") else { return };
-        let display = display.as_ptr();
         let state = intern(display, c"_NET_WM_STATE".as_ptr(), 0);
         let fullscreen: c_ulong = intern(display, c"_NET_WM_STATE_FULLSCREEN".as_ptr(), 0);
         // XA_ATOM is 4; 32-bit items are passed as C longs.
         let value: [c_long; 1] = [fullscreen as c_long];
-        change(display, handle.window, state, 4, 32, 0, value.as_ptr().cast(), 1);
+        change(display, window, state, 4, 32, 0, value.as_ptr().cast(), 1);
         flush(display);
+    }
+}
+
+/// The attributes of a window, as libX11 lays them out.
+#[repr(C)]
+struct WindowAttributes {
+    x: c_int,
+    y: c_int,
+    width: c_int,
+    height: c_int,
+    border_width: c_int,
+    depth: c_int,
+    visual: *mut c_void,
+    root: c_ulong,
+    class: c_int,
+    bit_gravity: c_int,
+    win_gravity: c_int,
+    backing_store: c_int,
+    backing_planes: c_ulong,
+    backing_pixel: c_ulong,
+    save_under: c_int,
+    colormap: c_ulong,
+    map_installed: c_int,
+    map_state: c_int,
+    all_event_masks: c_long,
+    your_event_mask: c_long,
+    do_not_propagate_mask: c_long,
+    override_redirect: c_int,
+    screen: *mut c_void,
+}
+
+/// What the shared memory extension is told of a segment.
+#[repr(C)]
+struct ShmSegmentInfo {
+    shmseg: c_ulong,
+    shmid: c_int,
+    shmaddr: *mut c_char,
+    read_only: c_int,
+}
+
+/// The libX11 and libXext calls a backdrop takes.
+struct Api {
+    _x11: Library,
+    _xext: Library,
+    get_attributes: unsafe extern "C" fn(Display, c_ulong, *mut WindowAttributes) -> c_int,
+    create_pixmap: unsafe extern "C" fn(Display, c_ulong, c_uint, c_uint, c_uint) -> c_ulong,
+    free_pixmap: unsafe extern "C" fn(Display, c_ulong) -> c_int,
+    create_gc: unsafe extern "C" fn(Display, c_ulong, c_ulong, *mut c_void) -> *mut c_void,
+    free_gc: unsafe extern "C" fn(Display, *mut c_void) -> c_int,
+    set_background_pixmap: unsafe extern "C" fn(Display, c_ulong, c_ulong) -> c_int,
+    clear_area: unsafe extern "C" fn(Display, c_ulong, c_int, c_int, c_uint, c_uint, c_int) -> c_int,
+    flush: unsafe extern "C" fn(Display) -> c_int,
+    shm_create_image: unsafe extern "C" fn(Display, *mut c_void, c_uint, c_int, *mut c_char, *mut ShmSegmentInfo, c_uint, c_uint) -> *mut c_void,
+    shm_attach: unsafe extern "C" fn(Display, *mut ShmSegmentInfo) -> c_int,
+    shm_detach: unsafe extern "C" fn(Display, *mut ShmSegmentInfo) -> c_int,
+    shm_put_image: unsafe extern "C" fn(Display, c_ulong, *mut c_void, *mut c_void, c_int, c_int, c_int, c_int, c_uint, c_uint, c_int) -> c_int,
+    destroy_image: unsafe extern "C" fn(*mut c_void) -> c_int,
+}
+
+impl Api {
+    fn load() -> Option<Api> {
+        // SAFETY: as in `mark_fullscreen`.
+        unsafe {
+            let x11 = Library::new("libX11.so.6").ok()?;
+            let xext = Library::new("libXext.so.6").ok()?;
+            macro_rules! symbol {
+                ($library:expr, $name:literal) => {
+                    *$library.get(concat!($name, "\0").as_bytes()).ok()?
+                };
+            }
+            Some(Api {
+                get_attributes: symbol!(x11, "XGetWindowAttributes"),
+                create_pixmap: symbol!(x11, "XCreatePixmap"),
+                free_pixmap: symbol!(x11, "XFreePixmap"),
+                create_gc: symbol!(x11, "XCreateGC"),
+                free_gc: symbol!(x11, "XFreeGC"),
+                set_background_pixmap: symbol!(x11, "XSetWindowBackgroundPixmap"),
+                clear_area: symbol!(x11, "XClearArea"),
+                flush: symbol!(x11, "XFlush"),
+                shm_create_image: symbol!(xext, "XShmCreateImage"),
+                shm_attach: symbol!(xext, "XShmAttach"),
+                shm_detach: symbol!(xext, "XShmDetach"),
+                shm_put_image: symbol!(xext, "XShmPutImage"),
+                destroy_image: symbol!(x11, "XDestroyImage"),
+                _x11: x11,
+                _xext: xext,
+            })
+        }
+    }
+}
+
+/// A window's first picture, as its background: painted by the server
+/// the moment the window is shown. Made, painted into, shown; and
+/// dropped once a frame has reached the window the ordinary way, which
+/// takes the picture back off the background, so that it is not painted
+/// again on a resize.
+pub struct Backdrop {
+    api: Api,
+    display: Display,
+    window: c_ulong,
+    width: u32,
+    height: u32,
+    pixmap: c_ulong,
+    image: *mut c_void,
+    info: ShmSegmentInfo,
+    shown: bool,
+}
+
+impl Backdrop {
+    /// A picture-to-be of `width` by `height` for an X11 window, in
+    /// memory shared with the server. `None` on another windowing system,
+    /// without the libraries, or when the server will not have it.
+    pub fn new(window: &Window, width: u32, height: u32) -> Option<Backdrop> {
+        let (display, window) = xlib(window)?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let api = Api::load()?;
+        let bytes = width as usize * height as usize * 4;
+        // SAFETY: the calls are given valid handles and buffers of the
+        // sizes they are told; the shared segment outlives its use by the
+        // server, which is told of its end before it is unmapped.
+        unsafe {
+            let mut attributes = std::mem::zeroed::<WindowAttributes>();
+            if (api.get_attributes)(display, window, &mut attributes) == 0 || attributes.depth != 24 {
+                return None;
+            }
+            let shmid = libc::shmget(libc::IPC_PRIVATE, bytes, libc::IPC_CREAT | 0o600);
+            if shmid < 0 {
+                return None;
+            }
+            let shmaddr = libc::shmat(shmid, std::ptr::null(), 0);
+            // Marked for removal now: it goes once both sides let go.
+            libc::shmctl(shmid, libc::IPC_RMID, std::ptr::null_mut());
+            if shmaddr as isize == -1 {
+                return None;
+            }
+            let mut info = ShmSegmentInfo { shmseg: 0, shmid, shmaddr: shmaddr.cast(), read_only: 1 };
+            // ZPixmap is 2.
+            let image = (api.shm_create_image)(display, attributes.visual, 24, 2, shmaddr.cast(), &mut info, width, height);
+            if image.is_null() {
+                libc::shmdt(shmaddr);
+                return None;
+            }
+            if (api.shm_attach)(display, &mut info) == 0 {
+                (api.destroy_image)(image);
+                libc::shmdt(shmaddr);
+                return None;
+            }
+            let pixmap = (api.create_pixmap)(display, window, width, height, 24);
+            Some(Backdrop { api, display, window, width, height, pixmap, image, info, shown: false })
+        }
+    }
+
+    /// The picture, `0RGB` a pixel, to be painted before `show`.
+    pub fn pixels(&mut self) -> &mut [u32] {
+        // SAFETY: the segment is `width * height` pixels, mapped until drop.
+        unsafe { std::slice::from_raw_parts_mut(self.info.shmaddr.cast::<u32>(), self.width as usize * self.height as usize) }
+    }
+
+    /// Hands the picture to the server as the window's background: painted
+    /// at once if the window is already up, at its showing otherwise. No
+    /// waiting on the server, which is busy with the picture from here.
+    pub fn show(&mut self) {
+        // SAFETY: as in `new`; the server lets the segment go once it has
+        // taken the picture, which it does in order.
+        unsafe {
+            let gc = (self.api.create_gc)(self.display, self.pixmap, 0, std::ptr::null_mut());
+            (self.api.shm_put_image)(self.display, self.pixmap, gc, self.image, 0, 0, 0, 0, self.width, self.height, 0);
+            (self.api.set_background_pixmap)(self.display, self.window, self.pixmap);
+            (self.api.clear_area)(self.display, self.window, 0, 0, 0, 0, 0);
+            (self.api.shm_detach)(self.display, &mut self.info);
+            (self.api.free_gc)(self.display, gc);
+            (self.api.flush)(self.display);
+        }
+        self.shown = true;
+    }
+}
+
+impl Drop for Backdrop {
+    fn drop(&mut self) {
+        // SAFETY: the handles are the ones `new` made, freed once.
+        unsafe {
+            if !self.shown {
+                (self.api.shm_detach)(self.display, &mut self.info);
+            }
+            // No background pixmap: `None` is 0.
+            (self.api.set_background_pixmap)(self.display, self.window, 0);
+            (self.api.free_pixmap)(self.display, self.pixmap);
+            (self.api.destroy_image)(self.image);
+            (self.api.flush)(self.display);
+            libc::shmdt(self.info.shmaddr.cast());
+        }
     }
 }
