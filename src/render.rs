@@ -1,6 +1,8 @@
 use std::error::Error;
 
 use fast_image_resize as fir;
+use fir::IntoImageView;
+use rayon::prelude::*;
 
 use crate::frame::Frame;
 use crate::view::Layout;
@@ -10,9 +12,12 @@ use crate::view::Layout;
 /// which looks better but costs more.
 ///
 /// `picture` picks the frame of an animation; 0 is the first or only one.
+///
+/// Every row is done on its own core: at 4K the buffer is 33 MB, which one
+/// core takes several milliseconds just to write, and the thread that
+/// draws has usually just woken from a wait and is slow to get going.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_image(dst: &mut [u32], window: (u32, u32), frame: &Frame, picture: usize, layout: Layout, smooth: bool, background: u32) {
-    dst.fill(background);
     let pixels = frame.picture(picture);
     let (win_w, win_h) = (window.0 as i32, window.1 as i32);
     let visible = Visible {
@@ -21,24 +26,35 @@ pub fn draw_image(dst: &mut [u32], window: (u32, u32), frame: &Frame, picture: u
         y0: layout.y.max(0),
         y1: (layout.y + layout.height as i32).min(win_h),
     };
-    if visible.x0 >= visible.x1 || visible.y0 >= visible.y1 {
-        return;
+    if visible.x0 >= visible.x1 || visible.y0 >= visible.y1 || win_w <= 0 {
+        return fill_all(dst, background);
     }
     let (fw, fh) = (frame.width as usize, frame.height as usize);
-    let rows = dst.chunks_exact_mut(win_w as usize).skip(visible.y0 as usize);
-    let rows = rows.take((visible.y1 - visible.y0) as usize);
     let span = visible.x0 as usize..visible.x1 as usize;
+    let rows = visible.y0 as usize..visible.y1 as usize;
 
     if (frame.width, frame.height) == (layout.width, layout.height) {
         let (left, top) = ((visible.x0 - layout.x) as usize, (visible.y0 - layout.y) as usize);
-        for (y, row) in rows.enumerate() {
-            let source = &pixels[(top + y) * fw + left..][..span.len()];
+        dst.par_chunks_exact_mut(win_w as usize).enumerate().for_each(|(y, row)| {
+            if !rows.contains(&y) {
+                return row.fill(background);
+            }
+            let source = &pixels[(top + y - rows.start) * fw + left..][..span.len()];
+            clear_around(row, &span, background);
             row[span.clone()].copy_from_slice(source);
-        }
+        });
         return;
     }
-    if smooth && resample(dst, win_w as usize, frame, pixels, layout, &visible).is_ok() {
-        return;
+    if smooth {
+        // The margins first, then the picture straight into the window
+        // buffer, its rows taken by the scaler as they lie in the window.
+        dst.par_chunks_exact_mut(win_w as usize).enumerate().for_each(|(y, row)| match rows.contains(&y) {
+            true => clear_around(row, &span, background),
+            false => row.fill(background),
+        });
+        if resample(dst, win_w as usize, frame, pixels, layout, &visible).is_ok() {
+            return;
+        }
     }
 
     // Sample at destination pixel centres.
@@ -47,14 +63,27 @@ pub fn draw_image(dst: &mut [u32], window: (u32, u32), frame: &Frame, picture: u
     };
     let columns: Vec<usize> =
         (visible.x0..visible.x1).map(|x| nearest(x - layout.x, layout.width, fw)).collect();
-    let rows = dst.chunks_exact_mut(win_w as usize).skip(visible.y0 as usize);
-    for (y, row) in rows.take((visible.y1 - visible.y0) as usize).enumerate() {
-        let from = nearest(visible.y0 - layout.y + y as i32, layout.height, fh) * fw;
+    dst.par_chunks_exact_mut(win_w as usize).enumerate().for_each(|(y, row)| {
+        if !rows.contains(&y) {
+            return row.fill(background);
+        }
+        clear_around(row, &span, background);
+        let from = nearest(y as i32 - layout.y, layout.height, fh) * fw;
         let source = &pixels[from..from + fw];
         for (pixel, &column) in row[span.clone()].iter_mut().zip(&columns) {
             *pixel = source[column];
         }
-    }
+    });
+}
+
+fn fill_all(dst: &mut [u32], background: u32) {
+    dst.par_chunks_mut(1 << 16).for_each(|part| part.fill(background));
+}
+
+/// Clears what is to the left and right of `span` in a row.
+fn clear_around(row: &mut [u32], span: &std::ops::Range<usize>, background: u32) {
+    row[..span.start].fill(background);
+    row[span.end..].fill(background);
 }
 
 /// The part of the image rectangle that is inside the window.
@@ -63,6 +92,48 @@ struct Visible {
     x1: i32,
     y0: i32,
     y1: i32,
+}
+
+/// A rectangle of a larger buffer, as an image the scaler can write into:
+/// rows `stride` pixels apart, the first starting `offset` pixels in. The
+/// scaler splits it into bands for its threads by way of the rows.
+struct Strided<'a> {
+    pixels: &'a mut [u32],
+    offset: usize,
+    stride: usize,
+    width: u32,
+    height: u32,
+}
+
+unsafe impl fir::ImageView for Strided<'_> {
+    type Pixel = fir::pixels::U8x4;
+
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+
+    fn iter_rows(&self, start_row: u32) -> impl Iterator<Item = &[Self::Pixel]> {
+        let (width, offset, stride) = (self.width as usize, self.offset, self.stride);
+        let rows = self.height.saturating_sub(start_row) as usize;
+        (start_row as usize..).take(rows).map(move |y| {
+            let pixels: &[u32] = &self.pixels[offset + y * stride..][..width];
+            bytemuck::cast_slice(pixels)
+        })
+    }
+}
+
+unsafe impl fir::ImageViewMut for Strided<'_> {
+    fn iter_rows_mut(&mut self, start_row: u32) -> impl Iterator<Item = &mut [Self::Pixel]> {
+        let (width, offset, stride) = (self.width as usize, self.offset, self.stride);
+        let rows = self.height.saturating_sub(start_row) as usize;
+        let from = offset + start_row as usize * stride;
+        let pixels = self.pixels.get_mut(from..).unwrap_or_default();
+        pixels.chunks_mut(stride).take(rows).map(move |row| bytemuck::cast_slice_mut(&mut row[..width]))
+    }
 }
 
 fn resample(dst: &mut [u32], win_w: usize, frame: &Frame, pixels: &[u32], layout: Layout, visible: &Visible) -> Result<(), Box<dyn Error>> {
@@ -76,9 +147,13 @@ fn resample(dst: &mut [u32], win_w: usize, frame: &Frame, pixels: &[u32], layout
         bytemuck::cast_slice(pixels),
         fir::PixelType::U8x4,
     )?;
-    let mut scaled = vec![0u32; width as usize * height as usize];
-    let mut target =
-        fir::images::Image::from_slice_u8(width, height, bytemuck::cast_slice_mut(&mut scaled), fir::PixelType::U8x4)?;
+    let mut target = Strided {
+        pixels: dst,
+        offset: visible.y0 as usize * win_w + visible.x0 as usize,
+        stride: win_w,
+        width,
+        height,
+    };
     let options = fir::ResizeOptions::new()
         .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom))
         .crop(
@@ -89,12 +164,8 @@ fn resample(dst: &mut [u32], win_w: usize, frame: &Frame, pixels: &[u32], layout
         )
         // The fourth byte is padding, not alpha.
         .use_alpha(false);
-    fir::Resizer::new().resize(&source, &mut target, &options)?;
-
-    let rows = dst.chunks_exact_mut(win_w).skip(visible.y0 as usize);
-    for (row, source) in rows.zip(scaled.chunks_exact(width as usize)) {
-        row[visible.x0 as usize..visible.x1 as usize].copy_from_slice(source);
-    }
+    let source = source.image_view::<fir::pixels::U8x4>().ok_or("pixel type")?;
+    fir::Resizer::new().resize_typed(&source, &mut target, &options)?;
     Ok(())
 }
 
@@ -143,5 +214,31 @@ mod tests {
         let layout = Layout { width: 2, height: 2, x: 0, y: 0 };
         draw_image(&mut buffer, (2, 2), &source, 0, layout, true, 7);
         assert_eq!(buffer, [0x808080; 4]);
+    }
+
+    #[test]
+    fn smooth_drawing_stays_inside_the_layout() {
+        // A flat picture drawn smoothly into the middle of a larger
+        // window: the margins are background, the picture its colour, and
+        // when panned partly off the window only the part on it is drawn.
+        let source = Frame::still(8, 8, (8, 8), vec![0x404040; 64]);
+        let mut buffer = [9; 6 * 5];
+        let layout = Layout { width: 4, height: 3, x: 1, y: 1 };
+        draw_image(&mut buffer, (6, 5), &source, 0, layout, true, 7);
+        for y in 0..5 {
+            for x in 0..6 {
+                let inside = (1..5).contains(&x) && (1..4).contains(&y);
+                assert_eq!(buffer[y * 6 + x], if inside { 0x404040 } else { 7 }, "at {x},{y}");
+            }
+        }
+        let mut buffer = [9; 6 * 5];
+        let layout = Layout { width: 4, height: 3, x: -2, y: 3 };
+        draw_image(&mut buffer, (6, 5), &source, 0, layout, true, 7);
+        for y in 0..5 {
+            for x in 0..6 {
+                let inside = (0..2).contains(&x) && (3..5).contains(&y);
+                assert_eq!(buffer[y * 6 + x], if inside { 0x404040 } else { 7 }, "at {x},{y}");
+            }
+        }
     }
 }

@@ -120,6 +120,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if options.debug {
+        eprintln!("jog: {:>7.1?} start listed and display opened", started.elapsed());
+    }
     let proxy = event_loop.create_proxy();
     let loaded = proxy.clone();
     let loader = Loader::new(files.clone(), options.background, options.debug, move |job| {

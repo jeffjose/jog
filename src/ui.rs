@@ -257,21 +257,86 @@ impl<'a> Canvas<'a> {
         let sh = source.len() / sw.max(1);
         let columns: Vec<usize> = (0..w).map(|dx| (i64::from(dx) * sw as i64 / i64::from(w)) as usize).collect();
         let (x0, x1) = (x.max(0), (x + w).min(self.width));
-        if x0 >= x1 {
+        let (y0, y1) = (y.max(0), (y + h).min(self.height));
+        if x0 >= x1 || y0 >= y1 {
             return;
         }
-        for dy in 0..h {
-            let py = y + dy;
-            if py < 0 || py >= self.height {
-                continue;
-            }
+        let width = self.width as usize;
+        let draw_row = |row: usize, out: &mut [u32]| {
+            let dy = y0 + row as i32 - y;
             let sy = (i64::from(dy) * sh as i64 / i64::from(h)) as usize;
-            let row = &source[sy * sw..(sy + 1) * sw];
-            let out = &mut self.pixels[(py * self.width + x0) as usize..(py * self.width + x1) as usize];
-            for (pixel, &column) in out.iter_mut().zip(&columns[(x0 - x) as usize..]) {
-                *pixel = row[column];
+            let source = &source[sy * sw..(sy + 1) * sw];
+            for (pixel, &column) in out[x0 as usize..x1 as usize].iter_mut().zip(&columns[(x0 - x) as usize..]) {
+                *pixel = source[column];
             }
+        };
+        let rows = self.pixels[y0 as usize * width..y1 as usize * width].chunks_exact_mut(width);
+        // A large picture has its rows done each on its own core; a small
+        // one is quicker drawn than handed out.
+        if (x1 - x0) as usize * (y1 - y0) as usize >= SHARE {
+            rows.collect::<Vec<_>>().into_par_iter().enumerate().for_each(|(row, out)| draw_row(row, out));
+        } else {
+            rows.enumerate().for_each(|(row, out)| draw_row(row, out));
         }
+    }
+
+    /// Draws many frames, each scaled to its rectangle as `image` does,
+    /// in one pass over the rows of the canvas, each row on its own core.
+    /// Later rectangles are drawn over earlier ones where they overlap.
+    pub fn images(&mut self, blits: &[(&Frame, [i32; 4])]) {
+        struct Blit<'a> {
+            source: &'a [u32],
+            sw: usize,
+            sh: usize,
+            x: i32,
+            y: i32,
+            h: i32,
+            x0: usize,
+            x1: usize,
+            y0: i32,
+            y1: i32,
+            columns: Vec<usize>,
+        }
+        let (width, height) = (self.width, self.height);
+        let shrunk: Vec<Option<Vec<u32>>> = blits.iter().map(|(frame, [_, _, w, h])| shrink(frame, (*w).max(0) as u32, (*h).max(0) as u32)).collect();
+        let blits: Vec<Blit> = blits
+            .iter()
+            .zip(&shrunk)
+            .filter_map(|((frame, place), shrunk)| {
+                let [x, y, w, h] = *place;
+                if w <= 0 || h <= 0 {
+                    return None;
+                }
+                let (source, sw): (&[u32], usize) = match shrunk {
+                    Some(pixels) => (pixels, w as usize),
+                    None => (&frame.pixels, frame.width as usize),
+                };
+                let (x0, x1) = (x.max(0), (x + w).min(width));
+                let (y0, y1) = (y.max(0), (y + h).min(height));
+                if x0 >= x1 || y0 >= y1 {
+                    return None;
+                }
+                let columns = (0..w).map(|dx| (i64::from(dx) * sw as i64 / i64::from(w)) as usize).collect();
+                Some(Blit { source, sw, sh: source.len() / sw.max(1), x, y, h, x0: x0 as usize, x1: x1 as usize, y0, y1, columns })
+            })
+            .collect();
+        if blits.is_empty() {
+            return;
+        }
+        let (top, bottom) = (blits.iter().map(|b| b.y0).min().unwrap_or(0), blits.iter().map(|b| b.y1).max().unwrap_or(0));
+        let stride = width as usize;
+        let rows = self.pixels[top as usize * stride..bottom as usize * stride].par_chunks_exact_mut(stride);
+        rows.enumerate().for_each(|(row, out)| {
+            let py = top + row as i32;
+            for blit in blits.iter().filter(|blit| (blit.y0..blit.y1).contains(&py)) {
+                let sy = (i64::from(py - blit.y) * blit.sh as i64 / i64::from(blit.h)) as usize;
+                let source = &blit.source[sy * blit.sw..(sy + 1) * blit.sw];
+                let columns = &blit.columns[(blit.x0 as i32 - blit.x) as usize..];
+                for (pixel, &column) in out[blit.x0..blit.x1].iter_mut().zip(columns) {
+                    *pixel = source[column];
+                }
+            }
+        });
     }
 
     fn blend(&mut self, x: i32, y: i32, color: u32, coverage: u8) {
@@ -338,7 +403,17 @@ pub fn dissolve_all(pixels: &mut [u32], was: &[u32], amount: u32) {
 /// Copies a whole picture into a buffer kept for the purpose, on every core.
 pub fn copy_all(into: &mut Vec<u32>, from: &[u32]) {
     into.resize(from.len(), 0);
+    copy_into(into, from);
+}
+
+/// Copies one whole picture over another of the same size, on every core.
+pub fn copy_into(into: &mut [u32], from: &[u32]) {
     into.par_chunks_mut(SHARE).zip(from.par_chunks(SHARE)).for_each(|(into, from)| into.copy_from_slice(from));
+}
+
+/// Fills a whole picture with one colour, on every core.
+pub fn fill_all(pixels: &mut [u32], color: u32) {
+    pixels.par_chunks_mut(SHARE).for_each(|part| part.fill(color));
 }
 
 /// How many rows are looked at together when telling what has changed.

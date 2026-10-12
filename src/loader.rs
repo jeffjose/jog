@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::decode::{self, Source, Spec};
@@ -24,6 +24,9 @@ pub struct Request {
     /// Images to fit to `target`, most urgent first. The first is on screen.
     pub wanted: Vec<usize>,
     pub target: (u32, u32),
+    /// Whether images smaller than `target` are scaled up to it, as they
+    /// are shown; done here, showing one is a copy rather than a scaling.
+    pub enlarge: bool,
     /// Image to also decode at full resolution, for zooming in.
     pub full: Option<usize>,
     /// Images to make thumbnails of, most urgent first.
@@ -76,6 +79,7 @@ pub struct Stats {
 struct Slot {
     frame: Result<Arc<Frame>, String>,
     size: (u32, u32),
+    enlarge: bool,
     transform: Transform,
     made: Made,
     /// When it was last asked for. The lowest goes first when room is needed.
@@ -122,7 +126,10 @@ impl State {
     /// Whether a slot serves `id` at `size`. A thumbnail at least as large
     /// as wanted will do: it is drawn shrunk to its cell anyway.
     fn is_current(&self, slot: Option<&Slot>, id: usize, size: (u32, u32), at_least: bool) -> bool {
-        let fits = |s: &Slot| if at_least { s.size.0 >= size.0 && s.size.1 >= size.1 } else { s.size == size };
+        let fits = |s: &Slot| match at_least {
+            true => s.size.0 >= size.0 && s.size.1 >= size.1,
+            false => s.size == size && s.enlarge == self.request.enlarge,
+        };
         slot.is_some_and(|s| s.frame.is_err() || (fits(s) && s.transform == self.transform(id)))
     }
 
@@ -172,7 +179,8 @@ impl State {
             Job::Full(_) => None,
         };
         let transform = self.transform(id);
-        let spec = Spec { target, transform, background, thumbnail: matches!(job, Job::Thumb(_)) };
+        let enlarge = matches!(job, Job::Fitted(_)) && self.request.enlarge;
+        let spec = Spec { target, enlarge, transform, background, thumbnail: matches!(job, Job::Thumb(_)) };
 
         let fitted = self.fitted.get(&id).filter(|slot| slot.transform == transform);
         let fitted = fitted.and_then(|slot| slot.frame.as_ref().ok()).cloned();
@@ -268,7 +276,10 @@ impl Loader {
             let thumbs_allowed = index >= RESERVED_WORKERS.min(workers - 1);
             std::thread::Builder::new()
                 .name("jog-decode".into())
-                .spawn(move || worker(&shared, &*on_loaded, thumbs_allowed))
+                .spawn(move || {
+                    give_way();
+                    worker(&shared, &*on_loaded, thumbs_allowed)
+                })
                 .expect("failed to spawn decode thread");
         }
         Self { shared }
@@ -369,6 +380,30 @@ impl Loader {
     }
 }
 
+/// The threads the scaling and turning inside a decode job spread over.
+/// They are kept apart from the ones drawing uses: a frame on its way to
+/// the screen would otherwise wait its turn behind the pieces of a decode
+/// that is only being done ahead of time.
+fn decode_pool() -> &'static rayon::ThreadPool {
+    static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .thread_name(|index| format!("jog-scale-{index}"))
+            .start_handler(|_| give_way())
+            .build()
+            .expect("failed to start the scaling threads")
+    })
+}
+
+/// Lowers the calling thread's claim on the processor. Decoding is done
+/// ahead of time on every core at once; the thread drawing the window,
+/// and those helping it, are to have a core whenever they want one.
+fn give_way() {
+    // SAFETY: a plain system call on the calling thread, which on Linux is
+    // what a process id of 0 names here.
+    unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+}
+
 fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allowed: bool) {
     let mut state = shared.state.lock().unwrap();
     loop {
@@ -387,7 +422,7 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
             Work::FromSource(_) => "from decoded",
             Work::FromFrame(_) => "from frame",
         };
-        let (result, source, read) = perform(work, spec, keep);
+        let (result, source, read) = decode_pool().install(|| perform(work, spec, keep));
         let took = started.elapsed();
         let made = Made { how, read, fit: took.saturating_sub(read), at: Instant::now() };
         if shared.debug.load(Ordering::Relaxed) {
@@ -405,7 +440,7 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
             }
             error.to_string()
         });
-        let slot = Slot { frame, size: spec.target.unwrap_or_default(), transform: spec.transform, made, used: 0 };
+        let slot = Slot { frame, size: spec.target.unwrap_or_default(), enlarge: spec.enlarge, transform: spec.transform, made, used: 0 };
 
         state = shared.state.lock().unwrap();
         state.busy.remove(&job);
@@ -435,10 +470,12 @@ fn perform(work: Work, spec: Spec, keep: bool) -> (decode::Result<Frame>, Option
             };
             let read = started.elapsed();
             let frame = decode::finish(&source, spec);
-            let larger = spec.target.is_none_or(|(w, h)| source.width() > w || source.height() > h);
-            // An animation is never wanted at full resolution, and would
-            // take much more room than a still.
-            let worth_keeping = keep && larger && source.animation.is_none();
+            // The file is kept when the frame is not its pixels as they
+            // are, and so zooming in would want them. An animation is
+            // never wanted at full resolution, and would take much more
+            // room than a still.
+            let scaled = frame.as_ref().is_ok_and(|frame| !frame.is_native());
+            let worth_keeping = keep && scaled && source.animation.is_none();
             (frame, worth_keeping.then(|| Arc::new(source)), read)
         }
         Work::FromSource(source) => (decode::finish(&source, spec), None, Duration::ZERO),

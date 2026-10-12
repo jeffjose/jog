@@ -868,6 +868,7 @@ dependencies = [
  "fontdue",
  "image",
  "kamadak-exif",
+ "libc",
  "libloading 0.9.0",
  "memchr",
  "rayon",

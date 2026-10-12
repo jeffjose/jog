@@ -9,12 +9,16 @@ use std::ffi::{c_char, c_double, c_int, c_void, CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use libloading::Library;
 
 const LIBRARY_NAMES: &[&str] = &["libmpv.so.2", "libmpv.so.1", "libmpv.so"];
 
 // Values from mpv's client.h and render.h.
+const FORMAT_STRING: c_int = 1;
 const FORMAT_FLAG: c_int = 3;
 const FORMAT_DOUBLE: c_int = 5;
 const EVENT_NONE: c_int = 0;
@@ -144,10 +148,41 @@ pub struct Player {
     api: Api,
     handle: Handle,
     render: RenderContext,
+    /// The last known values of the properties the viewer asks about
+    /// while a video plays. Each is told of as it changes, so that
+    /// asking never waits on the player's core, which is busy for tens
+    /// of milliseconds whenever it opens a file or seeks.
+    known: Mutex<Vec<Option<Known>>>,
     /// Handed to mpv as callback context, so it must not move.
     _wake: Box<Wake>,
     /// Keeps the function pointers in `api` valid. Dropped last.
     _library: Library,
+}
+
+/// The properties watched, with the format each is wanted in. Their
+/// places here, from 1, are what mpv tags the change events with.
+const WATCHED: &[(&str, c_int)] = &[
+    ("eof-reached", FORMAT_FLAG),
+    ("time-pos", FORMAT_DOUBLE),
+    ("duration", FORMAT_DOUBLE),
+    ("pause", FORMAT_FLAG),
+    ("seeking", FORMAT_FLAG),
+    ("vo-configured", FORMAT_FLAG),
+    ("path", FORMAT_STRING),
+    ("volume", FORMAT_DOUBLE),
+    ("track-list/count", FORMAT_DOUBLE),
+];
+
+/// A property's value as last told of.
+#[derive(Clone, Debug)]
+enum Known {
+    Flag(bool),
+    Number(f64),
+    Text(String),
+}
+
+fn watched(property: &str) -> Option<usize> {
+    WATCHED.iter().position(|(name, _)| *name == property)
 }
 
 // SAFETY: mpv's client and render APIs may be called from any thread, as
@@ -163,6 +198,18 @@ unsafe extern "C" fn on_events(context: *mut c_void) {
 unsafe extern "C" fn on_frame(context: *mut c_void) {
     // SAFETY: as in `on_events`.
     unsafe { (*(context as *const Wake))(Signal::Frame) }
+}
+
+/// Whether reading a property that takes a while is reported on the
+/// terminal: every read waits for the player's core, which is busy for a
+/// good while when it opens a file.
+pub static DEBUG: AtomicBool = AtomicBool::new(false);
+
+fn report_slow(property: &str, asked: Instant) {
+    let took = asked.elapsed();
+    if took > Duration::from_millis(2) && DEBUG.load(Ordering::Relaxed) {
+        eprintln!("jog: {took:>7.1?} mpv   waited for {property}");
+    }
 }
 
 fn c_string(text: impl AsRef<[u8]>) -> CString {
@@ -255,14 +302,24 @@ impl Player {
             let context = &*wake as *const Wake as *mut c_void;
             (api.set_wakeup_callback)(handle, Some(on_events), context);
             (api.render_context_set_update_callback)(render, Some(on_frame), context);
-            // The only property watched, so any change event is about it.
             // Asked for after the callbacks are in place: mpv queues an
-            // event straight away, and only signals when its queue was empty.
+            // event for each straight away, and only signals when its
+            // queue was empty.
             if matches!(role, Role::Playback { .. }) {
-                (api.observe_property)(handle, 0, c"eof-reached".as_ptr(), FORMAT_FLAG);
+                for (index, (name, format)) in WATCHED.iter().enumerate() {
+                    (api.observe_property)(handle, index as u64 + 1, c_string(name).as_ptr(), *format);
+                }
             }
-            Ok(Player { api, handle, render, _wake: wake, _library: library })
+            let known = Mutex::new(vec![None; WATCHED.len()]);
+            Ok(Player { api, handle, render, known, _wake: wake, _library: library })
         }
+    }
+
+    /// The last value told of for a watched property, or `None` for one
+    /// that is not watched or has not been told of yet.
+    fn known(&self, property: &str) -> Option<Known> {
+        let index = watched(property)?;
+        self.known.lock().unwrap()[index].clone()
     }
 
     pub fn command(&self, arguments: &[&[u8]]) {
@@ -342,26 +399,50 @@ impl Player {
     }
 
     pub fn number(&self, property: &str) -> Option<f64> {
+        if let Some(known) = self.known(property) {
+            return match known {
+                Known::Number(value) => Some(value),
+                _ => None,
+            };
+        }
         let mut value: c_double = 0.0;
         let data = (&mut value as *mut c_double).cast();
+        let asked = Instant::now();
         // SAFETY: `data` points at storage of the type the format asks for.
         let status = unsafe { (self.api.get_property)(self.handle, c_string(property).as_ptr(), FORMAT_DOUBLE, data) };
+        report_slow(property, asked);
         (status >= 0).then_some(value)
     }
 
     pub fn flag(&self, property: &str) -> Option<bool> {
+        if let Some(known) = self.known(property) {
+            return match known {
+                Known::Flag(value) => Some(value),
+                _ => None,
+            };
+        }
         let mut value: c_int = 0;
         let data = (&mut value as *mut c_int).cast();
+        let asked = Instant::now();
         // SAFETY: as in `number`.
         let status = unsafe { (self.api.get_property)(self.handle, c_string(property).as_ptr(), FORMAT_FLAG, data) };
+        report_slow(property, asked);
         (status >= 0).then_some(value != 0)
     }
 
     pub fn text(&self, property: &str) -> Option<String> {
+        if let Some(known) = self.known(property) {
+            return match known {
+                Known::Text(value) => Some(value),
+                _ => None,
+            };
+        }
+        let asked = Instant::now();
         // SAFETY: mpv returns NULL or a NUL-terminated string that is ours
         // to free, which happens once it has been copied.
         unsafe {
             let value = (self.api.get_property_string)(self.handle, c_string(property).as_ptr());
+            report_slow(property, asked);
             if value.is_null() {
                 return None;
             }
@@ -380,15 +461,27 @@ impl Player {
             match event.event_id {
                 EVENT_NONE => return events,
                 EVENT_PROPERTY_CHANGE => {
+                    let Some(index) = (event.reply_userdata as usize).checked_sub(1).filter(|index| *index < WATCHED.len()) else { continue };
                     // SAFETY: for this event the data is a property record,
-                    // whose own data is a flag when its format says so.
-                    let reached = unsafe {
+                    // whose own data is of the format it says, or none
+                    // when the property has no value just now.
+                    let value = unsafe {
                         let property = &*(event.data as *const RawProperty);
-                        property.format == FORMAT_FLAG && !property.data.is_null() && *(property.data as *const c_int) != 0
+                        match (property.format, property.data.is_null()) {
+                            (_, true) => None,
+                            (FORMAT_FLAG, _) => Some(Known::Flag(*(property.data as *const c_int) != 0)),
+                            (FORMAT_DOUBLE, _) => Some(Known::Number(*(property.data as *const c_double))),
+                            (FORMAT_STRING, _) => {
+                                let text = *(property.data as *const *const c_char);
+                                (!text.is_null()).then(|| Known::Text(CStr::from_ptr(text).to_string_lossy().into_owned()))
+                            }
+                            _ => None,
+                        }
                     };
-                    if reached {
+                    if WATCHED[index].0 == "eof-reached" && matches!(value, Some(Known::Flag(true))) {
                         events.push(PlayerEvent::AtEnd);
                     }
+                    self.known.lock().unwrap()[index] = value;
                 }
                 EVENT_START_FILE => events.push(PlayerEvent::Started),
                 EVENT_PLAYBACK_RESTART => events.push(PlayerEvent::Showing),

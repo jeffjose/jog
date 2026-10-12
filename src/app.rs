@@ -88,6 +88,8 @@ const VIDEO_END: f64 = 0.25;
 const VIDEO_START: f64 = 0.5;
 /// How long a video has to have been playing to count as watched.
 const SEEN_AFTER: Duration = Duration::from_secs(5);
+/// How long after a video starts showing its tracks are asked about.
+const TRACKS_AFTER: Duration = Duration::from_millis(300);
 /// How long the small movements of the interface take: a toast sliding
 /// in, the seek bar rising, a cursor going from one cell to the next.
 const EASE: Duration = Duration::from_millis(170);
@@ -313,8 +315,9 @@ struct Video {
     /// Whether it was taken over from the spare player, which may have had
     /// its frame ready, and then says nothing more about it.
     held: bool,
-    /// How many subtitle and audio tracks it has, once it is showing.
-    tracks: (usize, usize),
+    /// How many subtitle and audio tracks it has, once that has been
+    /// asked: not while it starts, when asking waits on the player.
+    tracks: Option<(usize, usize)>,
     /// When it first showed, and whether it has been counted as watched.
     shown_at: Option<Instant>,
     watched: bool,
@@ -872,6 +875,9 @@ pub struct App {
     asked: Cell<bool>,
     presented: Vec<u32>,
     animating: Cell<bool>,
+    /// Whether the whole window was painted afresh this frame, so that
+    /// comparing it with the last would only find everything changed.
+    repainted: Cell<bool>,
     /// The first row the file list was scrolled to with the wheel, along
     /// with the position and list length it was scrolled at: once either
     /// changes, the list goes back to following the file on view.
@@ -1305,6 +1311,7 @@ impl App {
     pub fn new(options: Options, files: Vec<PathBuf>, start: usize, loader: Loader, proxy: EventLoopProxy<Event>, cwd: PathBuf) -> Self {
         let slide_delay = Duration::from_secs_f64(options.slideshow_delay.unwrap_or(DEFAULT_SLIDE_DELAY));
         ACCENT.store(options.accent, atomic::Ordering::Relaxed);
+        crate::mpv::DEBUG.store(options.debug, atomic::Ordering::Relaxed);
         // The workspaces of the config file; and unless one of them was
         // asked for by name, what was opened by its path as one more.
         // With sessions to choose from, they are the workspaces, and those
@@ -1410,6 +1417,7 @@ impl App {
             asked: Cell::new(false),
             presented: Vec::new(),
             animating: Cell::new(false),
+            repainted: Cell::new(false),
             list_scroll: None,
             list_hover: None,
             list_button_over: None,
@@ -1633,8 +1641,10 @@ impl App {
         let dir = if self.forward { 1 } else { -1 };
 
         let mut wanted = Vec::new();
-        // The current image, then neighbours, favouring the way we are going.
-        for offset in [0, 1, -1, 2, -2, 3] {
+        // The current image, then neighbours, favouring the way we are
+        // going: stepping quickly, several are on their way at once, and
+        // a large file takes a few steps' worth of time to decode.
+        for offset in [0, 1, -1, 2, 3, -2, 4, 5, 6] {
             let id = self.list[(pos + offset * dir).rem_euclid(len) as usize];
             if !wanted.contains(&id) {
                 wanted.push(id);
@@ -1684,6 +1694,7 @@ impl App {
         let request = Request {
             wanted,
             target: self.monitor,
+            enlarge: self.view.enlarge,
             full: self.needs_full().then(|| self.id()),
             thumbs,
             thumb_size,
@@ -2007,7 +2018,7 @@ impl App {
             // Until the player reports for itself, this is where it is.
             // One counted from the end has to wait for the length.
             let seeking = from.filter(|seconds| *seconds >= 0.0).map(|seconds| (started, seconds));
-            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, held, tracks: (0, 0), shown_at: None, watched: false, to_end: None });
+            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, held, tracks: None, shown_at: None, watched: false, to_end: None });
             self.perf.video_lines = None;
             self.apply_video_view();
         }
@@ -2098,7 +2109,6 @@ impl App {
                 let took = video.started.elapsed();
                 video.start_took.get_or_insert(took);
                 video.shown_at.get_or_insert_with(Instant::now);
-                video.tracks = (tracks_of(player, "sub").len(), tracks_of(player, "audio").len());
                 if self.options.debug {
                     eprintln!("jog: {took:>7.1?} video start {}", self.files[video.id].display());
                 }
@@ -2142,8 +2152,14 @@ impl App {
         let over = at_end && player.flag("eof-reached") == Some(true);
         let watched = !video.watched && (over || video.shown_at.is_some_and(|at| at.elapsed() >= SEEN_AFTER));
         video.watched |= watched;
+        // Which tracks it has is asked once it has been playing a moment:
+        // asked while it starts, each answer waits on the player's core.
+        let asked = video.tracks.is_none() && video.shown_at.is_some_and(|at| at.elapsed() >= TRACKS_AFTER);
+        if asked {
+            video.tracks = Some((tracks_of(player, "sub").len(), tracks_of(player, "audio").len()));
+        }
         let (id, showing) = (video.id, video.showing);
-        if showing {
+        if showing || asked {
             self.redraw();
         }
         if watched {
@@ -2335,7 +2351,7 @@ impl App {
     /// looping, sound on or off, and for a video that has them subtitles
     /// and audio tracks.
     fn bar_buttons(&self) -> Vec<Command> {
-        let (subtitles, audio) = self.video.as_ref().map_or((0, 0), |video| video.tracks);
+        let (subtitles, audio) = self.video.as_ref().and_then(|video| video.tracks).unwrap_or((0, 0));
         let mut buttons = vec![Command::CycleLoop, Command::ToggleMute];
         if subtitles > 0 {
             buttons.push(Command::CycleSubtitles);
@@ -2875,6 +2891,7 @@ impl App {
             ToggleDebugLog => {
                 self.options.debug = !self.options.debug;
                 self.loader.set_debug(self.options.debug);
+                crate::mpv::DEBUG.store(self.options.debug, atomic::Ordering::Relaxed);
                 self.toast(if self.options.debug { "Printing timings to the terminal" } else { "No longer printing timings" });
             }
             ToggleExif => self.show_exif = !self.show_exif,
@@ -4258,14 +4275,17 @@ impl App {
         let frame = self.source().filter(|_| !self.video.as_ref().is_some_and(|video| video.showing));
         // What is looked at, as a block of pixels, where in it the pointer
         // is, and how many pixels of the glass one of its pixels takes.
-        let (source, across, down, at, scale): (Vec<u32>, i32, i32, (f64, f64), f64) = match &frame {
+        // A picture's own pixels are read where they are: copying them
+        // would be the whole picture again on every move of the pointer.
+        let block;
+        let (source, across, down, at, scale): (&[u32], i32, i32, (f64, f64), f64) = match &frame {
             Some(frame) => {
                 let layout = self.layout_of(frame.native);
                 let shown = f64::from(layout.width) / f64::from(frame.width.max(1));
                 let native = f64::from(frame.native.0.max(1)) / f64::from(frame.width.max(1));
                 let scale = (shown * 2.0).max(native) * strength;
                 let at = (f64::from(cx - layout.x) / shown, f64::from(cy - layout.y) / shown);
-                (frame.picture(self.picture).to_vec(), frame.width as i32, frame.height as i32, at, scale)
+                (frame.picture(self.picture), frame.width as i32, frame.height as i32, at, scale)
             }
             None => {
                 // The part of the window under the glass, taken before the
@@ -4273,17 +4293,18 @@ impl App {
                 let scale = 2.0 * strength;
                 let half = (f64::from(radius) / scale).ceil() as i32 + 1;
                 let side = 2 * half + 1;
-                let mut block = vec![background; (side * side) as usize];
+                let mut taken = vec![background; (side * side) as usize];
                 for row in 0..side {
                     let y = cy - half + row;
                     for column in 0..side {
                         let x = cx - half + column;
                         if (0..width).contains(&x) && (0..height).contains(&y) {
-                            block[(row * side + column) as usize] = pixels[(y * width + x) as usize];
+                            taken[(row * side + column) as usize] = pixels[(y * width + x) as usize];
                         }
                     }
                 }
-                (block, side, side, (f64::from(half), f64::from(half)), scale)
+                block = taken;
+                (&block[..], side, side, (f64::from(half), f64::from(half)), scale)
             }
         };
         for dy in -radius..=radius {
@@ -6858,10 +6879,12 @@ impl App {
                 if let Ok(mut buffer) = surface.buffer_mut() {
                     let started = Instant::now();
                     let waited = started.duration_since(entered);
-                    // Whether the window still shows what was last handed it.
-                    let kept = ours && buffer.age() == 1 && self.presented.len() == buffer.len();
                     self.paint(&mut buffer, (size.width, size.height));
                     self.draw_loupe(&mut buffer, (size.width, size.height));
+                    // Whether the window still shows what was last handed
+                    // it, and so only what differs need be told of; not
+                    // when the whole picture was just painted afresh.
+                    let kept = ours && buffer.age() == 1 && self.presented.len() == buffer.len() && !self.repainted.take();
                     // Something is still on its way somewhere: draw again soon.
                     let moving = self.animating.take();
                     if moving {
@@ -6885,6 +6908,7 @@ impl App {
                     };
                     let told = started.elapsed().saturating_sub(painted);
                     window.pre_present_notify();
+                    let presenting = Instant::now();
                     let share = match &parts {
                         Some(parts) => {
                             let rects: Vec<softbuffer::Rect> = parts
@@ -6899,14 +6923,16 @@ impl App {
                             1.0
                         }
                     };
-                    // What a moving frame really cost: waiting for the
-                    // display to be done with the last, drawing this one,
-                    // telling what changed in it and how much of the window
-                    // that was, and how long after the last it began.
-                    if moving && self.options.debug {
+                    let presented = presenting.elapsed();
+                    // What a frame really cost: waiting for the display to
+                    // be done with the last, drawing this one, telling what
+                    // changed in it, handing that over and how much of the
+                    // window it was, and how long after the last it began.
+                    if self.options.debug {
                         let gap = self.frame_began.map(|before| started.duration_since(before)).unwrap_or_default();
+                        let what = if moving { "moving" } else { "still " };
                         eprintln!(
-                            "jog: draw  moving  wait {waited:>7.1?}  paint {painted:>7.1?}  compare {told:>7.1?}  sent {:>5.1}%  since last {gap:>7.1?}",
+                            "jog: draw  {what}  wait {waited:>7.1?}  paint {painted:>7.1?}  compare {told:>7.1?}  present {presented:>7.1?}  sent {:>5.1}%  since last {gap:>7.1?}",
                             share * 100.0
                         );
                     }
@@ -6973,14 +6999,14 @@ impl App {
         // The overview of workspaces takes the whole window.
         if self.overview.is_some() {
             self.scene_live = false;
-            pixels.fill(GRID_COLOR);
+            ui::fill_all(pixels, GRID_COLOR);
             return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
         }
         // Fresh out of the grid, the picture grows from the cell it had
         // there before anything else of it is drawn.
         if self.grid.is_none() {
             if let Some((picture, [x, y, w, h])) = self.growing() {
-                pixels.fill(self.options.background);
+                ui::fill_all(pixels, self.options.background);
                 Canvas::new(pixels, window.0, window.1).image_fast(&picture, x, y, w, h);
                 self.scene_live = false;
                 return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
@@ -6991,8 +7017,14 @@ impl App {
         let started = Instant::now();
         if player.is_some_and(|player| player.render(pixels, window.0, window.1)) {
             self.perf.render = started.elapsed();
+            self.repainted.set(true);
             self.scene_live = false;
-            return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
+            let overlays = Instant::now();
+            self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
+            if self.options.debug {
+                eprintln!("jog: {:>7.1?} draw  video  overlays {:>7.1?}", self.perf.render, overlays.elapsed());
+            }
+            return;
         }
         let source = if self.grid.is_some() { None } else { self.source() };
         match source {
@@ -7014,7 +7046,7 @@ impl App {
                 if moved {
                     self.request();
                 }
-                pixels.fill(GRID_COLOR);
+                ui::fill_all(pixels, GRID_COLOR);
                 self.scene_live = false;
                 self.render_pip(window);
                 self.draw_grid(&mut Canvas::new(pixels, window.0, window.1));
@@ -7060,8 +7092,9 @@ impl App {
                     let (from, to) = ((key.frame.width, key.frame.height), (layout.width, layout.height));
                     self.perf.scaled = Some(Scaled { took, smooth, from, to });
                     self.scene_key = Some(key);
+                    self.repainted.set(true);
                 }
-                pixels.copy_from_slice(&self.scene);
+                ui::copy_into(pixels, &self.scene);
                 // It is well on its way from the first frame, so that
                 // nothing seems to wait.
                 if let Some(since) = self.crossfade {
@@ -7069,6 +7102,7 @@ impl App {
                     if part < 1.0 && self.scene_was.len() == pixels.len() {
                         ui::dissolve_all(pixels, &self.scene_was, ((1.0 - part) * 0.65 * 256.0) as u32);
                         self.animating.set(true);
+                        self.repainted.set(true);
                     } else {
                         self.crossfade = None;
                     }
@@ -7077,7 +7111,7 @@ impl App {
             }
             None => {
                 self.scene_live = false;
-                pixels.fill(self.options.background);
+                ui::fill_all(pixels, self.options.background);
             }
         }
         self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
@@ -7468,9 +7502,30 @@ impl App {
         let edge = (layout.pad / 4).max(2);
         let radius = (layout.cell_w / 36).max(4);
 
+        // The plain thumbnails go down first, all in one pass over the
+        // rows of the window on every core; the cells with more to them
+        // are drawn over that one by one.
+        let shown: Vec<(usize, usize, Option<Arc<Frame>>)> =
+            self.grid_shown(&layout).map(|pos| (pos, self.list[pos], self.loader.thumb(self.list[pos]))).collect();
+        let plain = |pos: usize, id: usize| {
+            let trailer = self.trailer.as_ref().is_some_and(|trailer| trailer.id == id && pos == grid.cursor && trailer.frame.as_ref().is_some_and(|frame| !frame.pixels.is_empty()));
+            let live = self.pip_live.is_some() && self.pip && self.pip_in_cell && pos == self.pos;
+            !trailer && !live
+        };
+        let blits: Vec<(&Frame, [i32; 4])> = shown
+            .iter()
+            .filter(|(pos, id, thumb)| thumb.is_some() && plain(*pos, *id))
+            .map(|(pos, _, thumb)| {
+                let thumb = thumb.as_deref().expect("filtered to the thumbnails there are");
+                let area = self.grid_area(&layout, *pos, canvas.height as u32);
+                (thumb, Self::grid_picture(area, (thumb.width, thumb.height), false))
+            })
+            .collect();
+        canvas.images(&blits);
+
         let mut cursor_place = None;
-        for pos in self.grid_shown(&layout) {
-            let id = self.list[pos];
+        for (pos, id, thumb) in &shown {
+            let (pos, id) = (*pos, *id);
             let area = self.grid_area(&layout, pos, canvas.height as u32);
             // A video under the cursor plays as a trailer.
             let trailer = self.trailer.as_ref().filter(|trailer| trailer.id == id && pos == grid.cursor);
@@ -7478,8 +7533,7 @@ impl App {
             let live = self.pip_live.as_ref().filter(|_| self.pip && self.pip_in_cell && pos == self.pos);
             let since = trailer.filter(|_| live.is_none()).and_then(|trailer| trailer.since);
             let trailer = live.or(trailer.and_then(|trailer| trailer.frame.as_ref()).filter(|frame| !frame.pixels.is_empty()));
-            let thumb = self.loader.thumb(id);
-            let [x, y, w, h] = match (trailer, &thumb) {
+            let [x, y, w, h] = match (trailer, thumb) {
                 (Some(frame), _) => {
                     let place = Self::grid_picture(area, (frame.width, frame.height), true);
                     // The thumbnail gives way to the trailer's first frames
@@ -7495,11 +7549,8 @@ impl App {
                     }
                     place
                 }
-                (None, Some(thumb)) => {
-                    let place = Self::grid_picture(area, (thumb.width, thumb.height), false);
-                    canvas.image(thumb, place[0], place[1], place[2], place[3]);
-                    place
-                }
+                // Drawn already, with the others.
+                (None, Some(thumb)) => Self::grid_picture(area, (thumb.width, thumb.height), false),
                 (None, None) => {
                     canvas.fill(area[0], area[1], area[2], area[3], PLACEHOLDER_COLOR);
                     area
@@ -8985,11 +9036,25 @@ impl ApplicationHandler<Event> for App {
             let (width, height) = self.options.geometry.unwrap_or(fallback);
             attributes = attributes.with_inner_size(PhysicalSize::new(width.max(1), height.max(1)));
         }
+        let creating = Instant::now();
         let window = Arc::new(event_loop.create_window(attributes).expect("failed to create window"));
         window.set_cursor_visible(self.pointer_visible);
         let context = Context::new(window.clone()).expect("failed to connect to display");
         self.surface = Some(Surface::new(&context, window.clone()).expect("failed to create surface"));
         self.window = Some(window);
+        if self.options.debug {
+            eprintln!("jog: {:>7.1?} start window made, {:.1?} since the loop began", creating.elapsed(), self.perf.arrived.elapsed());
+        }
+        // The buffers a frame goes through are made ready now, while the
+        // first image is still decoding: fresh memory of a 4K frame's
+        // size costs several milliseconds the first time it is written,
+        // which would otherwise be paid when that image is first drawn.
+        let (width, height) = self.window_size();
+        for buffer in [&mut self.scene, &mut self.scene_was, &mut self.presented] {
+            buffer.resize(width as usize * height as usize, 0);
+            ui::fill_all(buffer, 0);
+        }
+        self.presented.clear();
         self.update_monitor();
         // With --grid the grid is what comes up, and nothing plays until
         // a picture is gone to: not the first video, nor its trailer.

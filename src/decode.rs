@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use fast_image_resize as fir;
+use rayon::prelude::*;
 use image::metadata::Orientation;
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, ImageReader, RgbImage, RgbaImage};
 use memchr::memmem;
@@ -21,6 +22,8 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 pub struct Spec {
     /// Box to shrink the image into, or `None` for full resolution.
     pub target: Option<(u32, u32)>,
+    /// Whether an image smaller than the box is scaled up to fill it.
+    pub enlarge: bool,
     /// Rotation or mirroring the user asked for, on top of the EXIF one.
     pub transform: Transform,
     /// Colour shown through transparent pixels, as `0RGB`.
@@ -45,16 +48,6 @@ pub struct Source {
 pub struct SourceAnimation {
     pub frames: Vec<RgbImage>,
     pub delays: Vec<Duration>,
-}
-
-impl Source {
-    pub fn width(&self) -> u32 {
-        self.image.width()
-    }
-
-    pub fn height(&self) -> u32 {
-        self.image.height()
-    }
 }
 
 /// Decodes a file. `spec` says what the result is for, which picks the
@@ -370,21 +363,25 @@ pub fn finish(source: &Source, spec: Spec) -> Result<Frame> {
     let transform = source.orientation.then(spec.transform);
     let size = match spec.target {
         Some(target) => {
-            // Turning is cheapest after shrinking, so scale into the pre-rotation box.
+            // Turning is cheapest after scaling, so scale into the pre-rotation box.
             let bounds = if transform.swaps_axes() { (target.1, target.0) } else { target };
-            fit_size((w, h), bounds, false)
+            // An animation is not enlarged: every picture of it would be
+            // the size of the screen, which for a long one is gigabytes.
+            fit_size((w, h), bounds, spec.enlarge && source.animation.is_none())
         }
         None => (w, h),
     };
     let fit = |image: &RgbImage| -> Result<Vec<u32>> {
-        let resized;
-        let rgb = if size == (w, h) {
-            image
-        } else {
-            resized = resize(image, size)?;
-            &resized
-        };
-        Ok(rgb.as_raw().chunks_exact(3).map(|p| u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2])).collect())
+        if size == (w, h) {
+            return Ok(to_pixels(image));
+        }
+        // Enlarging is quicker done on the pixels in their final layout,
+        // there being fewer of them to lay out first; shrinking, the
+        // other way about.
+        if size.0 > w || size.1 > h {
+            return enlarge(&to_pixels(image), (w, h), size);
+        }
+        Ok(to_pixels(&resize(image, size)?))
     };
     let animation = match &source.animation {
         Some(animation) => Some(Animation {
@@ -448,6 +445,19 @@ pub fn flatten(image: DynamicImage, background: u32) -> RgbImage {
     RgbImage::from_raw(rgba.width(), rgba.height(), rgb).expect("buffer matches dimensions")
 }
 
+/// The pixels of an RGB image in the `0RGB` layout, a row per core.
+fn to_pixels(rgb: &RgbImage) -> Vec<u32> {
+    let width = rgb.width().max(1) as usize;
+    let mut pixels = vec![0u32; rgb.as_raw().len() / 3];
+    pixels.par_chunks_mut(width).zip(rgb.as_raw().par_chunks(width * 3)).for_each(|(out, row)| {
+        for (pixel, p) in out.iter_mut().zip(row.chunks_exact(3)) {
+            *pixel = u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2]);
+        }
+    });
+    pixels
+}
+
+/// Shrinks an image with the sharper filter.
 fn resize(src: &RgbImage, (width, height): (u32, u32)) -> Result<RgbImage> {
     let view = fir::images::ImageRef::new(src.width(), src.height(), src.as_raw(), fir::PixelType::U8x3)?;
     let mut dst = fir::images::Image::new(width, height, fir::PixelType::U8x3);
@@ -456,13 +466,28 @@ fn resize(src: &RgbImage, (width, height): (u32, u32)) -> Result<RgbImage> {
     Ok(RgbImage::from_raw(width, height, dst.into_vec()).expect("buffer matches dimensions"))
 }
 
+/// Enlarges `0RGB` pixels, with the filter that does not ring around hard
+/// edges: what showing a small image larger used to do on the way to the
+/// screen, and so looks the same.
+fn enlarge(pixels: &[u32], (w, h): (u32, u32), (width, height): (u32, u32)) -> Result<Vec<u32>> {
+    let source = fir::images::ImageRef::new(w, h, bytemuck::cast_slice(pixels), fir::PixelType::U8x4)?;
+    let mut out = vec![0u32; width as usize * height as usize];
+    let mut target = fir::images::Image::from_slice_u8(width, height, bytemuck::cast_slice_mut(&mut out), fir::PixelType::U8x4)?;
+    let options = fir::ResizeOptions::new()
+        .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom))
+        // The fourth byte is padding, not alpha.
+        .use_alpha(false);
+    fir::Resizer::new().resize(&source, &mut target, &options)?;
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::{ImageFormat, Rgb};
 
     fn spec(target: Option<(u32, u32)>) -> Spec {
-        Spec { target, transform: Transform::default(), background: 0, thumbnail: false }
+        Spec { target, enlarge: false, transform: Transform::default(), background: 0, thumbnail: false }
     }
 
     fn rgb(pixel: u32) -> (u32, u32, u32) {

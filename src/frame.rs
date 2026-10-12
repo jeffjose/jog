@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use rayon::prelude::*;
+
 /// A decoded image in the `0RGB` layout the window surface uses.
 pub struct Frame {
     pub width: u32,
@@ -40,10 +42,12 @@ impl Frame {
     pub fn transformed(&self, t: Transform) -> Frame {
         let (w, h) = (self.width as usize, self.height as usize);
         let (ow, oh) = if t.swaps_axes() { (h, w) } else { (w, h) };
+        // Each row of the result on its own core: a large photo turned
+        // upright is many millions of pixels moved one at a time.
         let turn = |source: &[u32]| {
-            let mut pixels = Vec::with_capacity(ow * oh);
-            for y in 0..oh {
-                for x in 0..ow {
+            let mut pixels = vec![0u32; ow * oh];
+            pixels.par_chunks_exact_mut(ow.max(1)).enumerate().for_each(|(y, row)| {
+                for (x, pixel) in row.iter_mut().enumerate() {
                     let (sx, sy) = match t.turns {
                         0 => (x, y),
                         1 => (y, h - 1 - x),
@@ -51,9 +55,9 @@ impl Frame {
                         _ => (w - 1 - y, x),
                     };
                     let sx = if t.mirrored { w - 1 - sx } else { sx };
-                    pixels.push(source[sy * w + sx]);
+                    *pixel = source[sy * w + sx];
                 }
-            }
+            });
             pixels
         };
         let native = if t.swaps_axes() { (self.native.1, self.native.0) } else { self.native };
