@@ -126,7 +126,7 @@ pub enum Command {
     Restart,
     Search,
     ClearFilter,
-    /// In the grid, go to the cell of the video that is playing.
+    /// In the grid, go back to the video that is playing.
     ShowPlaying,
     /// Type a search into the heading of the file list.
     ListSearch,

@@ -2949,12 +2949,8 @@ impl App {
             SpeedDown => self.change_speed(Some(false)),
             SpeedReset => self.change_speed(None),
             PlayPause => self.video_action(VideoAction::Pause),
-            ShowPlaying => {
-                // To the cell of the video playing, on whichever page.
-                if let Some(cursor) = self.grid.as_ref().map(|grid| grid.cursor) {
-                    self.move_cursor(self.pos as i64 - cursor as i64);
-                }
-            }
+            // Back to the video that is playing, the whole window of it.
+            ShowPlaying => self.toggle_grid(),
             SeekForward => self.video_action(VideoAction::Seek(SEEK_STEP)),
             SeekTo(seconds) => {
                 if let Some((_, length)) = self.video_time() {
@@ -3536,11 +3532,11 @@ impl App {
 
     /// At the left of the line under the grid, the video that is playing:
     /// a small picture of it, a button to pause it or play it, its name
-    /// and how far in it is. A click on the picture or the name goes to
-    /// its cell, on whichever page that is.
-    fn draw_now_playing(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32, room: i32) {
+    /// and how far in it is. A click on the picture or the name goes back
+    /// to it, the whole window of it. Returns how far across it reaches.
+    fn draw_now_playing(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32, room: i32) -> i32 {
         let window = (canvas.width as u32, canvas.height as u32);
-        let (Some([x, y, w, h]), Some(video)) = (self.pip_small(window), &self.video) else { return };
+        let (Some([x, y, w, h]), Some(video)) = (self.pip_small(window), &self.video) else { return 0 };
         let id = video.id;
         let unit = px as i32;
         match &self.pip_live {
@@ -3567,7 +3563,9 @@ impl App {
         let small = (px * 5 / 6).max(11);
         let line = canvas.height - GridLayout::footer_height(window.1) / 2 - Text::line_height(px) / 2;
         let time_width = text.width(&time, small);
-        let name = clipped(text, &title_of(&self.files[id]), (room - left - time_width - unit * 2).max(0), px);
+        // With no room for a few letters of it, none of it.
+        let name_room = room - left - time_width - unit * 2;
+        let name = if name_room >= unit * 4 { clipped(text, &title_of(&self.files[id]), name_room, px) } else { String::new() };
         text.draw(canvas, left, line, px, TEXT_COLOR, &name);
         let after = left + text.width(&name, px) + if name.is_empty() { 0 } else { unit };
         if after + time_width <= room {
@@ -3575,6 +3573,9 @@ impl App {
         }
         self.grid_buttons.push(Button { x, y, width: w, height: h, command: Command::ShowPlaying });
         self.grid_buttons.push(Button { x: left, y, width: (after - left).max(0), height: h, command: Command::ShowPlaying });
+        // How far across it reaches: what is written in the middle of the
+        // line starts clear of it.
+        after.max(button_x + side) + unit
     }
 
     // ---- Held keys -----------------------------------------------------
@@ -4276,9 +4277,9 @@ impl App {
         // Out of the grid, the picture on view grows from its cell, or from
         // where it was playing there; into the grid it shrinks to its
         // cell, unless it is a video, which plays on in its cell instead.
-        let corner = self.pip_place(window);
+        let corner = self.pip_place(window).or_else(|| self.pip_small(window));
         // A video playing in its cell grows from the frame it had got to.
-        let live = self.pip_live.take().filter(|_| self.pip_in_cell && self.grid.is_some()).map(Arc::new);
+        let live = self.pip_live.take().filter(|_| self.grid.is_some()).map(Arc::new);
         let stays = self.grid.is_none() && self.video.is_some();
         self.grow = match &self.grid {
             Some(_) => corner.or_else(|| self.grid_cell(self.pos, &layout, window)).map(|cell| Grow { id, cell, since: Instant::now(), opening: true, picture: live.clone() }),
@@ -6976,8 +6977,11 @@ impl App {
         // Nothing of the pictures shows behind this line.
         canvas.fill(0, canvas.height - footer_height, canvas.width, footer_height, GRID_COLOR);
         // At its left, the video that plays on while the grid is up.
-        self.draw_now_playing(canvas, text, px, (canvas.width - width) / 2 - px as i32);
-        let mut x = (canvas.width - width) / 2;
+        let taken = self.draw_now_playing(canvas, text, px, (canvas.width - width) / 2 - px as i32);
+        // In a narrow window that would run under it: then it starts beside
+        // it, and is cut short at the window's edge.
+        let mut x = ((canvas.width - width) / 2).max(taken);
+        let label = &clipped(text, label, canvas.width - x - pad, px);
         let y = canvas.height - footer_height + (footer_height - height) / 2;
 
         text.draw(canvas, x, y + pad / 2, px, TEXT_COLOR, label);
