@@ -68,7 +68,8 @@ fn main() -> ExitCode {
         if options.list_sessions {
             match found.is_empty() {
                 true => println!("No sessions in {}", cwd.display()),
-                false => found.iter().enumerate().for_each(|(at, session)| println!("{:>2}  {}", at + 1, sessions::describe(session))),
+                // Two lines each, with a line between: easier on the eye than one long one.
+                false => println!("{}", found.iter().map(sessions::describe).collect::<Vec<_>>().join("\n\n")),
             }
             return ExitCode::SUCCESS;
         }
