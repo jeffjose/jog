@@ -971,6 +971,8 @@ pub struct App {
     /// Where the buttons under the grid were last drawn, for clicks.
     grid_buttons: Vec<Button>,
     help: bool,
+    /// What has been typed into the list of shortcuts, to find one.
+    help_search: String,
     snapshot: Option<Snapshot>,
     /// Created the first time a video comes up.
     player: Option<Player>,
@@ -1466,6 +1468,7 @@ impl App {
             grid: None,
             grid_buttons: Vec::new(),
             help: false,
+            help_search: String::new(),
             snapshot: Snapshot::from_env(),
             player: None,
             active: 0,
@@ -2887,7 +2890,10 @@ impl App {
                 None => self.open_menu(commands::MENU, None),
             },
             ToggleGrid => self.toggle_grid(),
-            ToggleHelp => self.help = !self.help,
+            ToggleHelp => {
+                self.help = !self.help;
+                self.help_search.clear();
+            }
             ToggleSlideshow => {
                 if self.slide_at.take().is_some() {
                     self.toast("Slideshow paused");
@@ -6119,8 +6125,18 @@ impl App {
             self.row_target = None;
         }
         if self.help {
-            // Any key dismisses the list of shortcuts.
-            self.help = false;
+            // What is typed looks for a shortcut; Escape empties that, and
+            // then, or Enter, or `?` before anything is typed, closes it.
+            let typing = !self.modifiers.control_key() && !self.modifiers.alt_key();
+            match key {
+                Key::Named(NamedKey::Escape) if !self.help_search.is_empty() => self.help_search.clear(),
+                Key::Named(NamedKey::Backspace) => drop(self.help_search.pop()),
+                Key::Named(NamedKey::Space) if !self.help_search.is_empty() => self.help_search.push(' '),
+                Key::Character("?") if self.help_search.is_empty() => self.help = false,
+                Key::Character(typed) if typing => self.help_search.push_str(typed),
+                Key::Named(NamedKey::Escape | NamedKey::Enter) => self.help = false,
+                _ => {}
+            }
             return self.redraw();
         }
         if self.confirm.is_some() {
@@ -7392,7 +7408,7 @@ impl App {
             }
         }
         if self.help {
-            draw_help(canvas, &mut text, px);
+            draw_help(canvas, &mut text, px, &self.help_search);
         }
         if fading {
             ui::dissolve_all(canvas.all(), &behind, ((1.0 - box_level) * 0.6 * 256.0) as u32);
@@ -7589,13 +7605,13 @@ impl App {
             // What a triage has decided about it, in the other corner: a
             // tick on green for kept, a cross on red for rejected.
             if let Some(verdict) = self.verdict(id) {
-                let (side, inset) = (line, (px as i32 / 2).max(4));
-                let (kept, small) = (verdict == Verdict::Kept, (px * 5 / 6).max(11));
-                let icon = if kept { commands::icons::CHECK } else { commands::icons::X };
+                let (big, inset) = (px * 5 / 4, (px as i32 / 2).max(4));
+                let (icon, color) = if verdict == Verdict::Kept { (commands::icons::CHECK_FILLED, KEPT_COLOR) } else { (commands::icons::X_FILLED, DANGER_COLOR) };
+                let side = text.width(icon, big);
                 let (left, top) = (x + w - side - inset, y + inset);
-                canvas.round_fill(left, top, side, side, side / 2, if kept { KEPT_COLOR } else { DANGER_COLOR }, 256);
-                let icon_left = left + (side - text.width(icon, small)) / 2;
-                text.draw(canvas, icon_left, top + (side - Text::line_height(small)) / 2, small, 0x000000, icon);
+                // Dark behind it, so that the tick reads on any picture.
+                canvas.round_fill(left + side / 8, top + side / 8, side - side / 4, side - side / 4, side / 2, 0x000000, 256);
+                text.draw(canvas, left, top + (side - Text::line_height(big)) / 2, big, color, icon);
             }
             self.want_duration(id);
             if let Some(length) = self.durations.get(&id).copied().flatten().map(clock) {
@@ -7956,12 +7972,6 @@ impl App {
                     [left, top, strip.cell_w, strip.cell_h]
                 }
             };
-            // What a triage has decided about it: a bar along its foot,
-            // green for kept and red for rejected.
-            if let Some(verdict) = self.verdict(self.list[pos]) {
-                let bar = (strip.pad / 2).max(4);
-                canvas.round_fill(x + round, y + h - bar - bar / 2, w - 2 * round, bar, bar / 2, if verdict == Verdict::Kept { KEPT_COLOR } else { DANGER_COLOR }, 256);
-            }
             if self.marks.contains(&self.list[pos]) {
                 let dot = strip.pad;
                 canvas.round_fill(x + dot / 3, y + dot / 3, dot, dot, dot / 2, MARK_COLOR, 256);
@@ -8006,6 +8016,19 @@ impl App {
                 })) / 2;
                 canvas.round_fill(left + inset - 1, top + inset - 1, dot + 2, dot + 2, dot / 2 + 1, 0x000000, (150.0 * new) as u32);
                 canvas.round_fill(left + inset, top + inset, dot, dot, dot / 2, accent_soft(), (256.0 * new) as u32);
+            }
+            // What a triage has decided about it, in its top right corner:
+            // a tick or a cross on a filled circle, as in the grid.
+            if let Some(verdict) = self.verdict(id) {
+                let (icon, color) = if verdict == Verdict::Kept { (commands::icons::CHECK_FILLED, KEPT_COLOR) } else { (commands::icons::X_FILLED, DANGER_COLOR) };
+                let across = self.loader.thumb(id).map_or(strip.cell_w, |thumb| fit_size((thumb.width, thumb.height), (strip.cell_w as u32, strip.cell_h as u32), false).0 as i32);
+                let down = self.loader.thumb(id).map_or(strip.cell_h, |thumb| fit_size((thumb.width, thumb.height), (strip.cell_w as u32, strip.cell_h as u32), false).1 as i32);
+                let (side, inset) = (text.width(icon, px), (small as i32 / 3).max(3));
+                let left = self.strip_left(strip, pos as usize, canvas.width) + (strip.cell_w + across) / 2 - side - inset;
+                let badge_top = top + (strip.cell_h - down) / 2 + inset;
+                // Dark behind it, so that the tick reads on any picture.
+                canvas.round_fill(left + side / 8, badge_top + side / 8, side - side / 4, side - side / 4, side / 2, 0x000000, 256);
+                text.draw(canvas, left, badge_top + (side - Text::line_height(px)) / 2, px, color, icon);
             }
             self.want_duration(id);
             let Some(length) = self.durations.get(&id).copied().flatten().map(clock) else { continue };
@@ -8749,7 +8772,16 @@ fn help_keys<'a>(text: &mut Text, keys: &'a str, px: u32) -> Vec<(&'a str, i32, 
 
 /// Draws the list of shortcuts as a panel in the middle of the window:
 /// columns of sections, each key on a cap of its own.
-fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32) {
+fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &str) {
+    // What is typed is looked for, each word of it, in a shortcut's keys,
+    // what it does and the heading it is under. Those without it stay
+    // where they are, faint, so that nothing moves about.
+    let words: Vec<String> = search.to_lowercase().split_whitespace().map(str::to_string).collect();
+    let matches = |title: &str, keys: &str, label: &str| {
+        let all = format!("{title} {keys} {label}").to_lowercase();
+        words.iter().all(|word| all.contains(word.as_str()))
+    };
+    let found: usize = commands::HELP.iter().flat_map(|sections| sections.iter()).map(|(title, entries)| entries.iter().filter(|(keys, label)| matches(title, keys, label)).count()).sum();
     let small = (px * 5 / 6).max(11);
     let row = Text::line_height(px) + px as i32 / 3;
     let (pad, gap, between) = (px as i32 * 3 / 2, px as i32, px as i32 / 3);
@@ -8771,7 +8803,7 @@ fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32) {
     let width = columns.iter().map(|(keys, labels, _)| keys + gap + labels).sum::<i32>()
         + 2 * pad * (columns.len() as i32 - 1)
         + 2 * pad;
-    let (title, hint) = ("Keyboard shortcuts", "Any key closes this.  > in the find box lists every command.");
+    let (title, hint) = ("Keyboard shortcuts", "Type to search.  Esc closes this.  > in the find box lists every command.");
     let head = row * 2;
     let height = head + columns.iter().map(|c| c.2).max().unwrap_or(0) * row + row + 2 * pad;
     let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
@@ -8779,19 +8811,48 @@ fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32) {
     text.draw(canvas, left + pad, top + pad, px * 5 / 4, TEXT_COLOR, title);
     let hint_width = text.width(hint, small);
     text.draw(canvas, left + width - pad - hint_width, top + height - pad - row / 2, small, DIM_TEXT_COLOR, hint);
+    // The box what is typed goes in, at the right of the heading.
+    let line = Text::line_height(px);
+    let (box_w, box_h) = (px as i32 * 22, line + px as i32 * 2 / 3);
+    let (box_x, box_y) = (left + width - pad - box_w, top + pad - px as i32 / 6);
+    canvas.round_fill(box_x, box_y, box_w, box_h, px as i32 / 2, PLACEHOLDER_COLOR, 256);
+    canvas.round_outline(box_x, box_y, box_w, box_h, px as i32 / 2, 1, if words.is_empty() { MENU_EDGE_COLOR } else { accent_soft() });
+    let glass = commands::icons::SEARCH;
+    let typed_left = box_x + px as i32 * 2 / 3 + text.width(glass, px) + px as i32 / 2;
+    let typed_top = box_y + (box_h - line) / 2;
+    text.draw(canvas, box_x + px as i32 * 2 / 3, typed_top, px, DIM_TEXT_COLOR, glass);
+    match search.is_empty() {
+        true => text.draw(canvas, typed_left, typed_top, px, DIM_TEXT_COLOR, "Type to search"),
+        false => text.draw(canvas, typed_left, typed_top, px, TEXT_COLOR, search),
+    }
+    let caret = typed_left + if search.is_empty() { 0 } else { text.width(search, px) };
+    canvas.fill(caret, typed_top, (px as i32 / 10).max(2), line, TEXT_COLOR);
+    if !words.is_empty() {
+        let count = if found == 0 { "no match".to_string() } else { format!("{found} found") };
+        let count_left = box_x + box_w - px as i32 * 2 / 3 - text.width(&count, small);
+        text.draw(canvas, count_left, box_y + (box_h - Text::line_height(small)) / 2, small, DIM_TEXT_COLOR, &count);
+    }
 
     let mut x = left + pad;
     for (sections, (keys_width, labels_width, _)) in commands::HELP.iter().zip(columns) {
         let mut y = top + pad + head;
         for (title, entries) in sections.iter() {
-            text.draw(canvas, x, y, px, accent_soft(), title);
+            let any = entries.iter().any(|(keys, label)| matches(title, keys, label));
+            text.draw(canvas, x, y, px, if any { accent_soft() } else { MENU_EDGE_COLOR }, title);
             canvas.fill(x, y + row - row / 5, keys_width + gap + labels_width, 1, MENU_EDGE_COLOR);
             y += row;
             for (keys, label) in entries.iter() {
+                let lit = matches(title, keys, label);
+                if lit && !words.is_empty() {
+                    canvas.round_fill(x - px as i32 / 3, y, keys_width + gap + labels_width + px as i32 * 2 / 3, row, px as i32 / 3, TEXT_COLOR, 22);
+                }
                 let mut key_x = x;
                 for (key, width, cap) in help_keys(text, keys, small) {
                     let key_top = y + (row - Text::line_height(small)) / 2;
-                    if cap {
+                    if !lit {
+                        let inset = if cap { (width - text.width(key, small)) / 2 } else { 0 };
+                        text.draw(canvas, key_x + inset, key_top, small, MENU_EDGE_COLOR, key);
+                    } else if cap {
                         let (cap_top, cap_height) = (y + row / 10, row - row / 5);
                         canvas.round_fill(key_x, cap_top, width, cap_height, px as i32 / 4, PLACEHOLDER_COLOR, 256);
                         canvas.round_outline(key_x, cap_top, width, cap_height, px as i32 / 4, 1, MENU_EDGE_COLOR);
@@ -8803,7 +8864,7 @@ fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32) {
                     key_x += width + between;
                 }
                 let label_top = y + (row - Text::line_height(px)) / 2;
-                text.draw(canvas, x + keys_width + gap, label_top, px, TEXT_COLOR, label);
+                text.draw(canvas, x + keys_width + gap, label_top, px, if lit { TEXT_COLOR } else { MENU_EDGE_COLOR }, label);
                 y += row;
             }
             y += row;
