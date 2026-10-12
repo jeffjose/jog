@@ -119,9 +119,10 @@ pub fn here(cwd: &Path) -> Vec<Session> {
     found
 }
 
-/// Keeps a session, and of those of its folder only the latest few.
-pub fn save(mut session: Session) {
-    let Some(file) = file() else { return };
+/// Keeps a session, and of those of its folder only the latest few; and
+/// gives back its id.
+pub fn save(mut session: Session) -> String {
+    let Some(file) = file() else { return session.id };
     let mut all = load();
     // One of the same things opened takes the place of the one before:
     // the sessions of a folder are told apart by what they were of. It
@@ -152,6 +153,7 @@ pub fn save(mut session: Session) {
     if let Err(error) = written {
         eprintln!("jog: cannot keep this session in {}: {error}", file.display());
     }
+    session.id
 }
 
 /// The letters an id is made of: ones that are easy to type and to say.

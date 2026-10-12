@@ -140,6 +140,9 @@ Keys:
   > . n Right Space          next image          < , Left Backspace  previous
   Home / End                 first / last        PgDn / PgUp   jump 5%
   z                          shuffle the rest    { / }         previous / next directory
+  Q                          triage: Space keeps a file and x rejects it, each
+                             going on to the next; nothing is done to the files.
+                             is:kept is:rejected is:undecided find them after
   !                          run a shell command on this file, or on the marked
                              ones: %f its path, %n its name, %s its name without
                              the ending, %d its folder, %t the time in a video.

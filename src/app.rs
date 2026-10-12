@@ -29,6 +29,7 @@ use crate::positions::Positions;
 use crate::scenes;
 use crate::history;
 use crate::sessions::{self, Session};
+use crate::triage::{self, Triage, Verdict};
 use crate::seen::Seen;
 use crate::render;
 use crate::rng::Rng;
@@ -158,6 +159,9 @@ fn accent_soft() -> u32 {
 const DANGER_COLOR: u32 = 0xD64545;
 const PLACEHOLDER_COLOR: u32 = 0x2A2A2A;
 const MARK_COLOR: u32 = 0xFFB020;
+/// What a triage has kept is marked in this; what it has rejected, in
+/// the colour of danger.
+const KEPT_COLOR: u32 = 0x3DD68C;
 const GRID_COLOR: u32 = 0x101010;
 
 /// What background threads send to the event loop.
@@ -628,6 +632,11 @@ enum PaletteEnd {
     All,
     /// Drop it, and stay on the file on view among all the others.
     Here,
+    /// Run what is typed on one lot of a triage: the kept, the rejected,
+    /// or every file there is.
+    OnKept,
+    OnRejected,
+    OnEvery,
 }
 
 /// The box for finding files: what is typed, the files that match it with
@@ -1017,6 +1026,14 @@ pub struct App {
     /// where an unpinned list lies over the picture.
     list_right: bool,
     list_pinned: bool,
+    /// Whether files are being decided about one after another; what has
+    /// been decided, read when first asked about; and what has been found
+    /// out about the files here so far.
+    triage_on: bool,
+    triage: RefCell<Option<Triage>>,
+    verdicts: RefCell<HashMap<usize, Option<Verdict>>>,
+    /// Where the tally of a triage was last drawn, for clicks on it.
+    tally_drawn: Cell<Option<[i32; 4]>>,
     list_search: Option<TextField>,
     /// The row of the file list picked out with the arrows while searching.
     list_cursor: Option<usize>,
@@ -1474,6 +1491,10 @@ impl App {
             shell_typed: None,
             list_right: options.list_right,
             list_pinned: options.list_pinned,
+            triage_on: false,
+            triage: RefCell::new(None),
+            verdicts: RefCell::new(HashMap::new()),
+            tally_drawn: Cell::new(None),
             list_search: None,
             list_cursor: None,
             row_target: None,
@@ -1590,7 +1611,8 @@ impl App {
         if self.scenes_shown() {
             return false;
         }
-        self.strip_pinned || self.strip_hover
+        // While triaging it is up, to show what has been decided.
+        self.strip_pinned || self.strip_hover || self.triage_on
     }
 
     // ---- Loading -------------------------------------------------------
@@ -1876,7 +1898,7 @@ impl App {
     fn seek_bar(&self) -> SeekBar {
         let (width, height) = self.window_size();
         let unit = ui_px(height) as i32;
-        let base = if self.strip_pinned || self.scenes_shown() { Strip::for_height(height).top } else { height as i32 };
+        let base = if self.strip_pinned || self.triage_on || self.scenes_shown() { Strip::for_height(height).top } else { height as i32 };
         // Room on the left for the three buttons and the elapsed time, and
         // on the right for the duration and the buttons there.
         let (end, buttons) = (width as i32, self.bar_buttons().len() as i32);
@@ -3066,6 +3088,12 @@ impl App {
             SubtitlesSmaller => self.size_subtitles(false),
             ClearFilter => self.clear_filter(false),
             Shell => self.open_palette_with("!"),
+            Triage => {
+                self.triage_on = !self.triage_on;
+                self.request();
+                self.apply_video_view();
+                self.toast(if self.triage_on { "Triage: Space keeps, x rejects; nothing is done to the files" } else { "Triage left: what was decided is kept" });
+            }
             RunTyped => {
                 if let Some(typed) = self.shell_typed.take() {
                     self.run_shell(&typed);
@@ -3124,6 +3152,7 @@ impl App {
             ToggleGridTitles => self.grid_titles,
             ToggleMute => self.muted,
             CycleLoop => self.looping != Looping::Off,
+            Triage => self.triage_on,
             TogglePrecise => self.precise,
             ToggleScenes => self.scenes_on,
             CycleSubtitles => self.subtitles,
@@ -3552,6 +3581,89 @@ impl App {
         }
     }
 
+    // ---- Triage ----------------------------------------------------------
+
+    /// What a triage has decided about a file, as far as is remembered.
+    fn verdict(&self, id: usize) -> Option<Verdict> {
+        *self.verdicts.borrow_mut().entry(id).or_insert_with(|| self.triage.borrow_mut().get_or_insert_with(Triage::load).of(&self.files[id]))
+    }
+
+    /// Decides about the file on view and goes on to the next. Deciding
+    /// the same again takes the decision back, and stays. Nothing is done
+    /// to the file either way.
+    fn decide(&mut self, verdict: Verdict) {
+        let id = self.id();
+        let to = Some(verdict).filter(|_| self.verdict(id) != Some(verdict));
+        self.triage.borrow_mut().get_or_insert_with(Triage::load).decide(&self.files[id], to);
+        self.verdicts.borrow_mut().insert(id, to);
+        if to.is_some() && self.pos + 1 < self.list.len() {
+            self.step(true);
+        }
+        self.redraw();
+    }
+
+    /// How many of all the files are kept, rejected and still undecided.
+    fn tally(&self) -> (usize, usize, usize) {
+        let all = self.everything();
+        let count = |wanted: Option<Verdict>| all.iter().filter(|id| self.verdict(**id) == wanted).count();
+        (count(Some(Verdict::Kept)), count(Some(Verdict::Rejected)), count(None))
+    }
+
+    /// The files a triage has put in one of its three lots, in list order.
+    fn lot(&self, wanted: Option<Verdict>) -> Vec<usize> {
+        self.everything().into_iter().filter(|id| self.verdict(*id) == wanted).collect()
+    }
+
+    /// The tally of a triage, at the top of the picture while one is on:
+    /// how many are kept, rejected and still to go, with the keys under
+    /// them. A click on it looks for files that have come or gone.
+    fn draw_tally(&self, canvas: &mut Canvas, text: &mut Text, px: u32) {
+        self.tally_drawn.set(None);
+        if !self.triage_on || self.grid.is_some() || self.overview.is_some() {
+            return;
+        }
+        let (kept, rejected, undecided) = self.tally();
+        let parts = [
+            ("Triage".to_string(), DIM_TEXT_COLOR),
+            (format!("{kept} kept"), KEPT_COLOR),
+            (format!("{rejected} rejected"), DANGER_COLOR),
+            (format!("{undecided} to go"), TEXT_COLOR),
+            (commands::icons::REFRESH.to_string(), DIM_TEXT_COLOR),
+        ];
+        let keys = "Space keep     x reject     Q done";
+        let small = (px * 5 / 6).max(11);
+        let (pad, gap) = (px as i32 * 2 / 3, px as i32);
+        let across: i32 = parts.iter().map(|(words, _)| text.width(words, px)).sum::<i32>() + gap * (parts.len() as i32 - 1);
+        let (w, h) = (across.max(text.width(keys, small)) + 2 * pad, Text::line_height(px) + Text::line_height(small) + 2 * pad);
+        let (left, stage) = self.stage();
+        let (x, y) = (left + (stage.0 as i32 - w) / 2, px as i32);
+        let over = (x..x + w).contains(&(self.mouse.0 as i32)) && (y..y + h).contains(&(self.mouse.1 as i32));
+        canvas.round_fill(x, y, w, h, pad, 0x000000, if over { 220 } else { 176 });
+        let mut at = x + (w - across) / 2;
+        for (words, color) in &parts {
+            // The arrows that go round light up under the pointer: they
+            // are what a click here does.
+            let color = if over && words == commands::icons::REFRESH { TEXT_COLOR } else { *color };
+            text.draw(canvas, at, y + pad, px, color, words);
+            at += text.width(words, px) + gap;
+        }
+        let keys_left = x + (w - text.width(keys, small)) / 2;
+        text.draw(canvas, keys_left, y + pad + Text::line_height(px), small, DIM_TEXT_COLOR, keys);
+        self.tally_drawn.set(Some([x, y, w, h]));
+    }
+
+    /// Writes the files of this session out in the three lots of a triage,
+    /// if any of them has been decided about, and says where.
+    fn write_triage(&self, session: &str) {
+        let files: Vec<(PathBuf, Option<Verdict>)> = self.everything().into_iter().map(|id| (self.files[id].clone(), self.verdict(id))).collect();
+        if files.iter().all(|(_, verdict)| verdict.is_none()) {
+            return;
+        }
+        if let Some(list) = triage::write_out(session, &files) {
+            println!("[triage] {}", list.display());
+        }
+    }
+
     // ---- Sessions --------------------------------------------------------
 
     /// Keeps what is on view as a session of the folder jog was started
@@ -3562,7 +3674,7 @@ impl App {
         }
         let full = |path: &PathBuf| std::path::absolute(path).unwrap_or_else(|_| path.clone());
         let listing = &self.options.listing;
-        sessions::save(Session {
+        let id = sessions::save(Session {
             // Its own if it was picked up; otherwise given by the keeping.
             id: self.options.session_id.clone().unwrap_or_default(),
             cwd: self.cwd.clone(),
@@ -3578,6 +3690,7 @@ impl App {
             total: self.list.len(),
             seconds: self.video_time().map_or(0.0, |(position, _)| position),
         });
+        self.write_triage(&id);
     }
 
     /// Shows the sessions there are to choose from, as the workspaces
@@ -3656,6 +3769,13 @@ impl App {
     /// folder it is in and `%t` how many seconds into a video the one on
     /// view is. One that names none of these gets the path after it.
     fn run_shell(&mut self, template: &str) {
+        self.run_shell_on(template, self.targets(), false);
+    }
+
+    /// Runs a shell command once for each of these files. `in_turn` is for
+    /// a great many: one after another, each waited for before the next,
+    /// where otherwise they are all set going at once.
+    fn run_shell_on(&mut self, template: &str, ids: Vec<usize>, in_turn: bool) {
         let template = template.trim();
         if template.is_empty() {
             return;
@@ -3663,7 +3783,6 @@ impl App {
         let named = ["%f", "%n", "%s", "%d"].iter().any(|place| template.contains(place));
         let whole = if named { template.to_string() } else { format!("{template} %f") };
         let seconds = self.video_time().map_or(0.0, |(position, _)| position);
-        let ids = self.targets();
         // A dry run still remembers what was typed, to be run in earnest.
         if self.options.dry_run {
             history::remember(self.shell_history.get_or_insert_with(history::load), template);
@@ -3672,7 +3791,18 @@ impl App {
             return;
         }
         let mut failed = None;
-        for id in &ids {
+        if in_turn {
+            let commands: Vec<String> = ids.iter().map(|id| expand_action(&whole, &self.files[*id], seconds)).collect();
+            std::thread::spawn(move || {
+                let failures = commands.iter().filter(|command| {
+                    let status = std::process::Command::new("sh").arg("-c").arg(command).stdin(std::process::Stdio::null()).status();
+                    !status.is_ok_and(|status| status.success())
+                });
+                let failures = failures.count();
+                println!("[run] done with {} files{}", commands.len(), if failures > 0 { format!(", {failures} of them failed") } else { String::new() });
+            });
+        }
+        for id in ids.iter().filter(|_| !in_turn) {
             let command = expand_action(&whole, &self.files[*id], seconds);
             match std::process::Command::new("sh").arg("-c").arg(&command).stdin(std::process::Stdio::null()).spawn() {
                 // Reap the child without holding up the viewer.
@@ -4923,7 +5053,7 @@ impl App {
     /// a row to save it as one.
     fn spaces_matching(&mut self, typed: &str) -> Vec<(String, &'static str, Command)> {
         let query = Query::parse(typed);
-        let wanted = |name: &str, loose: bool| query.is_empty() || query.score(&Facts { name, video: false, marked: false, seen: None, size: None }, loose).is_some();
+        let wanted = |name: &str, loose: bool| query.is_empty() || query.score(&Facts { name, video: false, marked: false, seen: None, verdict: None, size: None }, loose).is_some();
         let row = |(at, space): (usize, &Space)| {
             let folder = space.paths.first().map(|path| short_dir(path)).unwrap_or_default();
             let unsaved = if space.saved { "" } else { "   (not saved)" };
@@ -5246,6 +5376,9 @@ impl App {
         if self.palette.is_some() {
             return;
         }
+        // What a triage decided is looked up again for the files as they
+        // are numbered now.
+        self.verdicts.borrow_mut().clear();
         let seen: HashSet<&Path> = self.files.iter().map(PathBuf::as_path).collect();
         let fresh: Vec<PathBuf> = listed.iter().filter(|path| !seen.contains(path.as_path())).cloned().collect();
         let exists = |id: &usize| self.files[*id].exists();
@@ -5436,7 +5569,7 @@ impl App {
         if query.is_empty() {
             return all;
         }
-        let score = |name: &str, loose: bool| query.score(&Facts { name, video: false, marked: false, seen: None, size: None }, loose);
+        let score = |name: &str, loose: bool| query.score(&Facts { name, video: false, marked: false, seen: None, verdict: None, size: None }, loose);
         let pass = |loose: bool| -> Vec<(i32, (String, &'static str, Command))> {
             all.iter().filter_map(|entry| Some((score(&entry.0, loose)?, entry.clone()))).collect()
         };
@@ -5483,6 +5616,17 @@ impl App {
     fn palette_buttons(&self) -> Vec<(PaletteEnd, String)> {
         let Some(palette) = &self.palette else { return Vec::new() };
         let mut buttons = Vec::new();
+        // For a command, once a triage has decided about anything: the
+        // lots it can be run on in place of the file on view.
+        if palette.field.text.first() == Some(&'!') {
+            let (kept, rejected, undecided) = self.tally();
+            if kept + rejected > 0 {
+                buttons.push((PaletteEnd::OnKept, format!("On {kept} kept")));
+                buttons.push((PaletteEnd::OnRejected, format!("On {rejected} rejected")));
+                buttons.push((PaletteEnd::OnEvery, format!("On all {}", kept + rejected + undecided)));
+            }
+            return buttons;
+        }
         if palette.narrowed && !palette.matches.is_empty() {
             buttons.push((PaletteEnd::Keep, format!("Show only {}", palette.matches.len())));
         }
@@ -5556,6 +5700,25 @@ impl App {
             self.run_next = Some(*command);
             return self.redraw();
         }
+        // A command for a lot of a triage: the one typed, or the one picked
+        // out from those run before, on each file of the lot in turn.
+        let lot = match end {
+            PaletteEnd::OnKept => Some(self.lot(Some(Verdict::Kept))),
+            PaletteEnd::OnRejected => Some(self.lot(Some(Verdict::Rejected))),
+            PaletteEnd::OnEvery => Some(self.everything()),
+            _ => None,
+        };
+        if let Some(ids) = lot {
+            let template = match palette.commands.get(palette.selected) {
+                Some((_, _, Command::RunShell(at))) => self.shell_history.get_or_insert_with(history::load).get(*at).cloned().unwrap_or_default(),
+                _ => palette.field.string().chars().skip(1).collect(),
+            };
+            match ids.is_empty() {
+                true => self.toast("There are none of those to run it on"),
+                false => self.run_shell_on(&template, ids, true),
+            }
+            return self.redraw();
+        }
         let picked = palette.matches.get(palette.selected).copied();
         match end {
             PaletteEnd::Keep => {
@@ -5564,6 +5727,7 @@ impl App {
             }
             PaletteEnd::All => self.clear_filter(false),
             PaletteEnd::Here => self.clear_filter(true),
+            PaletteEnd::OnKept | PaletteEnd::OnRejected | PaletteEnd::OnEvery => {}
             PaletteEnd::Go => {
                 let Some(id) = picked else { return self.redraw() };
                 // One that a kept search has hidden brings every file back.
@@ -5744,7 +5908,7 @@ impl App {
             false => None,
         };
         let seen = (query.wants_seen() && files::is_video(path)).then(|| self.watched(id));
-        query.score(&Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), seen, size }, loose)
+        query.score(&Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), seen, verdict: self.verdict(id), size }, loose)
     }
 
     fn sort_by(&mut self, sort: Sort) {
@@ -5869,6 +6033,21 @@ impl App {
         // Escape leaves a kept search before it leaves the program.
         if self.filter.is_some() && key == Key::Named(NamedKey::Escape) {
             return self.clear_filter(false);
+        }
+        // While triaging, the space bar keeps the file on view and `x`
+        // rejects it; everything else is as it always is.
+        if self.triage_on && self.modifiers.is_empty() {
+            let verdict = match key {
+                Key::Named(NamedKey::Space) => Some(Verdict::Kept),
+                Key::Character("x") => Some(Verdict::Rejected),
+                _ => None,
+            };
+            if let Some(verdict) = verdict {
+                if !repeat {
+                    self.decide(verdict);
+                }
+                return;
+            }
         }
         // `v` held is the loupe, there until the key is let go.
         if matches!(key, Key::Character("v")) && self.modifiers.is_empty() {
@@ -6110,6 +6289,22 @@ impl App {
                     _ => self.palette = None,
                 }
                 self.redraw();
+            }
+            return;
+        }
+        // A click on the tally of a triage looks for files that have come
+        // or gone since the list was made.
+        let on_tally = self.tally_drawn.get().is_some_and(|[left, top, width, height]| (left..left + width).contains(&(x as i32)) && (top..top + height).contains(&(y as i32)));
+        if on_tally && self.triage_on && self.grid.is_none() && self.menu.is_none() && self.prompt.is_none() {
+            if button == MouseButton::Left && pressed {
+                let before = self.everything().len();
+                self.execute(Command::Reload, event_loop);
+                let now = self.everything().len();
+                self.toast(match now.cmp(&before) {
+                    Ordering::Greater => format!("{}  {} more files", commands::icons::REFRESH, now - before),
+                    Ordering::Less => format!("{}  {} files fewer", commands::icons::REFRESH, before - now),
+                    Ordering::Equal => format!("{}  No files have come or gone", commands::icons::REFRESH),
+                });
             }
             return;
         }
@@ -6826,7 +7021,7 @@ impl App {
         // Where the bar stands on a strip it comes up from behind it. What
         // the strip shows is kept while the bar is on its way, and put back
         // over whatever of the bar was drawn across it.
-        let onto = (self.strip_pinned && strip.is_some()) || scene_strip.is_some();
+        let onto = ((self.strip_pinned || self.triage_on) && strip.is_some()) || scene_strip.is_some();
         let band_top = Strip::for_height(height as u32).top;
         let behind = (onto && bar_level > 0.01 && bar_level < 0.999).then(|| canvas.copy(0, band_top, width, height - band_top));
         if let Some((position, length)) = (bar_level > 0.01).then(|| self.video_time()).flatten() {
@@ -6938,7 +7133,7 @@ impl App {
         let panel = if viewing { self.list_panel() } else { None };
         let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some();
         // The filmstrip has words of its own: the lengths of its videos.
-        let boxes = boxes || self.palette.is_some() || strip.is_some() || scene_strip.is_some() || self.overview.is_some();
+        let boxes = boxes || self.palette.is_some() || strip.is_some() || scene_strip.is_some() || self.overview.is_some() || self.triage_on;
         if nothing_to_write && !boxes && !self.help {
             // Nothing drawn means no debug overlay, and none of its buttons.
             self.debug_buttons.clear();
@@ -6992,6 +7187,7 @@ impl App {
         };
         let toast_away = (1.0 - toast_in) + toast_out;
         text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w + (toast_away * f64::from(w + margin)) as i32, margin));
+        self.draw_tally(canvas, &mut text, px);
         // Twice the usual size, centred just above the seek bar.
         text_block(canvas, &mut text, &time, px, |w, h| ((width - w) / 2, time_bottom - h));
         for (centre, top, icon, color) in buttons {
@@ -7258,6 +7454,17 @@ impl App {
                 let (dot, inset) = ((px as i32 * 2 / 3).max(6), (px as i32 / 2).max(4));
                 canvas.round_fill(x + inset - 2, y + inset - 2, dot + 4, dot + 4, dot / 2 + 2, 0x000000, (150.0 * new) as u32);
                 canvas.round_fill(x + inset, y + inset, dot, dot, dot / 2, accent_soft(), (256.0 * new) as u32);
+            }
+            // What a triage has decided about it, in the other corner: a
+            // tick on green for kept, a cross on red for rejected.
+            if let Some(verdict) = self.verdict(id) {
+                let (side, inset) = (line, (px as i32 / 2).max(4));
+                let (kept, small) = (verdict == Verdict::Kept, (px * 5 / 6).max(11));
+                let icon = if kept { commands::icons::CHECK } else { commands::icons::X };
+                let (left, top) = (x + w - side - inset, y + inset);
+                canvas.round_fill(left, top, side, side, side / 2, if kept { KEPT_COLOR } else { DANGER_COLOR }, 256);
+                let icon_left = left + (side - text.width(icon, small)) / 2;
+                text.draw(canvas, icon_left, top + (side - Text::line_height(small)) / 2, small, 0x000000, icon);
             }
             self.want_duration(id);
             if let Some(length) = self.durations.get(&id).copied().flatten().map(clock) {
@@ -7563,7 +7770,8 @@ impl App {
         let (width, height) = self.window_size();
         let strip = Strip::for_height(height);
         let size = ui_px(height) as i32 * 3 / 2;
-        let shown = self.grid.is_none() && self.strip_visible();
+        // Not while a triage has it up: it is part of that.
+        let shown = self.grid.is_none() && self.strip_visible() && !self.triage_on;
         // In the corner of the strip itself: over a video the seek bar and
         // its buttons stand just above it.
         shown.then_some(Button { x: width as i32 - size - size / 2, y: strip.top + size / 3, width: size, height: size, command: Command::ToggleFilmstrip })
@@ -7617,6 +7825,12 @@ impl App {
                     [left, top, strip.cell_w, strip.cell_h]
                 }
             };
+            // What a triage has decided about it: a bar along its foot,
+            // green for kept and red for rejected.
+            if let Some(verdict) = self.verdict(self.list[pos]) {
+                let bar = (strip.pad / 2).max(4);
+                canvas.round_fill(x + round, y + h - bar - bar / 2, w - 2 * round, bar, bar / 2, if verdict == Verdict::Kept { KEPT_COLOR } else { DANGER_COLOR }, 256);
+            }
             if self.marks.contains(&self.list[pos]) {
                 let dot = strip.pad;
                 canvas.round_fill(x + dot / 3, y + dot / 3, dot, dot, dot / 2, MARK_COLOR, 256);
@@ -8023,6 +8237,15 @@ impl App {
             let length = self.durations.get(&id).copied().flatten().map(clock).unwrap_or_default();
             let length_width = if length.is_empty() { 0 } else { text.width(&length, px) + pad };
             text.draw(canvas, panel.width - star_room - length_width, line, px, dim, &length);
+            // Before that, what a triage has decided about it: a tick for
+            // kept, a cross for rejected.
+            let verdict = self.verdict(id);
+            let verdict_width = if verdict.is_some() { text.width(commands::icons::CHECK, px) + pad } else { 0 };
+            if let Some(verdict) = verdict {
+                let (icon, color) = if verdict == Verdict::Kept { (commands::icons::CHECK, KEPT_COLOR) } else { (commands::icons::X, DANGER_COLOR) };
+                text.draw(canvas, panel.width - star_room - length_width - verdict_width, line, px, if current { main } else { color }, icon);
+            }
+            let length_width = length_width + verdict_width;
             // A dot at the left edge for a video not watched yet.
             let new = self.new_level(id);
             if new > 0.0 {

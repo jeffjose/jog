@@ -27,6 +27,10 @@ enum Kind {
     /// A video that has, or has not yet, been watched.
     Seen,
     Unseen,
+    /// What a triage has decided about it, or that it has not.
+    Kept,
+    Rejected,
+    Undecided,
 }
 
 /// What a query is matched against.
@@ -37,6 +41,8 @@ pub struct Facts<'a> {
     /// Whether it has been watched; only looked up when `Query::wants_seen`
     /// says so, and never so for a picture.
     pub seen: Option<bool>,
+    /// What a triage has decided about it: kept, rejected, or neither.
+    pub verdict: Option<crate::triage::Verdict>,
     /// Size in bytes; only looked up when `Query::wants_size` says so.
     pub size: Option<u64>,
 }
@@ -73,6 +79,9 @@ impl Query {
                         "marked" => Kind::Marked,
                         "seen" => Kind::Seen,
                         "unseen" | "new" => Kind::Unseen,
+                        "kept" => Kind::Kept,
+                        "rejected" => Kind::Rejected,
+                        "undecided" => Kind::Undecided,
                         _ => return None,
                     }));
                 }
@@ -126,6 +135,9 @@ impl Query {
                         Kind::Marked => file.marked,
                         Kind::Seen => file.seen == Some(true),
                         Kind::Unseen => file.seen == Some(false),
+                        Kind::Kept => file.verdict == Some(crate::triage::Verdict::Kept),
+                        Kind::Rejected => file.verdict == Some(crate::triage::Verdict::Rejected),
+                        Kind::Undecided => file.verdict.is_none(),
                     };
                     is.then_some(0)?
                 }
@@ -180,7 +192,7 @@ mod tests {
 
     fn matches<'a>(query: &str, names: &[&'a str]) -> Vec<&'a str> {
         let query = Query::parse(query);
-        let facts = |name: &'a str| Facts { name, video: name.ends_with(".mp4"), marked: name == "bark.jpg", seen: None, size: Some(name.len() as u64 * 1024) };
+        let facts = |name: &'a str| Facts { name, video: name.ends_with(".mp4"), marked: name == "bark.jpg", seen: None, verdict: None, size: Some(name.len() as u64 * 1024) };
         // As the search box does: scattered letters only when nothing has
         // them together.
         let pass = |loose: bool| -> Vec<(i32, &'a str)> {

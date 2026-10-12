@@ -126,6 +126,8 @@ pub enum Command {
     Restart,
     Search,
     ClearFilter,
+    /// Go into deciding about files one after another, or come out of it.
+    Triage,
     /// Type a shell command to run on the file on view, or on the marked
     /// ones: the find box, set to that.
     Shell,
@@ -215,6 +217,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "@" => WorkspaceList,
             "`" | "~" if modifiers.control_key() => HomeWorkspace,
             "!" => Shell,
+            "Q" => Triage,
             "F" => ZoomFill,
             "Z" => ToggleEnlarge,
             "k" if modifiers.control_key() || modifiers.super_key() => Palette,
@@ -420,6 +423,7 @@ pub fn command_icon(command: Command) -> &'static str {
         WorkspaceList | Overview | Workspace(_) | WorkspaceKey(_) | NextWorkspace | PrevWorkspace | HomeWorkspace => FOLDERS,
         SaveWorkspace => FOLDER_PLUS,
         ClearFilter | ShowAllHere => LIST_X,
+        Triage => CHECK,
         Shell | RunTyped | RunShell(_) | RepeatShell => TERMINAL,
         ListSearch => SEARCH,
         ListPin => PIN,
@@ -503,6 +507,7 @@ pub const MENU: &[Option<MenuItem>] = &[
     item("Workspaces", "G", Command::Overview),
     item("Go to workspace...", "@", Command::WorkspaceList),
     item("Run a command on it...", "!", Command::Shell),
+    item("Triage: keep or reject, file by file", "Q", Command::Triage),
     item("Run the last command again", ".", Command::RepeatShell),
     None,
     submenu("Playback", PLAYBACK, Applies::Videos),
@@ -682,6 +687,7 @@ pub const GRID_AROUND_MENU: &[Option<MenuItem>] = &[
     item("Workspaces", "G", Command::Overview),
     item("Go to workspace...", "@", Command::WorkspaceList),
     item("Run a command on it...", "!", Command::Shell),
+    item("Triage: keep or reject, file by file", "Q", Command::Triage),
     item("Run the last command again", ".", Command::RepeatShell),
     item("Save folder as workspace...", "", Command::SaveWorkspace),
     None,
@@ -754,6 +760,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Wheel", "Next / previous file"),
                 ("z", "Shuffle: on to another file, or around this one in the grid, filmstrip or list"),
                 ("!  .", "Run a shell command on this file, or on the marked ones / the last one again"),
+                ("Q", "Triage: Space keeps, x rejects, each going on to the next; Q again to finish"),
                 ("s", "Sort: name, newest, size, reverse"),
             ],
         ),

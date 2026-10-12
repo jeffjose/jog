@@ -20,6 +20,7 @@ mod sessions;
 mod seen;
 mod story;
 mod trailer;
+mod triage;
 mod ui;
 mod view;
 
