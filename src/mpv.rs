@@ -66,7 +66,7 @@ struct Api {
     initialize: unsafe extern "C" fn(Handle) -> c_int,
     terminate_destroy: unsafe extern "C" fn(Handle),
     set_option_string: unsafe extern "C" fn(Handle, *const c_char, *const c_char) -> c_int,
-    set_property_string: unsafe extern "C" fn(Handle, *const c_char, *const c_char) -> c_int,
+    set_property_async: unsafe extern "C" fn(Handle, u64, *const c_char, c_int, *mut c_void) -> c_int,
     get_property: unsafe extern "C" fn(Handle, *const c_char, c_int, *mut c_void) -> c_int,
     get_property_string: unsafe extern "C" fn(Handle, *const c_char) -> *mut c_char,
     free: unsafe extern "C" fn(*mut c_void),
@@ -95,7 +95,7 @@ impl Api {
             initialize: symbol!("initialize"),
             terminate_destroy: symbol!("terminate_destroy"),
             set_option_string: symbol!("set_option_string"),
-            set_property_string: symbol!("set_property_string"),
+            set_property_async: symbol!("set_property_async"),
             get_property: symbol!("get_property"),
             get_property_string: symbol!("get_property_string"),
             free: symbol!("free"),
@@ -153,6 +153,8 @@ pub struct Player {
     /// asking never waits on the player's core, which is busy for tens
     /// of milliseconds whenever it opens a file or seeks.
     known: Mutex<Vec<Option<Known>>>,
+    /// Whether this player watches them: a preview player does not.
+    watching: bool,
     /// Handed to mpv as callback context, so it must not move.
     _wake: Box<Wake>,
     /// Keeps the function pointers in `api` valid. Dropped last.
@@ -172,6 +174,8 @@ const WATCHED: &[(&str, c_int)] = &[
     ("volume", FORMAT_DOUBLE),
     ("track-list/count", FORMAT_DOUBLE),
     ("video-format", FORMAT_STRING),
+    ("frame-drop-count", FORMAT_DOUBLE),
+    ("vo-drop-frame-count", FORMAT_DOUBLE),
 ];
 
 /// A property's value as last told of.
@@ -312,15 +316,21 @@ impl Player {
                 }
             }
             let known = Mutex::new(vec![None; WATCHED.len()]);
-            Ok(Player { api, handle, render, known, _wake: wake, _library: library })
+            let watching = matches!(role, Role::Playback { .. });
+            Ok(Player { api, handle, render, known, watching, _wake: wake, _library: library })
         }
     }
 
-    /// The last value told of for a watched property, or `None` for one
-    /// that is not watched or has not been told of yet.
-    fn known(&self, property: &str) -> Option<Known> {
-        let index = watched(property)?;
-        self.known.lock().unwrap()[index].clone()
+    /// What is known of a watched property: `None` for one this player
+    /// does not watch, which is to be asked for; otherwise its last value
+    /// told of, or none when it has none, as while a file is opening. A
+    /// watched property is never asked for outright: asking waits on the
+    /// player's core, which while it opens a file can be hundreds of
+    /// milliseconds; and a frame the player has announced meanwhile is
+    /// not taken, on which the player waits in turn.
+    fn known(&self, property: &str) -> Option<Option<Known>> {
+        let index = watched(property).filter(|_| self.watching)?;
+        Some(self.known.lock().unwrap()[index].clone())
     }
 
     pub fn command(&self, arguments: &[&[u8]]) {
@@ -356,7 +366,7 @@ impl Player {
         if let Some(start) = &start {
             arguments.extend([b"replace".as_slice(), start.as_bytes()]);
         }
-        self.command(&arguments);
+        self.command_later(&arguments);
         self.set("pause", "no");
     }
 
@@ -394,15 +404,25 @@ impl Player {
         self.command(&[b"stop"]);
     }
 
+    /// Sets a property, without waiting for the player to get to it:
+    /// waiting takes as long as the core is busy, which when it is
+    /// opening a file is hundreds of milliseconds. The settings reach
+    /// it in the order they are made, along with the commands.
     pub fn set(&self, property: &str, value: &str) {
-        // SAFETY: valid NUL-terminated strings.
-        unsafe { (self.api.set_property_string)(self.handle, c_string(property).as_ptr(), c_string(value).as_ptr()) };
+        let value = c_string(value);
+        let mut text: *const c_char = value.as_ptr();
+        // SAFETY: valid NUL-terminated strings, and a pointer to a string
+        // pointer, which is what the string format asks for; mpv copies
+        // the string before returning.
+        unsafe {
+            (self.api.set_property_async)(self.handle, 0, c_string(property).as_ptr(), FORMAT_STRING, (&mut text as *mut *const c_char).cast())
+        };
     }
 
     pub fn number(&self, property: &str) -> Option<f64> {
         if let Some(known) = self.known(property) {
             return match known {
-                Known::Number(value) => Some(value),
+                Some(Known::Number(value)) => Some(value),
                 _ => None,
             };
         }
@@ -418,7 +438,7 @@ impl Player {
     pub fn flag(&self, property: &str) -> Option<bool> {
         if let Some(known) = self.known(property) {
             return match known {
-                Known::Flag(value) => Some(value),
+                Some(Known::Flag(value)) => Some(value),
                 _ => None,
             };
         }
@@ -434,7 +454,7 @@ impl Player {
     pub fn text(&self, property: &str) -> Option<String> {
         if let Some(known) = self.known(property) {
             return match known {
-                Known::Text(value) => Some(value),
+                Some(Known::Text(value)) => Some(value),
                 _ => None,
             };
         }
@@ -535,11 +555,15 @@ impl Player {
 
 impl Drop for Player {
     fn drop(&mut self) {
+        let started = Instant::now();
         // SAFETY: both were created in `new` and are freed exactly once, the
         // render context first as mpv requires.
         unsafe {
             (self.api.render_context_free)(self.render);
             (self.api.terminate_destroy)(self.handle);
+        }
+        if DEBUG.load(Ordering::Relaxed) {
+            eprintln!("jog: {:>7.1?} mpv   player torn down", started.elapsed());
         }
     }
 }

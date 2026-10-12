@@ -1549,6 +1549,11 @@ impl App {
         self.list[self.pos]
     }
 
+    /// Whether timings are being printed to the terminal.
+    pub fn debugging(&self) -> bool {
+        self.options.debug
+    }
+
     fn path(&self) -> &Path {
         &self.files[self.id()]
     }
@@ -2028,7 +2033,12 @@ impl App {
                     player.set("pause", "no");
                     held = true;
                 }
-                None => player.play(&self.files[id], from),
+                None => {
+                    player.play(&self.files[id], from);
+                    if self.options.debug {
+                        eprintln!("jog: {:>7.1?} video asked for", started.elapsed());
+                    }
+                }
             }
             // Until the player reports for itself, this is where it is.
             // One counted from the end has to wait for the length.

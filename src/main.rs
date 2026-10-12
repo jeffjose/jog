@@ -165,6 +165,7 @@ fn main() -> ExitCode {
         app.choose_session();
     }
     let result = event_loop.run_app(&mut app);
+    let leaving = std::time::Instant::now();
     app.save_session();
     app.remember_position();
     app.print_marked();
@@ -172,5 +173,13 @@ fn main() -> ExitCode {
         eprintln!("jog: {error}");
         return ExitCode::FAILURE;
     }
-    ExitCode::SUCCESS
+    if app.debugging() {
+        eprintln!("jog: {:>7.1?} quit, state kept", leaving.elapsed());
+    }
+    // Nothing is taken down on the way out: the players, the decode
+    // threads and the window are the system's to reclaim, and it does so
+    // at once, where closing a player that is in the middle of opening a
+    // file takes it half a second, with the window standing meanwhile.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    std::process::exit(0)
 }
