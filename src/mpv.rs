@@ -171,6 +171,7 @@ const WATCHED: &[(&str, c_int)] = &[
     ("path", FORMAT_STRING),
     ("volume", FORMAT_DOUBLE),
     ("track-list/count", FORMAT_DOUBLE),
+    ("video-format", FORMAT_STRING),
 ];
 
 /// A property's value as last told of.

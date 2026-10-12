@@ -15,6 +15,7 @@ mod positions;
 mod render;
 mod rng;
 mod scenes;
+mod screen;
 mod search;
 mod sessions;
 mod seen;
@@ -25,8 +26,9 @@ mod ui;
 mod view;
 
 use std::process::ExitCode;
+use std::sync::{Arc, OnceLock};
 
-use winit::event_loop::EventLoop;
+use winit::event_loop::{EventLoop, EventLoopProxy};
 
 use app::{App, Event};
 use loader::Loader;
@@ -113,6 +115,25 @@ fn main() -> ExitCode {
     }
     let files = playlist.files;
 
+    // The loader starts before the display is opened, which takes a
+    // while, so that the first image is decoding meanwhile: for the
+    // screen it was last shown on, which is nearly always the one it is
+    // about to be. Until the event loop exists there is no one to tell of
+    // a frame that is done; the window picks it up when it opens.
+    let proxy_slot: Arc<OnceLock<EventLoopProxy<Event>>> = Arc::new(OnceLock::new());
+    let slot = proxy_slot.clone();
+    let loader = Loader::new(files.clone(), options.background, options.debug, move |job| {
+        if let Some(proxy) = slot.get() {
+            let _ = proxy.send_event(Event::Loaded(job));
+        }
+    });
+    if options.debug {
+        eprintln!("jog: {:>7.1?} start loader threads up", started.elapsed());
+    }
+    if let Some(screen) = screen::remembered().filter(|_| options.filter.is_none() && options.sessions.is_empty()) {
+        loader.request(App::first_request(files.len(), playlist.start, screen, options.auto_zoom));
+    }
+
     let event_loop = match EventLoop::<Event>::with_user_event().build() {
         Ok(event_loop) => event_loop,
         Err(error) => {
@@ -124,10 +145,7 @@ fn main() -> ExitCode {
         eprintln!("jog: {:>7.1?} start listed and display opened", started.elapsed());
     }
     let proxy = event_loop.create_proxy();
-    let loaded = proxy.clone();
-    let loader = Loader::new(files.clone(), options.background, options.debug, move |job| {
-        let _ = loaded.send_event(Event::Loaded(job));
-    });
+    let _ = proxy_slot.set(proxy.clone());
 
     let (watch, filter, choosing) = (options.watch, options.filter.clone(), !options.sessions.is_empty());
     let mut app = App::new(options, files, playlist.start, loader, proxy, cwd);

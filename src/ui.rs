@@ -400,9 +400,23 @@ pub fn dissolve_all(pixels: &mut [u32], was: &[u32], amount: u32) {
     });
 }
 
+/// A buffer of `len` pixels, as pages the system hands out blank: they
+/// cost nothing until first written, unlike a buffer grown by writing
+/// zeros into it, which at 4K takes one core several milliseconds.
+pub fn blank(len: usize) -> Vec<u32> {
+    vec![0; len]
+}
+
+/// Gives a buffer the size of a picture, keeping it if it has that size.
+pub fn size_for(buffer: &mut Vec<u32>, len: usize) {
+    if buffer.len() != len {
+        *buffer = blank(len);
+    }
+}
+
 /// Copies a whole picture into a buffer kept for the purpose, on every core.
 pub fn copy_all(into: &mut Vec<u32>, from: &[u32]) {
-    into.resize(from.len(), 0);
+    size_for(into, from.len());
     copy_into(into, from);
 }
 

@@ -1631,25 +1631,37 @@ impl App {
 
     // ---- Loading -------------------------------------------------------
 
+    /// The images to have decoded around a position in a list: that one,
+    /// then its neighbours, favouring the way `forward` says we are
+    /// going. Stepping quickly, several are on their way at once, and a
+    /// large file takes a few steps' worth of time to decode.
+    fn around(list: &[usize], pos: usize, forward: bool) -> Vec<usize> {
+        let (len, pos) = (list.len() as i64, pos as i64);
+        let dir = if forward { 1 } else { -1 };
+        let mut wanted = Vec::new();
+        for offset in [0, 1, -1, 2, 3, -2, 4, 5, 6] {
+            let id = list[(pos + offset * dir).rem_euclid(len) as usize];
+            if !wanted.contains(&id) {
+                wanted.push(id);
+            }
+        }
+        wanted
+    }
+
+    /// What to ask the loader for before there is a window: the images
+    /// around the one to start on, fitted to a screen of `screen`.
+    pub fn first_request(count: usize, start: usize, screen: (u32, u32), enlarge: bool) -> Request {
+        let list: Vec<usize> = (0..count).collect();
+        Request { wanted: Self::around(&list, start, true), target: screen, enlarge, ..Request::default() }
+    }
+
     /// Tells the loader what is needed around the current position.
     fn request(&self) {
         if self.monitor.0 == 0 || self.monitor.1 == 0 {
             return;
         }
         let len = self.list.len() as i64;
-        let pos = self.pos as i64;
-        let dir = if self.forward { 1 } else { -1 };
-
-        let mut wanted = Vec::new();
-        // The current image, then neighbours, favouring the way we are
-        // going: stepping quickly, several are on their way at once, and
-        // a large file takes a few steps' worth of time to decode.
-        for offset in [0, 1, -1, 2, 3, -2, 4, 5, 6] {
-            let id = self.list[(pos + offset * dir).rem_euclid(len) as usize];
-            if !wanted.contains(&id) {
-                wanted.push(id);
-            }
-        }
+        let wanted = Self::around(&self.list, self.pos, self.forward);
         // Thumbnails are sized for the monitor, like frames, so they survive
         // window resizes; and for the grid's cells, the larger of the two
         // uses, so that the filmstrip and the grid share them.
@@ -1770,6 +1782,9 @@ impl App {
             self.monitor = (size.width, size.height);
             self.request();
         }
+        // For the next run to decode its first image for, before it has
+        // a display to ask.
+        crate::screen::remember(self.monitor);
     }
 
     // ---- Navigation ----------------------------------------------------
@@ -2138,7 +2153,7 @@ impl App {
         // of a scripted run; in those cases take it here and discard it.
         if matches!(signal, Signal::Frame) && (!video.showing || self.snapshot.is_some()) {
             let (width, height): (u32, u32) = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
-            self.scene.resize(width as usize * height as usize, 0);
+            ui::size_for(&mut self.scene, width as usize * height as usize);
             self.scene_key = None;
             player.render(&mut self.scene, width, height);
         }
@@ -7081,7 +7096,7 @@ impl App {
                     }
                     self.scene_id = shown;
                     let started = Instant::now();
-                    self.scene.resize(pixels.len(), 0);
+                    ui::size_for(&mut self.scene, pixels.len());
                     let background = self.options.background;
                     render::draw_image(&mut self.scene, window, &key.frame, picture, layout, smooth, background);
                     let took = started.elapsed();
@@ -9045,16 +9060,19 @@ impl ApplicationHandler<Event> for App {
         if self.options.debug {
             eprintln!("jog: {:>7.1?} start window made, {:.1?} since the loop began", creating.elapsed(), self.perf.arrived.elapsed());
         }
-        // The buffers a frame goes through are made ready now, while the
-        // first image is still decoding: fresh memory of a 4K frame's
-        // size costs several milliseconds the first time it is written,
-        // which would otherwise be paid when that image is first drawn.
+        // The buffers a frame goes through are given their size now, as
+        // pages the system hands out blank, which cost nothing until they
+        // are first written, and are then written a row per core. Grown
+        // to size one row after another they would take this thread
+        // tens of milliseconds, just as the first image arrives.
         let (width, height) = self.window_size();
         for buffer in [&mut self.scene, &mut self.scene_was, &mut self.presented] {
-            buffer.resize(width as usize * height as usize, 0);
-            ui::fill_all(buffer, 0);
+            *buffer = ui::blank(width as usize * height as usize);
         }
         self.presented.clear();
+        if self.options.debug {
+            eprintln!("jog: {:>7.1?} start buffers ready, {:.1?} since the loop began", creating.elapsed(), self.perf.arrived.elapsed());
+        }
         self.update_monitor();
         // With --grid the grid is what comes up, and nothing plays until
         // a picture is gone to: not the first video, nor its trailer.
@@ -9083,6 +9101,9 @@ impl ApplicationHandler<Event> for App {
         }
         match event {
             Event::Loaded(Job::Fitted(id)) if id == self.id() => {
+                if self.options.debug && self.perf.shown_in.is_none() {
+                    eprintln!("jog: {:>7.1?} start first frame told of", self.perf.arrived.elapsed());
+                }
                 self.refresh();
                 self.start_snapshot(event_loop);
             }

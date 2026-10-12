@@ -179,7 +179,9 @@ impl State {
             Job::Full(_) => None,
         };
         let transform = self.transform(id);
-        let enlarge = matches!(job, Job::Fitted(_)) && self.request.enlarge;
+        // Only a fitted frame is ever enlarged; the flag is kept on a
+        // full-resolution one all the same, so that it counts as current.
+        let enlarge = !matches!(job, Job::Thumb(_)) && self.request.enlarge;
         let spec = Spec { target, enlarge, transform, background, thumbnail: matches!(job, Job::Thumb(_)) };
 
         let fitted = self.fitted.get(&id).filter(|slot| slot.transform == transform);
@@ -387,7 +389,10 @@ impl Loader {
 fn decode_pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
+        // `JOG_SCALE_THREADS` sets how many, for trying things out.
+        let threads = std::env::var("JOG_SCALE_THREADS").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
         rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
             .thread_name(|index| format!("jog-scale-{index}"))
             .start_handler(|_| give_way())
             .build()
