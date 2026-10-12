@@ -14,6 +14,7 @@ use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey};
+use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::commands::{self, Applies, Command, MenuItem};
@@ -990,6 +991,10 @@ pub struct App {
     /// What has been typed into the list of shortcuts, to find one.
     help_search: String,
     snapshot: Option<Snapshot>,
+    /// The benchmark, when `--benchmark` runs one; and whether its next
+    /// scene is to be played at the first chance.
+    bench: Option<Bench>,
+    bench_step_due: bool,
     /// Created the first time a video comes up.
     player: Option<Player>,
     /// Set once the player has been asked for, so that happens only once.
@@ -1178,6 +1183,18 @@ impl Strip {
 /// the `JOG_SNAPSHOT` (output `.ppm` path), `JOG_SNAPSHOT_KEYS`,
 /// `JOG_SNAPSHOT_POINTER` (`X,Y`) and `JOG_SNAPSHOT_WAIT` (ms) variables.
 /// A `{Wait}` in the keys pauses for one waiting period before going on.
+/// A benchmark: scenes to play, each some keys and then a wait, and
+/// the figures taken while they play, by scene and metric.
+struct Bench {
+    scenes: VecDeque<(&'static str, &'static str, Duration)>,
+    scene: &'static str,
+    at: Option<Instant>,
+    samples: Vec<((String, String), Vec<f64>)>,
+    launched: Instant,
+    /// Whether the first picture is up, which is when the scenes begin.
+    begun: bool,
+}
+
 struct Snapshot {
     path: PathBuf,
     keys: String,
@@ -1489,6 +1506,8 @@ impl App {
             help: false,
             help_search: String::new(),
             snapshot: Snapshot::from_env(),
+            bench: None,
+            bench_step_due: false,
             player: None,
             active: 0,
             spare: None,
@@ -1884,7 +1903,7 @@ impl App {
         }
         let proxy = self.proxy.clone();
         // A scripted test run must not make any sound.
-        let silent = self.snapshot.is_some();
+        let silent = self.snapshot.is_some() || self.bench.is_some();
         std::thread::spawn(move || {
             let wake = proxy.clone();
             let role = Role::Playback { silent };
@@ -2157,6 +2176,7 @@ impl App {
         // Read the events even when no video is wanted: mpv only signals
         // again once its queue has been emptied.
         let mut events = if let Signal::Events = signal { player.events() } else { Vec::new() };
+        let mut video_started = None;
         let Some(video) = &mut self.video else { return };
         // One held ready by the spare player announced its frame before it
         // was this player, so that has to be looked for.
@@ -2174,6 +2194,7 @@ impl App {
             if showing && !video.showing {
                 let took = video.started.elapsed();
                 video.start_took.get_or_insert(took);
+                video_started = Some(took);
                 video.shown_at.get_or_insert_with(Instant::now);
                 if self.options.debug {
                     eprintln!("jog: {took:>7.1?} video start {}", self.files[video.id].display());
@@ -2233,6 +2254,9 @@ impl App {
         }
         if at_end && !by_hand && player.flag("eof-reached") == Some(true) {
             self.play_next();
+        }
+        if let (Some(took), Some("video")) = (video_started, self.bench_scene()) {
+            self.bench_note("video", "start to first frame", took);
         }
     }
 
@@ -6822,8 +6846,12 @@ impl App {
         let script = std::mem::take(&mut snapshot.keys);
         let (keys, later) = script.split_once("{Wait}").unwrap_or((&script, ""));
         snapshot.keys = later.to_string();
-        // Plain characters are typed; `{Enter}`, `{Tab}`, `{F2}` and so on
-        // press the named key.
+        self.play_keys(keys, event_loop);
+    }
+
+    /// Presses the keys of a script: plain characters are typed; `{Enter}`,
+    /// `{Tab}`, `{F2}` and so on press the named key.
+    fn play_keys(&mut self, keys: &str, event_loop: &ActiveEventLoop) {
         let mut rest = keys;
         while let Some(c) = rest.chars().next() {
             let (mut repeating, mut pressing, mut releasing) = (false, true, true);
@@ -6903,6 +6931,136 @@ impl App {
             self.modifiers = ModifiersState::empty();
         }
         self.mouse_moved(self.mouse.0, self.mouse.1);
+    }
+
+    // ---- Benchmark -----------------------------------------------------
+
+    /// Sets up the benchmark: a script of scenes played through the files
+    /// once the first picture is up, each timed, with the figures printed
+    /// at the end. `launched` is when the process began.
+    pub fn start_benchmark(&mut self, launched: Instant) {
+        let mut scenes: VecDeque<(&'static str, &'static str, Duration)> = VecDeque::new();
+        let mut scene = |name, keys, ms| scenes.push_back((name, keys, Duration::from_millis(ms)));
+        // On through the files at a reader's pace, so that each is decoded
+        // ahead; then faster than they decode; then back over ones decoded.
+        for _ in 0..15 {
+            scene("step", "{Right}", 250);
+        }
+        for _ in 0..40 {
+            scene("fast", "{Right}", 40);
+        }
+        scene("", "", 1500);
+        for _ in 0..15 {
+            scene("back", "{Left}", 250);
+        }
+        scene("", "", 400);
+        for _ in 0..3 {
+            scene("zoom", "{Up}", 350);
+        }
+        for _ in 0..3 {
+            scene("zoom", "{Down}", 350);
+        }
+        scene("zoom", "0", 400);
+        scene("grid", "g", 2000);
+        scene("grid", "{PageDown}", 800);
+        scene("grid", "{PageDown}", 800);
+        scene("grid", "{PageUp}", 800);
+        scene("grid", "g", 600);
+        if self.files.iter().any(|file| files::is_video(file)) {
+            scene("video", "@video", 3000);
+            scene("", "{Right}", 500);
+        }
+        self.bench = Some(Bench { scenes, scene: "", at: None, samples: Vec::new(), launched, begun: false });
+    }
+
+    /// Records a figure for the benchmark, under a scene and a metric.
+    fn bench_note(&mut self, scene: &str, metric: &str, took: Duration) {
+        let Some(bench) = &mut self.bench else { return };
+        let key = (scene.to_string(), metric.to_string());
+        let ms = took.as_secs_f64() * 1000.0;
+        match bench.samples.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, values)) => values.push(ms),
+            None => bench.samples.push((key, vec![ms])),
+        }
+    }
+
+    /// The scene the benchmark is in, if it is on.
+    fn bench_scene(&self) -> Option<&'static str> {
+        self.bench.as_ref().filter(|bench| bench.begun).map(|bench| bench.scene)
+    }
+
+    /// Plays the next scene of the benchmark, or ends it.
+    fn bench_step(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(bench) = &mut self.bench else { return };
+        bench.begun = true;
+        let Some((scene, keys, wait)) = bench.scenes.pop_front() else { return self.finish_benchmark(event_loop) };
+        bench.scene = scene;
+        bench.at = Some(Instant::now() + wait);
+        match keys {
+            // To the first video in the list.
+            "@video" => {
+                if let Some(pos) = self.list.iter().position(|id| files::is_video(&self.files[*id])) {
+                    self.go_to(pos, true);
+                }
+            }
+            keys => self.play_keys(keys, event_loop),
+        }
+    }
+
+    /// Prints the benchmark's figures and quits.
+    fn finish_benchmark(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(bench) = self.bench.take() else { return };
+        let (width, height) = self.window_size();
+        let backend = match self.window.as_ref().and_then(|window| window.display_handle().ok()).map(|handle| handle.as_raw()) {
+            Some(winit::raw_window_handle::RawDisplayHandle::Wayland(_)) => "Wayland",
+            Some(winit::raw_window_handle::RawDisplayHandle::Xlib(_) | winit::raw_window_handle::RawDisplayHandle::Xcb(_)) => "X11",
+            _ => "an unknown display",
+        };
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        println!("jog {} benchmark: {} files, a {width}x{height} window on {backend}, {cores} cores", env!("CARGO_PKG_VERSION"), self.list.len());
+        println!();
+        println!("{:<24} {:<32} {:>8} {:>8} {:>8} {:>5}", "scene", "metric", "median", "p90", "max", "n");
+        // Scenes in the order they were played; within one, the metrics
+        // in the order a reader wants them.
+        const METRICS: [&str; 8] = [
+            "launch to first picture",
+            "key to picture",
+            "decode, read and fit",
+            "start to first frame",
+            "scale the picture, rough",
+            "scale the picture, smooth",
+            "draw the page",
+            "redraw",
+        ];
+        let mut samples = bench.samples;
+        let scenes: Vec<String> = samples.iter().map(|((scene, _), _)| scene.clone()).fold(Vec::new(), |mut seen, scene| {
+            if !seen.contains(&scene) {
+                seen.push(scene);
+            }
+            seen
+        });
+        let rank = |(scene, metric): &(String, String)| (scenes.iter().position(|s| s == scene), METRICS.iter().position(|m| m == metric));
+        samples.sort_by_key(|(key, _)| rank(key));
+        let mut last_scene = String::new();
+        for ((scene, metric), values) in &samples {
+            let mut sorted = values.clone();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let at = |part: f64| sorted[((sorted.len() as f64 * part) as usize).min(sorted.len() - 1)];
+            let shown = if *scene == last_scene { "" } else { scene.as_str() };
+            last_scene.clone_from(scene);
+            println!("{shown:<24} {metric:<32} {:>8} {:>8} {:>8} {:>5}", ms(Duration::from_secs_f64(at(0.5) / 1000.0)), ms(Duration::from_secs_f64(at(0.9) / 1000.0)), ms(Duration::from_secs_f64(sorted[sorted.len() - 1] / 1000.0)), sorted.len());
+        }
+        let shown = samples.iter().find(|((scene, metric), _)| scene == "fast" && metric == "key to picture").map_or(0, |(_, values)| values.len());
+        println!();
+        println!("Stepping every 40 ms, {shown} of 40 presses had their picture up before the next press.");
+        let (thumbs, _) = self.loader.stats(0).thumbs_kept;
+        println!("Thumbnails decoded for the grid: {thumbs}.");
+        if let Some(peak) = std::fs::read_to_string("/proc/self/status").ok().and_then(|status| {
+            status.lines().find(|line| line.starts_with("VmHWM:")).and_then(|line| line.split_whitespace().nth(1)?.parse::<u64>().ok())
+        }) {
+            println!("Peak memory {} MB.", peak / 1024);
+        }
+        event_loop.exit();
     }
 
     /// Writes what would be on screen to the snapshot file and quits.
@@ -7013,6 +7171,9 @@ impl App {
                     }
                     self.frame_began = Some(started);
                     self.painted(started, painted);
+                    if let Some(scene) = self.bench_scene().filter(|scene| !scene.is_empty()) {
+                        self.bench_note(scene, "redraw", painted);
+                    }
                     // A frame has reached the window the ordinary way, and
                     // the window is up: the background is no longer needed.
                     if self.focused_once {
@@ -7041,6 +7202,30 @@ impl App {
             self.perf.shown_in = Some(took);
             if self.options.verbose {
                 self.report_shown(took);
+            }
+            // For the benchmark: how long the picture was in coming, and
+            // how long its decode was. The first picture starts it off.
+            if let Some(bench) = &self.bench {
+                let id = self.id();
+                let made = self.loader.stats(id).fitted;
+                match bench.begun {
+                    false => {
+                        self.bench_note("start", "launch to first picture", bench.launched.elapsed());
+                        self.bench_step_due = true;
+                    }
+                    true => {
+                        let scene = bench.scene;
+                        if matches!(scene, "step" | "fast" | "back" | "video") {
+                            self.bench_note(scene, "key to picture", took);
+                        }
+                        // Going back is over pictures decoded already.
+                        if matches!(scene, "step" | "fast" | "video") {
+                            if let Some(made) = made.filter(|made| made.how.is_empty()) {
+                                self.bench_note(scene, "decode, read and fit", made.read + made.fit);
+                            }
+                        }
+                    }
+                }
             }
             // The overlay was drawn before these figures were known.
             if self.show_debug {
@@ -7134,6 +7319,9 @@ impl App {
                 if self.options.debug {
                     eprintln!("jog: {:>7.1?} draw  grid", started.elapsed());
                 }
+                if self.bench_scene() == Some("grid") {
+                    self.bench_note("grid", "draw the page", started.elapsed());
+                }
             }
             Some(frame) => {
                 let layout = self.layout_of(frame.native);
@@ -7161,6 +7349,9 @@ impl App {
                     if self.options.debug {
                         let how = if smooth { "smooth" } else { "nearest" };
                         eprintln!("jog: {took:>7.1?} draw  {how} {}x{} -> {}x{}", key.frame.width, key.frame.height, layout.width, layout.height);
+                    }
+                    if self.bench_scene() == Some("zoom") {
+                        self.bench_note("zoom", if smooth { "scale the picture, smooth" } else { "scale the picture, rough" }, took);
                     }
                     let (from, to) = ((key.frame.width, key.frame.height), (layout.width, layout.height));
                     self.perf.scaled = Some(Scaled { took, smooth, from, to });
@@ -9400,6 +9591,15 @@ impl ApplicationHandler<Event> for App {
             self.grid_due = None;
             self.redraw();
         }
+        // The benchmark's next scene, once the last has had its time.
+        if std::mem::take(&mut self.bench_step_due) {
+            self.bench_step(event_loop);
+        }
+        let bench_at = self.bench.as_ref().and_then(|bench| bench.at);
+        if bench_at.is_some_and(|at| at <= now) {
+            self.bench_step(event_loop);
+        }
+        let bench_at = self.bench.as_ref().and_then(|bench| bench.at);
         let snapshot_at = self.snapshot.as_ref().and_then(|snapshot| snapshot.at);
         if snapshot_at.is_some_and(|at| at <= now) {
             return self.finish_snapshot(event_loop);
@@ -9413,7 +9613,7 @@ impl ApplicationHandler<Event> for App {
             self.redraw();
         }
         let toast_leaves = toast_leaves.filter(|at| *at > now);
-        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due];
+        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

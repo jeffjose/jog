@@ -33,5 +33,15 @@ screen, median of 24 presses. Lower is better.
 The next image takes the same ~27 ms whatever its size, because it was
 decoded while you looked at the last one. At 1080p feh starts quicker
 because it shows the image at its own size in the middle of the screen,
-where jog fills the screen with it. Run with `--debug` to see every
-decode, frame and wait timed on your own machine.
+where jog fills the screen with it.
+
+To measure on your own machine, X11 or Wayland:
+
+```
+jog --benchmark PHOTOS/
+```
+
+It opens the folder, steps through it at a reader's pace and then faster
+than the files decode, goes back, zooms, pages through the grid and
+starts a video if there is one, timing each, then prints the figures
+and quits. `--debug` prints every decode, frame and wait as it happens.

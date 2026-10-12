@@ -64,6 +64,8 @@ Slideshow and actions:
                              one it is the -o folder, or beside the video
       --frame-format KIND    png (the usual), jpg or webp
       --print-marked         print the marked files on exit
+      --benchmark            step, zoom and page through the files by itself,
+                             timing each, print the figures and quit
       --dry-run              change nothing: copying, moving, renaming, deleting,
                              converting and running a command only print what
                              they would have done
@@ -271,6 +273,7 @@ pub struct Options {
     pub filmstrip: bool,
     pub output_dir: Option<PathBuf>,
     pub print_marked: bool,
+    pub benchmark: bool,
     pub debug: bool,
     pub verbose: bool,
     pub watch: bool,
@@ -475,7 +478,7 @@ fn is_switch(name: &str) -> bool {
     let switches = [
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
-        "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
+        "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
         "debug", "verbose", "watch", "positions", "no-positions", "resume", "latest", "sessions", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
     switches.contains(&name)
@@ -528,6 +531,7 @@ fn parse_with(
         filmstrip: false,
         output_dir: None,
         print_marked: false,
+        benchmark: false,
         debug: std::env::var_os("JOG_DEBUG").is_some(),
         verbose: false,
         watch: false,
@@ -715,6 +719,7 @@ fn apply(
             }
         }
         "print-marked" => options.print_marked = true,
+        "benchmark" => options.benchmark = true,
         "debug" => options.debug = true,
         "verbose" => options.verbose = true,
         "watch" => options.watch = true,

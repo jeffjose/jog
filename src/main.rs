@@ -149,7 +149,11 @@ fn main() -> ExitCode {
     let _ = proxy_slot.set(proxy.clone());
 
     let (watch, filter, choosing) = (options.watch, options.filter.clone(), !options.sessions.is_empty());
+    let benchmark = options.benchmark;
     let mut app = App::new(options, files, playlist.start, loader, proxy, cwd);
+    if benchmark {
+        app.start_benchmark(started);
+    }
     if watch {
         app.set_watch(true);
     }
