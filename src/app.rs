@@ -3716,7 +3716,10 @@ impl App {
         let left_words = format!("{undecided} to go");
         let track = (px as i32 * 9).max(text.width(&left_words, small) + pad);
         let middle = pad + count_widths[0] + pad + track + pad + count_widths[1] + pad;
-        let w = inset + widths[0] + middle + widths[1] + pad / 2 + side + side + inset;
+        // Clear of the hairlines either side of the middle, so that the
+        // wash behind a button does not run into them.
+        let clear = pad / 2;
+        let w = inset + widths[0] + clear + middle + clear + widths[1] + pad / 2 + side + side + inset;
         let h = side + 2 * inset;
         let (left, stage) = self.stage();
         let (x, y) = (left + (stage.0 as i32 - w) / 2, px as i32);
@@ -3750,7 +3753,7 @@ impl App {
         };
         let mut at = x + inset;
         choice(canvas, text, at, 0);
-        at += widths[0];
+        at += widths[0] + clear;
 
         // Between them, set off by a hairline each side: the count of the
         // rejected, the bar with what is left over it, the count of the kept.
@@ -3777,7 +3780,7 @@ impl App {
         }
         across += track + pad;
         text.draw(canvas, across, text_top, px, KEPT_COLOR, &counts[1]);
-        at += middle;
+        at += middle + clear;
         choice(canvas, text, at, 1);
         at += widths[1] + pad / 2;
 
