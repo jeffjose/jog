@@ -51,6 +51,8 @@ PICKS = {
     "STEP_BACK": "round-alt-arrow-left", "FAST_FORWARD": "rewind-forward", "REWIND": "rewind-back",
     "SKIP_BACK": "skip-previous", "SKIP_FORWARD": "skip-next", "REPLACE": "transfer-horizontal",
     "LIST_FILTER": "filter", "LIST_X": "filter-close", "PIN": "pin",
+    # Filled ones, taken as Solar draws them: named in full, style and all.
+    "CHECK_FILLED": "check-circle-bold", "X_FILLED": "close-circle-bold",
 }
 
 EM = 1000
@@ -78,7 +80,8 @@ def main():
     glyphs, cmap, missing = {".notdef": TTGlyphPen(None).glyph()}, {}, []
     for line in open(consts):
         name, point = line.split()
-        drawing = solar.get(PICKS.get(name, "") + "-linear")
+        pick = PICKS.get(name, "")
+        drawing = solar.get(pick if pick.endswith("-bold") else pick + "-linear")
         if not drawing:
             missing.append(f"{name} ({PICKS.get(name, 'no pick')})")
             continue

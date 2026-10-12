@@ -339,6 +339,9 @@ pub mod icons {
     pub const REPEAT: &str = "\u{e149}";
     pub const REPEAT_1: &str = "\u{e1fc}";
     pub const PIN: &str = "\u{f000}";
+    /// A tick and a cross, each white on a filled circle.
+    pub const CHECK_FILLED: &str = "\u{f001}";
+    pub const X_FILLED: &str = "\u{f002}";
     pub const CLAPPERBOARD: &str = "\u{e29a}";
     pub const CAPTIONS: &str = "\u{e3a7}";
     pub const CAPTIONS_OFF: &str = "\u{e5c5}";
@@ -433,8 +436,8 @@ pub fn command_icon(command: Command) -> &'static str {
         SaveWorkspace => FOLDER_PLUS,
         ClearFilter | ShowAllHere => LIST_X,
         Triage => FLAG,
-        Keep => CHECK,
-        Reject => X,
+        Keep => CHECK_FILLED,
+        Reject => X_FILLED,
         OnlyKept | OnlyRejected | OnlyUndecided => LIST_FILTER,
         Shell | RunTyped | RunShell(_) | RepeatShell => TERMINAL,
         ListSearch => SEARCH,

@@ -3638,8 +3638,8 @@ impl App {
             // With no tally in sight to show it, it is said.
             let name = self.name_of(id);
             self.toast(match to {
-                Some(Verdict::Kept) => format!("{}  Kept {name}", commands::icons::CHECK),
-                Some(Verdict::Rejected) => format!("{}  Rejected {name}", commands::icons::X),
+                Some(Verdict::Kept) => format!("{}  Kept {name}", commands::icons::CHECK_FILLED),
+                Some(Verdict::Rejected) => format!("{}  Rejected {name}", commands::icons::X_FILLED),
                 None => format!("Undecided again: {name}"),
             });
         }
@@ -3697,8 +3697,8 @@ impl App {
         // What each of the two is: its icon, word, key, colour, and the
         // decision it stands for.
         let choices = [
-            (commands::icons::X, "Reject", "x", DANGER_COLOR, Verdict::Rejected, Command::Reject),
-            (commands::icons::CHECK, "Keep", "Space", KEPT_COLOR, Verdict::Kept, Command::Keep),
+            (commands::icons::X_FILLED, "Reject", "x", DANGER_COLOR, Verdict::Rejected, Command::Reject),
+            (commands::icons::CHECK_FILLED, "Keep", "Space", KEPT_COLOR, Verdict::Kept, Command::Keep),
         ];
         let choice_width = |text: &mut Text, (icon, word, key, ..): &(&str, &str, &str, u32, Verdict, Command)| {
             2 * pad + text.width(icon, px) + pad / 2 + text.width(word, px) + pad + text.width(key, small) + pad
@@ -8371,9 +8371,9 @@ impl App {
             // Before that, what a triage has decided about it: a tick for
             // kept, a cross for rejected.
             let verdict = self.verdict(id);
-            let verdict_width = if verdict.is_some() { text.width(commands::icons::CHECK, px) + pad } else { 0 };
+            let verdict_width = if verdict.is_some() { text.width(commands::icons::CHECK_FILLED, px) + pad } else { 0 };
             if let Some(verdict) = verdict {
-                let (icon, color) = if verdict == Verdict::Kept { (commands::icons::CHECK, KEPT_COLOR) } else { (commands::icons::X, DANGER_COLOR) };
+                let (icon, color) = if verdict == Verdict::Kept { (commands::icons::CHECK_FILLED, KEPT_COLOR) } else { (commands::icons::X_FILLED, DANGER_COLOR) };
                 text.draw(canvas, panel.width - star_room - length_width - verdict_width, line, px, if current { main } else { color }, icon);
             }
             let length_width = length_width + verdict_width;
