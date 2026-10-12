@@ -61,6 +61,9 @@ Slideshow and actions:
                              one they ask for a folder, as Move to... in the
                              menu always does
       --print-marked         print the marked files on exit
+      --dry-run              change nothing: copying, moving, renaming, deleting,
+                             converting and running a command only print what
+                             they would have done
       --verbose              print each file as it comes up: its place in the
                              list, dimensions, size and how long it took
       --debug                print decode and video start times (also JOG_DEBUG=1)
@@ -214,6 +217,8 @@ pub struct Options {
     pub on_last_slide: LastSlide,
     /// Whether the next file comes up when a video ends.
     pub autoplay: bool,
+    /// Whether what would change a file or run a command is only said.
+    pub dry_run: bool,
     /// Whether seeking lands on the exact moment or the nearest keyframe.
     pub precise_seeking: bool,
     /// Whether things move into place or are simply there.
@@ -431,7 +436,7 @@ fn is_switch(name: &str) -> bool {
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
-        "debug", "verbose", "watch", "resume", "no-resume", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking",
+        "debug", "verbose", "watch", "resume", "no-resume", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run",
     ];
     switches.contains(&name)
 }
@@ -462,6 +467,7 @@ fn parse_with(
         slideshow_delay: None,
         on_last_slide: LastSlide::Resume,
         autoplay: true,
+        dry_run: false,
         precise_seeking: false,
         animations: true,
         seen: true,
@@ -615,6 +621,7 @@ fn apply(
         "cycle-once" => options.on_last_slide = LastSlide::Quit,
         "autoplay" => options.autoplay = true,
         "no-autoplay" => options.autoplay = false,
+        "dry-run" => options.dry_run = true,
         "precise-seeking" => options.precise_seeking = true,
         "no-precise-seeking" => options.precise_seeking = false,
         "animations" => options.animations = true,

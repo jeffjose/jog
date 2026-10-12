@@ -2882,6 +2882,9 @@ impl App {
             Trash => self.trash(event_loop),
             Save => {
                 let copy = format!("jog_{}_{}", std::process::id(), self.name());
+                if self.dry(|app| vec![format!("save a copy: {} -> {copy}", app.path().display())], "would save a copy") {
+                    return;
+                }
                 match std::fs::copy(self.path(), &copy) {
                     Ok(_) => self.toast(format!("Saved {copy}")),
                     Err(error) => self.toast(format!("Could not save {copy}: {error}")),
@@ -2892,6 +2895,9 @@ impl App {
                 // The marked files if there are any, otherwise the whole list.
                 let ids = if self.marks.is_empty() { self.list.clone() } else { self.targets() };
                 let lines: String = ids.iter().map(|&id| format!("{}\n", self.files[id].display())).collect();
+                if self.dry(|_| vec![format!("write the list of {} files to {name}", ids.len())], "would save the file list") {
+                    return;
+                }
                 match std::fs::write(&name, lines) {
                     Ok(()) => self.toast(format!("Saved {name}")),
                     Err(error) => self.toast(format!("Could not save {name}: {error}")),
@@ -3018,6 +3024,9 @@ impl App {
         };
         let seconds = self.video_time().map_or(0.0, |(position, _)| position);
         let command = expand_action(template, self.path(), seconds);
+        if self.dry(|_| vec![command.clone()], &format!("would run action {slot}")) {
+            return;
+        }
         match std::process::Command::new("sh").arg("-c").arg(&command).spawn() {
             Ok(mut child) => {
                 // Reap the child without holding up the viewer.
@@ -3107,6 +3116,11 @@ impl App {
     /// Copies or moves the target files into `dir`, made if it is not
     /// there. Files whose name is already taken there are left alone.
     fn send_to(&mut self, dir: PathBuf, moving: bool, event_loop: &ActiveEventLoop) {
+        let how = if moving { "move" } else { "copy" };
+        let said = |app: &Self| app.targets().iter().map(|id| format!("{how}: {} -> {}", app.files[*id].display(), dir.display())).collect();
+        if self.dry(said, &format!("would {how} {} to {}", self.targets().len(), dir.display())) {
+            return;
+        }
         if let Err(error) = std::fs::create_dir_all(&dir) {
             self.toast(format!("Cannot use {}: {error}", dir.display()));
             return;
@@ -3242,6 +3256,9 @@ impl App {
 
     /// Deletes files from disk. This cannot be undone.
     fn delete(&mut self, ids: &[usize], event_loop: &ActiveEventLoop) {
+        if self.dry(|app| ids.iter().map(|id| format!("delete: {}", app.files[*id].display())).collect(), &format!("would delete {}", ids.len())) {
+            return;
+        }
         let (mut removed, mut failed) = (Vec::new(), 0);
         for &id in ids {
             let Some(pos) = self.list.iter().position(|&other| other == id) else { continue };
@@ -3267,6 +3284,9 @@ impl App {
     }
 
     fn undo(&mut self) {
+        if !self.undo.is_empty() && self.dry(|_| vec!["undo the last copy, move, rename or convert".to_string()], "would undo") {
+            return;
+        }
         match self.undo.pop() {
             None => self.toast("Nothing to undo"),
             Some(Undo::Created(paths)) => {
@@ -3323,6 +3343,9 @@ impl App {
     /// reports back.
     fn convert(&mut self, format: Format) {
         let paths: Vec<PathBuf> = self.targets().into_iter().map(|id| self.files[id].clone()).collect();
+        if self.dry(|_| paths.iter().map(|path| format!("convert to {}: {}", format.name(), path.display())).collect(), &format!("would convert {}", paths.len())) {
+            return;
+        }
         self.toast(format!("Converting {} to {}...", paths.len(), format.name()));
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
@@ -3410,6 +3433,20 @@ impl App {
         self.redraw();
     }
 
+    /// With `--dry-run`, says what would have been done, a line for each
+    /// thing in the terminal and a word on screen, and returns true:
+    /// whoever asked then does none of it.
+    fn dry(&mut self, lines: impl FnOnce(&Self) -> Vec<String>, summary: &str) -> bool {
+        if !self.options.dry_run {
+            return false;
+        }
+        for line in lines(self) {
+            println!("[dry run] {line}");
+        }
+        self.toast(format!("Dry run: {summary}"));
+        true
+    }
+
     // ---- Shell commands -------------------------------------------------
 
     /// What the find box lists after a `!`: what is typed, to be run as it
@@ -3441,6 +3478,13 @@ impl App {
         let whole = if named { template.to_string() } else { format!("{template} %f") };
         let seconds = self.video_time().map_or(0.0, |(position, _)| position);
         let ids = self.targets();
+        // A dry run still remembers what was typed, to be run in earnest.
+        if self.options.dry_run {
+            history::remember(self.shell_history.get_or_insert_with(history::load), template);
+        }
+        if self.dry(|app| ids.iter().map(|id| expand_action(&whole, &app.files[*id], seconds)).collect(), &format!("would run it on {}", ids.len())) {
+            return;
+        }
         let mut failed = None;
         for id in &ids {
             let command = expand_action(&whole, &self.files[*id], seconds);
@@ -4136,6 +4180,9 @@ impl App {
             return;
         }
         let to = from.with_file_name(name);
+        if self.dry(|_| vec![format!("rename: {} -> {}", from.display(), to.display())], "would rename") {
+            return;
+        }
         match ops::move_file(&from, &to) {
             Ok(()) => {
                 println!("[rename] {old_name} -> {name}");
@@ -4255,6 +4302,9 @@ impl App {
 
     /// Moves the target files to the trash.
     fn trash(&mut self, event_loop: &ActiveEventLoop) {
+        if self.dry(|app| app.targets().iter().map(|id| format!("move to trash: {}", app.files[*id].display())).collect(), "would move to trash") {
+            return;
+        }
         let (mut removed, mut failed) = (Vec::new(), 0);
         for id in self.targets() {
             let Some(pos) = self.list.iter().position(|&other| other == id) else { continue };
@@ -4716,6 +4766,9 @@ impl App {
         }
         if self.spaces.iter().any(|space| space.saved && space.name == name) {
             return self.toast(format!("There is a workspace named {name} already"));
+        }
+        if self.dry(|_| vec![format!("add the workspace {name} to the config file")], "would save the workspace") {
+            return;
         }
         let Some(folder) = self.spaces[self.space].paths.first().and_then(|path| path.canonicalize().ok()) else {
             return self.toast("Cannot tell where this folder is");
@@ -5399,7 +5452,7 @@ impl App {
             Some('>') if palette.matches.is_empty() => "Run:   ",
             Some(':') => "Go to:   ",
             Some('@') => "Workspace:   ",
-            Some('!') => "Run on it:   ",
+            Some('!') => "Run command:   ",
             _ => "Find:   ",
         };
         let typed = palette.field.string();
@@ -6506,6 +6559,10 @@ impl App {
         // what matters bright, what describes it muted.
         let (soft, dim) = (accent_soft(), DIM_TEXT_COLOR);
         let mut top_left: Vec<Vec<(String, u32)>> = Vec::new();
+        // Said all the while, so that nothing done is taken for done.
+        if self.options.dry_run {
+            top_left.push(vec![("Dry run: nothing is changed, only said in the terminal".to_string(), MARK_COLOR)]);
+        }
         if let Some((typed, all)) = self.filter.as_ref().filter(|_| self.show_info) {
             let found = format!("{} {typed}", commands::icons::SEARCH);
             top_left.push(vec![(found, soft), (format!("   {} of {}", self.list.len(), all.len()), TEXT_COLOR), ("   Esc to go back".to_string(), dim)]);
