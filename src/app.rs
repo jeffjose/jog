@@ -8683,7 +8683,9 @@ mod tests {
     #[test]
     fn actions_quote_paths_for_the_shell() {
         let path = Path::new("/pics/it's here.jpg");
-        assert_eq!(expand_action("cp %f /tmp/%n", path), r"cp '/pics/it'\''s here.jpg' /tmp/'it'\''s here.jpg'");
-        assert_eq!(expand_action("echo 100%% %x %", path), "echo 100% %x %");
+        assert_eq!(expand_action("cp %f /tmp/%n", path, 0.0), r"cp '/pics/it'\''s here.jpg' /tmp/'it'\''s here.jpg'");
+        assert_eq!(expand_action("echo 100%% %x %", path, 0.0), "echo 100% %x %");
+        // The name without its ending, the folder, and the time in a video.
+        assert_eq!(expand_action("%s %d %t", path, 12.5), r"'it'\''s here' '/pics' 12.500");
     }
 }
