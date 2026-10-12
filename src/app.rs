@@ -9017,9 +9017,6 @@ impl ApplicationHandler<Event> for App {
         if self.window.is_some() {
             return;
         }
-        if self.options.debug {
-            eprintln!("jog: {:>7.1?} start resumed", self.perf.arrived.elapsed());
-        }
         // Start decoding before the window exists, so the first image is
         // ready by the time the window is mapped.
         let monitor = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next());
@@ -9106,9 +9103,6 @@ impl ApplicationHandler<Event> for App {
         // rather than at the first key press that brings up some text.
         let proxy = self.proxy.clone();
         std::thread::spawn(move || drop(proxy.send_event(Event::Font(Text::load()))));
-        if self.options.debug {
-            eprintln!("jog: {:>7.1?} start resumed done", self.perf.arrived.elapsed());
-        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
