@@ -390,19 +390,20 @@ impl Loader {
     }
 }
 
-/// The threads the scaling and turning inside a decode job spread over.
+/// The threads the scaling and turning that end a decode job spread
+/// over; reading and decoding the file stays on the job's own thread.
 /// They are kept apart from the ones drawing uses: a frame on its way to
 /// the screen would otherwise wait its turn behind the pieces of a decode
 /// that is only being done ahead of time.
 fn decode_pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
-        // A quarter of the cores: the decode threads are each busy with
-        // a file already, and on a machine with few cores more threads
-        // here only take turns with the ones drawing the window.
+        // Half the cores: the decode threads are each busy with a file
+        // already, and on a machine with few cores more threads here
+        // only take turns with the ones drawing the window.
         // `JOG_SCALE_THREADS` sets how many, for trying things out.
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-        let threads = std::env::var("JOG_SCALE_THREADS").ok().and_then(|n| n.parse().ok()).unwrap_or((cores / 4).max(1));
+        let threads = std::env::var("JOG_SCALE_THREADS").ok().and_then(|n| n.parse().ok()).unwrap_or((cores / 2).max(1));
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|index| format!("jog-scale-{index}"))
@@ -416,9 +417,11 @@ fn decode_pool() -> &'static rayon::ThreadPool {
 /// ahead of time on every core at once; the thread drawing the window,
 /// and those helping it, are to have a core whenever they want one.
 fn give_way() {
+    // `JOG_DECODE_NICE` sets by how much, for trying things out.
+    let nice = std::env::var("JOG_DECODE_NICE").ok().and_then(|n| n.parse().ok()).unwrap_or(10);
     // SAFETY: a plain system call on the calling thread, which on Linux is
     // what a process id of 0 names here.
-    unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+    unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
 }
 
 fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allowed: bool) {
@@ -439,7 +442,7 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
             Work::FromSource(_) => "from decoded",
             Work::FromFrame(_) => "from frame",
         };
-        let (result, source, read) = decode_pool().install(|| perform(work, spec, keep));
+        let (result, source, read) = perform(work, spec, keep);
         let took = started.elapsed();
         let made = Made { how, read, fit: took.saturating_sub(read), at: Instant::now() };
         if shared.debug.load(Ordering::Relaxed) {
@@ -486,7 +489,7 @@ fn perform(work: Work, spec: Spec, keep: bool) -> (decode::Result<Frame>, Option
                 Err(error) => return (Err(error), None, started.elapsed()),
             };
             let read = started.elapsed();
-            let frame = decode::finish(&source, spec);
+            let frame = decode_pool().install(|| decode::finish(&source, spec));
             // The file is kept when the frame is not its pixels as they
             // are, and so zooming in would want them. An animation is
             // never wanted at full resolution, and would take much more
@@ -495,7 +498,9 @@ fn perform(work: Work, spec: Spec, keep: bool) -> (decode::Result<Frame>, Option
             let worth_keeping = keep && scaled && source.animation.is_none();
             (frame, worth_keeping.then(|| Arc::new(source)), read)
         }
-        Work::FromSource(source) => (decode::finish(&source, spec), None, Duration::ZERO),
-        Work::FromFrame(frame) => (decode::shrink(&frame, spec.target.unwrap_or_default()), None, Duration::ZERO),
+        Work::FromSource(source) => (decode_pool().install(|| decode::finish(&source, spec)), None, Duration::ZERO),
+        Work::FromFrame(frame) => {
+            (decode_pool().install(|| decode::shrink(&frame, spec.target.unwrap_or_default())), None, Duration::ZERO)
+        }
     }
 }
