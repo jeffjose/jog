@@ -67,8 +67,15 @@ Slideshow and actions:
       --verbose              print each file as it comes up: its place in the
                              list, dimensions, size and how long it took
       --debug                print decode and video start times (also JOG_DEBUG=1)
-      --no-resume            start videos from the beginning, and do not
-                             remember where they were left (--resume undoes it)
+      --no-positions         start videos from the beginning, and do not
+                             remember where they were left (config:
+                             positions = false)
+      --resume               pick up a session: what jog was showing when it was
+                             last quit, of those started in this folder. With
+                             several to choose from they are shown, to be
+                             picked with the arrows or a click
+      --latest               with --resume, the latest of them, unasked
+      --sessions             list this folder's sessions here, and quit
 
       --precise-seeking      seek to the exact moment asked for. The usual is
                              the nearest keyframe, which is much quicker and
@@ -165,7 +172,7 @@ Keys:
   Enter, 1-9                 run action          q Esc         quit
 
 Videos (mp4, mkv, webm and so on; needs libmpv) play in place, picking up
-where they were left unless --no-resume is given. While one is up:
+where they were left unless --no-positions is given. While one is up:
   Space                      play / pause        Left / Right  seek about 5 seconds
   PgUp / PgDn                seek about 1 minute pointer at the bottom: seek bar with previews
   Shift+Left / Shift+Right   step one frame      Up / Down     volume (m mutes)
@@ -262,6 +269,15 @@ pub struct Options {
     pub workspace: Option<usize>,
     /// Whether videos pick up where they were left.
     pub resume: bool,
+    /// Whether to pick up a session of this folder, the latest of them
+    /// unasked, or only to list them; and, set by `main` once it has
+    /// looked, the ones there are to choose from and how far into its
+    /// video the one picked up was.
+    pub session: bool,
+    pub latest: bool,
+    pub list_sessions: bool,
+    pub sessions: Vec<crate::sessions::Session>,
+    pub begin_at: Option<f64>,
 }
 
 /// A folder with a name, to switch to by it. It may say how it is to be
@@ -443,7 +459,7 @@ fn is_switch(name: &str) -> bool {
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
-        "debug", "verbose", "watch", "resume", "no-resume", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
+        "debug", "verbose", "watch", "positions", "no-positions", "resume", "latest", "sessions", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
     switches.contains(&name)
 }
@@ -501,6 +517,11 @@ fn parse_with(
         workspaces: Vec::new(),
         workspace: None,
         resume: true,
+        session: false,
+        latest: false,
+        list_sessions: false,
+        sessions: Vec::new(),
+        begin_at: None,
     };
     let mut fullscreen = None;
     if let Some((path, text)) = config {
@@ -668,8 +689,11 @@ fn apply(
         "debug" => options.debug = true,
         "verbose" => options.verbose = true,
         "watch" => options.watch = true,
-        "resume" => options.resume = true,
-        "no-resume" => options.resume = false,
+        "positions" => options.resume = true,
+        "no-positions" => options.resume = false,
+        "resume" => options.session = true,
+        "latest" => options.latest = true,
+        "sessions" => options.list_sessions = true,
         "action" => options.actions[0] = Some(value()?),
         other => {
             let slot = other.strip_prefix("action").and_then(|n| n.parse::<usize>().ok());
@@ -742,7 +766,7 @@ fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>
                 "subtitles" => ("no-subtitles", None),
                 "grid-titles" => ("no-grid-titles", None),
                 "fullscreen" => ("windowed", None),
-                "resume" => ("no-resume", None),
+                "positions" => ("no-positions", None),
                 other if is_switch(other) => continue,
                 _ => (key.as_str(), None),
             },
@@ -940,9 +964,9 @@ mod tests {
         assert!(parse_args(&["--debug"]).unwrap().debug);
         assert!(parse_args(&["--verbose"]).unwrap().verbose);
         assert!(parse_args(&[]).unwrap().resume);
-        assert!(!parse_args(&["--no-resume"]).unwrap().resume);
-        assert!(!parse_config("resume = false", &[]).unwrap().resume);
-        assert!(parse_config("resume = false", &["--resume"]).unwrap().resume);
+        assert!(!parse_args(&["--no-positions"]).unwrap().resume);
+        assert!(!parse_config("positions = false", &[]).unwrap().resume);
+        assert!(parse_config("positions = false", &["--positions"]).unwrap().resume);
         assert!(parse_args(&[]).unwrap().autoplay);
         assert!(!parse_args(&["--no-autoplay"]).unwrap().autoplay);
         assert!(parse_args(&[]).unwrap().grid_titles);

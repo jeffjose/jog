@@ -120,7 +120,7 @@
 #   true    seek to the exact moment asked for, rather than to the nearest
 #           keyframe: slower, more so the larger the video
 
-# resume = true
+# positions = true
 #   false   start videos from the beginning, and do not remember where
 #           they were left
 

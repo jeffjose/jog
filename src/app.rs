@@ -28,6 +28,7 @@ use crate::options::{LastSlide, Options, Start, SubtitleStyle};
 use crate::positions::Positions;
 use crate::scenes;
 use crate::history;
+use crate::sessions::{self, Session};
 use crate::seen::Seen;
 use crate::render;
 use crate::rng::Rng;
@@ -683,6 +684,14 @@ struct PaletteLayout {
     frame: (i32, i32),
 }
 
+/// Where a session was left: the file, how far into it for a video, and
+/// the search the list was narrowed to.
+struct Spot {
+    file: PathBuf,
+    seconds: f64,
+    filter: Option<String>,
+}
+
 /// A workspace: a folder, or what was opened, under a name, with how it
 /// is listed and what it was showing when it was last left.
 struct Space {
@@ -700,6 +709,12 @@ struct Space {
     saved: bool,
     /// `None` until it has been gone to.
     kept: Option<Kept>,
+    /// What is written under its card in the overview, for a session:
+    /// when it was left and where.
+    caption: Option<String>,
+    /// Where a session left off in it, to be landed on when it is first
+    /// gone to.
+    spot: Option<Spot>,
     /// Whether its files have been asked for, to show in the overview.
     asked: bool,
 }
@@ -763,6 +778,8 @@ enum PromptKind {
 }
 
 pub struct App {
+    /// The folder jog was started in, which its sessions are kept by.
+    cwd: PathBuf,
     options: Options,
     /// Path of each file id.
     files: Vec<PathBuf>,
@@ -1261,12 +1278,15 @@ fn ui_px(window_height: u32) -> u32 {
 }
 
 impl App {
-    pub fn new(options: Options, files: Vec<PathBuf>, start: usize, loader: Loader, proxy: EventLoopProxy<Event>) -> Self {
+    pub fn new(options: Options, files: Vec<PathBuf>, start: usize, loader: Loader, proxy: EventLoopProxy<Event>, cwd: PathBuf) -> Self {
         let slide_delay = Duration::from_secs_f64(options.slideshow_delay.unwrap_or(DEFAULT_SLIDE_DELAY));
         ACCENT.store(options.accent, atomic::Ordering::Relaxed);
         // The workspaces of the config file; and unless one of them was
         // asked for by name, what was opened by its path as one more.
-        let mut spaces: Vec<Space> = (options.workspaces.iter())
+        // With sessions to choose from, they are the workspaces, and those
+        // of the config file are left out of it.
+        let choosing = !options.sessions.is_empty();
+        let mut spaces: Vec<Space> = (options.workspaces.iter().filter(|_| !choosing))
             .map(|workspace| Space {
                 name: workspace.name.clone(),
                 paths: vec![workspace.path.clone()],
@@ -1279,6 +1299,8 @@ impl App {
                 saved: true,
                 kept: None,
                 asked: false,
+                caption: None,
+                spot: None,
             })
             .collect();
         let space = options.workspace.unwrap_or_else(|| {
@@ -1300,10 +1322,34 @@ impl App {
                 saved: false,
                 kept: None,
                 asked: false,
+                caption: None,
+                spot: None,
             });
             spaces.len() - 1
         });
+        // The session opened is the latest; the others follow it, each to
+        // be listed, and landed in where it was left, when it is gone to.
+        if let Some((latest, others)) = options.sessions.split_first() {
+            spaces[space].name = sessions::title(latest);
+            spaces[space].caption = Some(sessions::caption(latest));
+            spaces.extend(others.iter().map(|session| Space {
+                name: sessions::title(session),
+                caption: Some(sessions::caption(session)),
+                paths: session.paths.clone(),
+                recursive: session.recursive,
+                sort: session.sort,
+                reverse: session.reverse,
+                key: None,
+                start: Start::Resume,
+                filelist: session.filelist.clone(),
+                saved: false,
+                kept: None,
+                asked: false,
+                spot: Some(Spot { file: session.file.clone(), seconds: session.seconds, filter: session.filter.clone() }),
+            }));
+        }
         App {
+            cwd,
             marks: HashSet::new(),
             undo: Vec::new(),
             last_folder: None,
@@ -1411,7 +1457,7 @@ impl App {
             preview_want: None,
             preview_sent: None,
             preview_busy: None,
-            enter_at: None,
+            enter_at: options.begin_at,
             speed: 1.0,
             muted: false,
             looping: Looping::Off,
@@ -1512,6 +1558,7 @@ impl App {
             return event_loop.exit();
         }
         self.remember_position();
+        self.save_session();
         self.print_marked();
         let _ = std::io::Write::flush(&mut std::io::stdout());
         std::process::exit(0);
@@ -3467,6 +3514,55 @@ impl App {
         true
     }
 
+    // ---- Sessions --------------------------------------------------------
+
+    /// Keeps what is on view as a session of the folder jog was started
+    /// in, to be picked up with `--resume`.
+    pub fn save_session(&mut self) {
+        if self.list.is_empty() || self.cwd.as_os_str().is_empty() {
+            return;
+        }
+        let full = |path: &PathBuf| std::path::absolute(path).unwrap_or_else(|_| path.clone());
+        let listing = &self.options.listing;
+        sessions::save(Session {
+            cwd: self.cwd.clone(),
+            when: sessions::now(),
+            paths: self.options.paths.iter().map(full).collect(),
+            recursive: listing.recursive,
+            sort: self.sort,
+            reverse: self.reversed,
+            filelist: listing.filelist.as_ref().map(full),
+            filter: self.filter.as_ref().map(|(typed, _)| typed.clone()),
+            file: full(&self.files[self.id()]),
+            pos: self.pos,
+            total: self.list.len(),
+            seconds: self.video_time().map_or(0.0, |(position, _)| position),
+        });
+    }
+
+    /// Shows the sessions there are to choose from, as the workspaces
+    /// they have been made: the latest is the one already open.
+    pub fn choose_session(&mut self) {
+        self.open_overview();
+    }
+
+    /// Lands on the file a session was left on, in a workspace that has
+    /// just been listed for it: narrowed as it was, and for a video as
+    /// far in.
+    fn take_up(&mut self, spot: Spot) {
+        if let Some(typed) = &spot.filter {
+            self.start_filter(typed);
+        }
+        let known = self.files.iter().position(|file| *file == spot.file);
+        if let Some(pos) = known.and_then(|id| self.list.iter().position(|other| *other == id)) {
+            self.pos = pos;
+            if let Some(grid) = &mut self.grid {
+                grid.cursor = pos;
+            }
+            self.enter_at = Some(spot.seconds).filter(|seconds| *seconds >= 1.0);
+        }
+    }
+
     // ---- The file list's place ------------------------------------------
 
     /// The part of the window the picture has: all of it, or, with the
@@ -4731,6 +4827,10 @@ impl App {
         (self.filter, self.sort, self.reversed, self.shuffled) = (incoming.filter, incoming.sort, incoming.reversed, incoming.shuffled);
         self.filter_from = incoming.filter_from;
         (self.list, self.pos) = (incoming.list, incoming.pos.min(last));
+        // A session gone to for the first time is landed in where it was left.
+        if let Some(spot) = self.spaces[to].spot.take() {
+            self.take_up(spot);
+        }
         (self.palette, self.menu, self.prompt, self.overview) = (None, None, None, None);
         (self.strip_scroll, self.strip_over, self.list_scroll, self.list_hover) = (0, None, None, None);
         let layout = self.grid_layout(self.window_size());
@@ -4976,7 +5076,9 @@ impl App {
         let (pad, line) = (px as i32, Text::line_height(px));
         let round = pad;
 
-        let heading = format!("{}  Workspaces", commands::icons::FOLDERS);
+        // Sessions to choose from are shown the same way, and named so.
+        let what = if self.spaces.iter().any(|space| space.caption.is_some()) { "Sessions" } else { "Workspaces" };
+        let heading = format!("{}  {what}", commands::icons::FOLDERS);
         let big = px * 3 / 2;
         let first_top = cards.iter().map(|card| card[1]).min().unwrap_or(0);
         let heading_left = (canvas.width - text.width(&heading, big)) / 2;
@@ -5028,7 +5130,7 @@ impl App {
                 count => format!("{count} files"),
             };
             let key = Some(self.space_key(which)).filter(|key| !key.is_empty()).map(|key| format!("{key}   ")).unwrap_or_default();
-            let about = format!("{key}{files}{}", if space.saved { "" } else { "   not saved" });
+            let about = space.caption.clone().unwrap_or_else(|| format!("{key}{files}{}", if space.saved { "" } else { "   not saved" }));
             let about = clipped(text, &about, width, px);
             let about_left = left + (width - text.width(&about, px)) / 2;
             text.draw(canvas, about_left, name_top + line * 5 / 4, px, DIM_TEXT_COLOR, &about);
