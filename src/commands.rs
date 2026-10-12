@@ -126,6 +126,14 @@ pub enum Command {
     Restart,
     Search,
     ClearFilter,
+    /// Type a shell command to run on the file on view, or on the marked
+    /// ones: the find box, set to that.
+    Shell,
+    /// Run what was typed there, or the command at this place in the list
+    /// of those run before, or the last one run once more.
+    RunTyped,
+    RunShell(usize),
+    RepeatShell,
     /// In the grid, go back to the video that is playing.
     ShowPlaying,
     /// Type a search into the heading of the file list.
@@ -188,7 +196,8 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             _ => return None,
         },
         Key::Character(text) => match text {
-            ">" | "." | "n" => Next,
+            ">" | "n" => Next,
+            "." => RepeatShell,
             "<" | "," => Previous,
             "p" => ToggleList,
             "z" => Shuffle,
@@ -201,7 +210,8 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "/" => Search,
             "@" => WorkspaceList,
             "`" | "~" if modifiers.control_key() => HomeWorkspace,
-            "!" => ZoomFill,
+            "!" => Shell,
+            "F" => ZoomFill,
             "Z" => ToggleEnlarge,
             "k" if modifiers.control_key() || modifiers.super_key() => Palette,
             "k" => ToggleKeepView,
@@ -405,6 +415,7 @@ pub fn command_icon(command: Command) -> &'static str {
         WorkspaceList | Overview | Workspace(_) | WorkspaceKey(_) | NextWorkspace | PrevWorkspace | HomeWorkspace => FOLDERS,
         SaveWorkspace => FOLDER_PLUS,
         ClearFilter | ShowAllHere => LIST_X,
+        Shell | RunTyped | RunShell(_) | RepeatShell => TERMINAL,
         ListSearch => SEARCH,
         ClearMarks => STAR_OFF,
         Shuffle => SHUFFLE,
@@ -484,6 +495,8 @@ pub const MENU: &[Option<MenuItem>] = &[
     item("Shuffle", "z", Command::Shuffle),
     item("Workspaces", "G", Command::Overview),
     item("Go to workspace...", "@", Command::WorkspaceList),
+    item("Run a command on it...", "!", Command::Shell),
+    item("Run the last command again", ".", Command::RepeatShell),
     None,
     submenu("Playback", PLAYBACK, Applies::Videos),
     submenu("Zoom", ZOOM, Applies::Always),
@@ -529,7 +542,7 @@ const ZOOM: &[Option<MenuItem>] = &[
     item("Zoom out", "-", Command::ZoomOut),
     item("Actual size", "*", Command::ZoomActual),
     item("Fit to screen", "0", Command::ZoomFit),
-    item("Fill screen", "!", Command::ZoomFill),
+    item("Fill screen", "F", Command::ZoomFill),
     item("Fit small images to screen", "Z", Command::ToggleEnlarge),
 ];
 
@@ -661,6 +674,8 @@ pub const GRID_AROUND_MENU: &[Option<MenuItem>] = &[
     item("Shuffle", "z", Command::Shuffle),
     item("Workspaces", "G", Command::Overview),
     item("Go to workspace...", "@", Command::WorkspaceList),
+    item("Run a command on it...", "!", Command::Shell),
+    item("Run the last command again", ".", Command::RepeatShell),
     item("Save folder as workspace...", "", Command::SaveWorkspace),
     None,
     item("Mark all", "", Command::MarkAll),
@@ -724,13 +739,14 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
         (
             "Moving around",
             &[
-                ("Right  Space  n  .", "Next file"),
+                ("Right  Space  n", "Next file"),
                 ("Left  Backspace  ,", "Previous file"),
                 ("Home  End", "First / last file"),
                 ("PgDn  PgUp", "Jump 5% forward / back"),
                 ("}  {", "Next / previous folder"),
                 ("Wheel", "Next / previous file"),
                 ("z", "Shuffle: on to another file, or around this one in the grid, filmstrip or list"),
+                ("!  .", "Run a shell command on this file, or on the marked ones / the last one again"),
                 ("s", "Sort: name, newest, size, reverse"),
             ],
         ),

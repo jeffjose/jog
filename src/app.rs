@@ -27,6 +27,7 @@ use crate::ops;
 use crate::options::{LastSlide, Options, Start, SubtitleStyle};
 use crate::positions::Positions;
 use crate::scenes;
+use crate::history;
 use crate::seen::Seen;
 use crate::render;
 use crate::rng::Rng;
@@ -987,6 +988,10 @@ pub struct App {
     /// Whether the strip of scenes is up, the scenes of the videos looked
     /// at so far, and the thread that finds them.
     /// The search being typed into the heading of the file list.
+    /// The shell commands run before, read when first wanted, and the one
+    /// just typed into the find box, on its way to being run.
+    shell_history: Option<Vec<String>>,
+    shell_typed: Option<String>,
     list_search: Option<TextField>,
     /// The row of the file list picked out with the arrows while searching.
     list_cursor: Option<usize>,
@@ -1411,6 +1416,8 @@ impl App {
             hold: None,
             loupe: None,
             precise: options.precise_seeking,
+            shell_history: None,
+            shell_typed: None,
             list_search: None,
             list_cursor: None,
             row_target: None,
@@ -2979,6 +2986,21 @@ impl App {
             SubtitlesLarger => self.size_subtitles(true),
             SubtitlesSmaller => self.size_subtitles(false),
             ClearFilter => self.clear_filter(false),
+            Shell => self.open_palette_with("!"),
+            RunTyped => {
+                if let Some(typed) = self.shell_typed.take() {
+                    self.run_shell(&typed);
+                }
+            }
+            RunShell(at) => {
+                if let Some(command) = self.shell_history.get_or_insert_with(history::load).get(at).cloned() {
+                    self.run_shell(&command);
+                }
+            }
+            RepeatShell => match self.shell_history.get_or_insert_with(history::load).first().cloned() {
+                Some(command) => self.run_shell(&command),
+                None => self.toast("No command has been run yet: ! is for typing one"),
+            },
             ShowAllHere => self.clear_filter(true),
             Quit => self.leave(event_loop),
         }
@@ -2994,7 +3016,8 @@ impl App {
             }
             return;
         };
-        let command = expand_action(template, self.path());
+        let seconds = self.video_time().map_or(0.0, |(position, _)| position);
+        let command = expand_action(template, self.path(), seconds);
         match std::process::Command::new("sh").arg("-c").arg(&command).spawn() {
             Ok(mut child) => {
                 // Reap the child without holding up the viewer.
@@ -3385,6 +3408,59 @@ impl App {
             key => drop(prompt.field.key(key, self.modifiers)),
         }
         self.redraw();
+    }
+
+    // ---- Shell commands -------------------------------------------------
+
+    /// What the find box lists after a `!`: what is typed, to be run as it
+    /// stands, and under it the commands run before that have it in them,
+    /// the latest first.
+    fn shell_matching(&mut self, typed: &str) -> Vec<(String, &'static str, Command)> {
+        let typed = typed.trim();
+        let wanted = typed.to_lowercase();
+        let history = self.shell_history.get_or_insert_with(history::load);
+        let before = history.iter().enumerate().filter(|(_, command)| command.as_str() != typed && command.to_lowercase().contains(&wanted));
+        let mut rows: Vec<(String, &'static str, Command)> = before.map(|(at, command)| (command.clone(), "", Command::RunShell(at))).collect();
+        if !typed.is_empty() {
+            rows.insert(0, (typed.to_string(), "Enter", Command::RunTyped));
+        }
+        rows
+    }
+
+    /// Runs a shell command on the marked files, or on the one on view,
+    /// once for each, and does not wait for it. In it `%f` is the file's
+    /// path, `%n` its name, `%s` its name without the ending, `%d` the
+    /// folder it is in and `%t` how many seconds into a video the one on
+    /// view is. One that names none of these gets the path after it.
+    fn run_shell(&mut self, template: &str) {
+        let template = template.trim();
+        if template.is_empty() {
+            return;
+        }
+        let named = ["%f", "%n", "%s", "%d"].iter().any(|place| template.contains(place));
+        let whole = if named { template.to_string() } else { format!("{template} %f") };
+        let seconds = self.video_time().map_or(0.0, |(position, _)| position);
+        let ids = self.targets();
+        let mut failed = None;
+        for id in &ids {
+            let command = expand_action(&whole, &self.files[*id], seconds);
+            match std::process::Command::new("sh").arg("-c").arg(&command).stdin(std::process::Stdio::null()).spawn() {
+                // Reap the child without holding up the viewer.
+                Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
+                Err(error) => failed = Some(error.to_string()),
+            }
+        }
+        history::remember(self.shell_history.get_or_insert_with(history::load), template);
+        // Said as it was typed, and no more of it than fits a corner.
+        let short = |text: &str| match text.chars().count() {
+            0..=60 => text.to_string(),
+            _ => format!("{}…", text.chars().take(58).collect::<String>()),
+        };
+        self.toast(match (failed, ids.len()) {
+            (Some(error), _) => format!("Could not run it: {error}"),
+            (None, 1) => format!("{}  {}", commands::icons::TERMINAL, short(template)),
+            (None, count) => format!("{}  On {count} files: {}", commands::icons::TERMINAL, short(template)),
+        });
     }
 
     // ---- Searching in the file list ------------------------------------
@@ -5059,6 +5135,7 @@ impl App {
             Some('>') if !typed[1..].starts_with(|c: char| c.is_ascii_digit()) => (Vec::new(), false, self.commands_matching(&typed[1..])),
             Some(':') => self.place_named(&typed[1..]),
             Some('@') => (Vec::new(), false, self.spaces_matching(&typed[1..])),
+            Some('!') => (Vec::new(), false, self.shell_matching(&typed[1..])),
             _ => {
                 let (matches, narrowed) = self.matching(&typed);
                 (matches, narrowed, Vec::new())
@@ -5216,6 +5293,10 @@ impl App {
         // A command is left for whoever closed the box to run, with what
         // running one needs.
         if let (PaletteEnd::Go, Some((_, _, command))) = (end, palette.commands.get(palette.selected)) {
+            // What was typed is kept for it, the `!` aside.
+            if *command == Command::RunTyped {
+                self.shell_typed = Some(palette.field.string().chars().skip(1).collect());
+            }
             self.run_next = Some(*command);
             return self.redraw();
         }
@@ -5318,6 +5399,7 @@ impl App {
             Some('>') if palette.matches.is_empty() => "Run:   ",
             Some(':') => "Go to:   ",
             Some('@') => "Workspace:   ",
+            Some('!') => "Run on it:   ",
             _ => "Find:   ",
         };
         let typed = palette.field.string();
@@ -8129,7 +8211,7 @@ fn tracks_of(player: &Player, kind: &str) -> Vec<Track> {
 
 /// Fills in an action template: `%f` is the path and `%n` the file name,
 /// both quoted for the shell, and `%%` a literal percent sign.
-fn expand_action(template: &str, path: &Path) -> String {
+fn expand_action(template: &str, path: &Path, seconds: f64) -> String {
     let quote = |text: &str| format!("'{}'", text.replace('\'', r"'\''"));
     let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
     let mut command = String::new();
@@ -8142,6 +8224,9 @@ fn expand_action(template: &str, path: &Path) -> String {
         match chars.next() {
             Some('f') => command.push_str(&quote(&path.to_string_lossy())),
             Some('n') => command.push_str(&quote(&name)),
+            Some('s') => command.push_str(&quote(&path.file_stem().unwrap_or(path.as_os_str()).to_string_lossy())),
+            Some('d') => command.push_str(&quote(&path.parent().unwrap_or(Path::new(".")).to_string_lossy())),
+            Some('t') => command.push_str(&format!("{seconds:.3}")),
             Some('%') => command.push('%'),
             Some(other) => command.extend(['%', other]),
             None => command.push('%'),

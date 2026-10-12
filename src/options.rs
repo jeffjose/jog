@@ -120,7 +120,11 @@ Keys:
   > . n Right Space          next image          < , Left Backspace  previous
   Home / End                 first / last        PgDn / PgUp   jump 5%
   z                          shuffle the rest    { / }         previous / next directory
-  + Up / - Down              zoom in / out       * 0 !         100%, fit, fill
+  !                          run a shell command on this file, or on the marked
+                             ones: %f its path, %n its name, %s its name without
+                             the ending, %d its folder, %t the time in a video.
+                             Up / Down pick one run before; . runs the last again
+  + Up / - Down              zoom in / out       * 0 F         100%, fit, fill
   / or Ctrl+K                find: type part of a name, Up / Down to pick among
                              the matches, Enter to go to the one picked, Esc
                              to cancel. Tab or Right moves on to the buttons:

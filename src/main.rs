@@ -5,6 +5,7 @@ mod decode;
 mod files;
 mod frame;
 mod heif;
+mod history;
 mod loader;
 mod meta;
 mod mpv;
