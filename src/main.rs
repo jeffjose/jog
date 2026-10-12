@@ -131,7 +131,7 @@ fn main() -> ExitCode {
         eprintln!("jog: {:>7.1?} start loader threads up", started.elapsed());
     }
     if let Some(screen) = screen::remembered().filter(|_| options.filter.is_none() && options.sessions.is_empty()) {
-        loader.request(App::first_request(files.len(), playlist.start, screen, options.auto_zoom));
+        loader.request(App::first_request(files.len(), playlist.start, screen, options.auto_zoom, loader.workers()));
     }
 
     let event_loop = match EventLoop::<Event>::with_user_event().build() {

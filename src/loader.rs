@@ -256,6 +256,8 @@ struct Shared {
 /// that stepping through a directory never waits on a decode.
 pub struct Loader {
     shared: Arc<Shared>,
+    /// How many files can be decoded at once.
+    workers: usize,
 }
 
 impl Loader {
@@ -284,7 +286,13 @@ impl Loader {
                 })
                 .expect("failed to spawn decode thread");
         }
-        Self { shared }
+        Self { shared, workers }
+    }
+
+    /// How many files can be decoded at once: how far ahead it is worth
+    /// asking for them.
+    pub fn workers(&self) -> usize {
+        self.workers
     }
 
     /// Turns the terminal report of each finished job on or off.
@@ -389,8 +397,12 @@ impl Loader {
 fn decode_pool() -> &'static rayon::ThreadPool {
     static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     POOL.get_or_init(|| {
+        // A quarter of the cores: the decode threads are each busy with
+        // a file already, and on a machine with few cores more threads
+        // here only take turns with the ones drawing the window.
         // `JOG_SCALE_THREADS` sets how many, for trying things out.
-        let threads = std::env::var("JOG_SCALE_THREADS").ok().and_then(|n| n.parse().ok()).unwrap_or(0);
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let threads = std::env::var("JOG_SCALE_THREADS").ok().and_then(|n| n.parse().ok()).unwrap_or((cores / 4).max(1));
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .thread_name(|index| format!("jog-scale-{index}"))

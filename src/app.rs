@@ -1639,12 +1639,16 @@ impl App {
     /// The images to have decoded around a position in a list: that one,
     /// then its neighbours, favouring the way `forward` says we are
     /// going. Stepping quickly, several are on their way at once, and a
-    /// large file takes a few steps' worth of time to decode.
-    fn around(list: &[usize], pos: usize, forward: bool) -> Vec<usize> {
+    /// large file takes a few steps' worth of time to decode; but only
+    /// as many ahead as there are threads to decode them, or the next
+    /// one waits its turn behind those further on.
+    fn around(list: &[usize], pos: usize, forward: bool, workers: usize) -> Vec<usize> {
         let (len, pos) = (list.len() as i64, pos as i64);
         let dir = if forward { 1 } else { -1 };
+        let ahead = workers.clamp(3, 6) as i64;
+        let offsets = [0, 1, -1, 2, 3, -2].into_iter().chain(4..=ahead).filter(|offset| *offset <= ahead);
         let mut wanted = Vec::new();
-        for offset in [0, 1, -1, 2, 3, -2, 4, 5, 6] {
+        for offset in offsets {
             let id = list[(pos + offset * dir).rem_euclid(len) as usize];
             if !wanted.contains(&id) {
                 wanted.push(id);
@@ -1655,9 +1659,9 @@ impl App {
 
     /// What to ask the loader for before there is a window: the images
     /// around the one to start on, fitted to a screen of `screen`.
-    pub fn first_request(count: usize, start: usize, screen: (u32, u32), enlarge: bool) -> Request {
+    pub fn first_request(count: usize, start: usize, screen: (u32, u32), enlarge: bool, workers: usize) -> Request {
         let list: Vec<usize> = (0..count).collect();
-        Request { wanted: Self::around(&list, start, true), target: screen, enlarge, ..Request::default() }
+        Request { wanted: Self::around(&list, start, true, workers), target: screen, enlarge, ..Request::default() }
     }
 
     /// Tells the loader what is needed around the current position.
@@ -1666,7 +1670,7 @@ impl App {
             return;
         }
         let len = self.list.len() as i64;
-        let wanted = Self::around(&self.list, self.pos, self.forward);
+        let wanted = Self::around(&self.list, self.pos, self.forward, self.loader.workers());
         // Thumbnails are sized for the monitor, like frames, so they survive
         // window resizes; and for the grid's cells, the larger of the two
         // uses, so that the filmstrip and the grid share them.
@@ -9327,6 +9331,19 @@ impl ApplicationHandler<Event> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn images_around_a_position_favour_the_way_we_go_and_the_decode_threads() {
+        let list: Vec<usize> = (0..100).collect();
+        // Few threads: three ahead; many: six, and no further.
+        assert_eq!(App::around(&list, 10, true, 2), [10, 11, 9, 12, 13, 8]);
+        assert_eq!(App::around(&list, 10, true, 4), [10, 11, 9, 12, 13, 8, 14]);
+        assert_eq!(App::around(&list, 10, true, 16), [10, 11, 9, 12, 13, 8, 14, 15, 16]);
+        assert_eq!(App::around(&list, 10, false, 16), [10, 9, 11, 8, 7, 12, 6, 5, 4]);
+        // Round the ends of the list, and with no file asked for twice.
+        assert_eq!(App::around(&list, 99, true, 16), [99, 0, 98, 1, 2, 97, 3, 4, 5]);
+        assert_eq!(App::around(&[7, 8], 0, true, 16), [7, 8]);
+    }
 
     #[test]
     fn text_fields_select_and_edit_by_the_word() {
