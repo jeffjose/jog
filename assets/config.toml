@@ -120,6 +120,12 @@
 #   true    seek to the exact moment asked for, rather than to the nearest
 #           keyframe: slower, more so the larger the video
 
+# Where S saves the frame of a video that is on view, and as what.
+# frame-dir = "~/Pictures/frames"
+#   without it: the output-dir folder, or else beside the video
+# frame-format = "png"
+#   "png"   "jpg"   "webp"
+
 # positions = true
 #   false   start videos from the beginning, and do not remember where
 #           they were left

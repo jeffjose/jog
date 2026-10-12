@@ -2304,10 +2304,11 @@ impl App {
     }
 
     /// The buttons at the right of the seek bar, from the edge inwards:
-    /// looping, and for a video that has them subtitles and audio tracks.
+    /// looping, sound on or off, and for a video that has them subtitles
+    /// and audio tracks.
     fn bar_buttons(&self) -> Vec<Command> {
         let (subtitles, audio) = self.video.as_ref().map_or((0, 0), |video| video.tracks);
-        let mut buttons = vec![Command::CycleLoop];
+        let mut buttons = vec![Command::CycleLoop, Command::ToggleMute];
         if subtitles > 0 {
             buttons.push(Command::CycleSubtitles);
         }
@@ -2949,6 +2950,9 @@ impl App {
             Search | Palette => self.open_palette(),
             Remove => self.remove_current(event_loop),
             Trash => self.trash(event_loop),
+            // Of a video it is the frame on view that is saved; of a picture,
+            // a copy of it.
+            Save if self.video.as_ref().is_some_and(|video| video.showing) => self.save_frame(),
             Save => {
                 let copy = format!("jog_{}_{}", std::process::id(), self.name());
                 if self.dry(|app| vec![format!("save a copy: {} -> {copy}", app.path().display())], "would save a copy") {
@@ -3517,6 +3521,37 @@ impl App {
         true
     }
 
+    /// Saves the frame a video is showing as a picture, at the video's own
+    /// size and without subtitles: named after the video and how far in it
+    /// is, in the folder set for frames, or the one files are copied to,
+    /// or else beside the video.
+    fn save_frame(&mut self) {
+        let Some((position, _)) = self.video_time() else { return };
+        let path = self.path().to_path_buf();
+        let stem = path.file_stem().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
+        let whole = position as u64;
+        let at = format!("{:02}-{:02}-{:02}.{:03}", whole / 3600, whole / 60 % 60, whole % 60, (position.fract() * 1000.0) as u64);
+        let dir = self.options.frame_dir.clone().or_else(|| self.options.output_dir.clone());
+        let dir = dir.or_else(|| path.parent().map(Path::to_path_buf)).unwrap_or_default();
+        let to = dir.join(format!("{stem}_{at}.{}", self.options.frame_format));
+        if self.dry(|_| vec![format!("save the frame: {}", to.display())], "would save the frame") {
+            return;
+        }
+        if let Err(error) = std::fs::create_dir_all(&dir) {
+            return self.toast(format!("Cannot use {}: {error}", dir.display()));
+        }
+        // The player writes it, and says nothing of how that went.
+        let Some(player) = &self.player else { return };
+        player.command(&[b"screenshot-to-file", to.as_os_str().as_encoded_bytes(), b"video"]);
+        match to.exists() {
+            true => {
+                println!("[frame] {}", to.display());
+                self.toast(format!("{}  Saved {}", commands::icons::CAMERA, to.file_name().unwrap_or_default().to_string_lossy()));
+            }
+            false => self.toast(format!("Could not save the frame to {}", to.display())),
+        }
+    }
+
     // ---- Sessions --------------------------------------------------------
 
     /// Keeps what is on view as a session of the folder jog was started
@@ -3820,7 +3855,18 @@ impl App {
         canvas.round_outline(x - 1, y - 1, w + 2, h + 2, round + 1, 1, MENU_EDGE_COLOR);
         // The symbol is what a press does, as on the seek bar.
         let side = unit * 5 / 4;
-        let (button_x, button_y) = (x + w + unit, canvas.height - GridLayout::footer_height(window.1) / 2 - side / 2);
+        // Four buttons in a row: the file before, pause or play, the file
+        // after, and the sound on or off.
+        let slot = |which: i32| x + w + unit + which * (side + unit);
+        let middle = canvas.height - GridLayout::footer_height(window.1) / 2;
+        let (button_x, button_y) = (slot(1), middle - side / 2);
+        let sound = if self.muted { commands::icons::VOLUME_X } else { commands::icons::VOLUME_2 };
+        for (which, icon, command) in [(0, commands::icons::SKIP_BACK, Command::Previous), (2, commands::icons::SKIP_FORWARD, Command::Next), (3, sound, Command::ToggleMute)] {
+            let color = if command == Command::ToggleMute && self.muted { DIM_TEXT_COLOR } else { TEXT_COLOR };
+            let icon_left = slot(which) + (side - text.width(icon, px)) / 2;
+            text.draw(canvas, icon_left, middle - Text::line_height(px) / 2, px, color, icon);
+            self.grid_buttons.push(Button { x: slot(which) - unit / 2, y: button_y - unit / 2, width: side + unit, height: side + unit, command });
+        }
         let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
         match paused {
             true => canvas.play_symbol(button_x, button_y, side, TEXT_COLOR),
@@ -3829,7 +3875,7 @@ impl App {
         self.grid_buttons.push(Button { x: button_x - unit / 2, y: button_y - unit / 2, width: side + unit, height: side + unit, command: Command::PlayPause });
         // Its name and the time, as far as there is room beside what is
         // written in the middle of the line.
-        let left = button_x + side + unit;
+        let left = slot(4);
         let time = self.video_time().map(|(position, length)| format!("{} / {}", clock(position), clock(length))).unwrap_or_default();
         let small = (px * 5 / 6).max(11);
         let line = canvas.height - GridLayout::footer_height(window.1) / 2 - Text::line_height(px) / 2;
@@ -3846,7 +3892,7 @@ impl App {
         self.grid_buttons.push(Button { x: left, y, width: (after - left).max(0), height: h, command: Command::ShowPlaying });
         // How far across it reaches: what is written in the middle of the
         // line starts clear of it.
-        after.max(button_x + side) + unit
+        after.max(slot(3) + side) + unit
     }
 
     // ---- Held keys -----------------------------------------------------
@@ -6836,6 +6882,8 @@ impl App {
                         Looping::File => (commands::icons::REPEAT_1, true),
                         Looping::List => (commands::icons::REPEAT, true),
                     },
+                    Command::ToggleMute if self.muted => (commands::icons::VOLUME_X, false),
+                    Command::ToggleMute => (commands::icons::VOLUME_2, true),
                     Command::CycleSubtitles if self.subtitles => (commands::icons::CAPTIONS, true),
                     Command::CycleSubtitles => (commands::icons::CAPTIONS_OFF, false),
                     _ => (commands::icons::AUDIO_LINES, true),
