@@ -290,7 +290,8 @@ const fn submenu(label: &'static str, sub: &'static [Option<MenuItem>], applies:
     Some(MenuItem { label, keys: icons::CHEVRON_RIGHT, command: Command::ToggleMenu, applies, sub })
 }
 
-/// Icons from Lucide (lucide.dev), which jog carries as a font: each is
+/// Icons from Solar (480 Design), in its line style at a heavier line,
+/// which jog carries as a font made by `tools/solar_font.py`: each is
 /// the letter that font has it at.
 pub mod icons {
     pub const ARROW_RIGHT: &str = "\u{e04d}";

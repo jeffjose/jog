@@ -444,7 +444,7 @@ impl Text {
         if font.is_none() {
             eprintln!("jog: no usable font found, text will not be drawn (set JOG_FONT to a .ttf file)");
         }
-        let icons = load(include_bytes!("../assets/lucide.ttf").to_vec());
+        let icons = load(include_bytes!("../assets/solar.ttf").to_vec());
         Text { font, icons, others: Vec::new(), loading: None, sought: HashSet::new(), glyphs: HashMap::new() }
     }
 
