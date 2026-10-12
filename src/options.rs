@@ -90,6 +90,9 @@ Overlays:
       --draw-exif            show EXIF data
       --draw-actions         show the defined actions
   -t, --filmstrip            keep the filmstrip open
+      --list-right           the file list (p) stands at the right of the window
+      --list-pinned          and beside the picture, which is made smaller for
+                             it, rather than over it (its pin does the same)
   -G, --grid                 start in the grid, with nothing playing
       --no-grid-titles       leave the names out from under the grid's pictures
                              (config: grid-titles = false; i in the grid toggles)
@@ -217,6 +220,10 @@ pub struct Options {
     pub on_last_slide: LastSlide,
     /// Whether the next file comes up when a video ends.
     pub autoplay: bool,
+    /// Whether the file list stands at the right, and beside the picture
+    /// rather than over it.
+    pub list_right: bool,
+    pub list_pinned: bool,
     /// Whether what would change a file or run a command is only said.
     pub dry_run: bool,
     /// Whether seeking lands on the exact moment or the nearest keyframe.
@@ -436,7 +443,7 @@ fn is_switch(name: &str) -> bool {
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked",
-        "debug", "verbose", "watch", "resume", "no-resume", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run",
+        "debug", "verbose", "watch", "resume", "no-resume", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
     switches.contains(&name)
 }
@@ -467,6 +474,8 @@ fn parse_with(
         slideshow_delay: None,
         on_last_slide: LastSlide::Resume,
         autoplay: true,
+        list_right: false,
+        list_pinned: false,
         dry_run: false,
         precise_seeking: false,
         animations: true,
@@ -621,6 +630,8 @@ fn apply(
         "cycle-once" => options.on_last_slide = LastSlide::Quit,
         "autoplay" => options.autoplay = true,
         "no-autoplay" => options.autoplay = false,
+        "list-right" => options.list_right = true,
+        "list-pinned" => options.list_pinned = true,
         "dry-run" => options.dry_run = true,
         "precise-seeking" => options.precise_seeking = true,
         "no-precise-seeking" => options.precise_seeking = false,

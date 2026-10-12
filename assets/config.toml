@@ -140,6 +140,15 @@
 #   "shadow"    a soft shadow under the letters and no edge
 #   "box"       on a dark panel
 
+# ---- The file list --------------------------------------------------
+
+# list-right = false
+#   true    the file list (p) stands at the right of the window
+
+# list-pinned = false
+#   true    it stands beside the picture, which is made smaller for it,
+#           rather than over it
+
 # ---- Slideshow ------------------------------------------------------
 
 # Start a slideshow, each file staying up this many seconds.

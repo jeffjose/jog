@@ -50,7 +50,7 @@ PICKS = {
     "TYPE": "text-bold", "MONITOR_PLAY": "display", "FILE": "file", "STEP_FORWARD": "round-alt-arrow-right",
     "STEP_BACK": "round-alt-arrow-left", "FAST_FORWARD": "rewind-forward", "REWIND": "rewind-back",
     "SKIP_BACK": "skip-previous", "SKIP_FORWARD": "skip-next", "REPLACE": "transfer-horizontal",
-    "LIST_FILTER": "filter", "LIST_X": "filter-close",
+    "LIST_FILTER": "filter", "LIST_X": "filter-close", "PIN": "pin",
 }
 
 EM = 1000

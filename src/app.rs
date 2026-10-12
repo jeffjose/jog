@@ -992,6 +992,11 @@ pub struct App {
     /// just typed into the find box, on its way to being run.
     shell_history: Option<Vec<String>>,
     shell_typed: Option<String>,
+    /// Whether the file list stands at the right of the window, and whether
+    /// it is pinned there: the picture then has what is left beside it,
+    /// where an unpinned list lies over the picture.
+    list_right: bool,
+    list_pinned: bool,
     list_search: Option<TextField>,
     /// The row of the file list picked out with the arrows while searching.
     list_cursor: Option<usize>,
@@ -1418,6 +1423,8 @@ impl App {
             precise: options.precise_seeking,
             shell_history: None,
             shell_typed: None,
+            list_right: options.list_right,
+            list_pinned: options.list_pinned,
             list_search: None,
             list_cursor: None,
             row_target: None,
@@ -1625,7 +1632,7 @@ impl App {
             return false;
         }
         // The loupe shows the picture's own pixels.
-        self.loupe.is_some() || self.view.layout(frame.native, window).width > frame.width
+        self.loupe.is_some() || self.layout_of(frame.native).width > frame.width
     }
 
     /// Syncs the title and displayed frame with the current image.
@@ -1825,7 +1832,8 @@ impl App {
         let (end, buttons) = (width as i32, self.bar_buttons().len() as i32);
         let right = unit * 7 + buttons * unit * 9 / 4;
         // Beside the file list when that is up, not under it.
-        let left = self.list_panel().map_or(0, |panel| panel.width);
+        let left = self.list_panel().filter(|_| !self.list_right).map_or(0, |panel| panel.width);
+        let end = end - self.right_inset();
         SeekBar { x: left + unit * 13, width: (end - left - unit * 13 - right).max(1), middle: base - unit * 2, unit, left, end, buttons }
     }
 
@@ -2611,7 +2619,7 @@ impl App {
         let (zoom, pan) = match native {
             // In its corner of the grid it is simply all there.
             Some(native) if window.0 > 0 && window.1 > 0 && self.grid.is_none() => {
-                let layout = self.view.layout(native, window);
+                let layout = self.layout_of(native);
                 // mpv's zoom is a power of two on top of filling the window.
                 let filling = fit_size(native, window, true);
                 let zoom = (f64::from(layout.width) / f64::from(filling.0)).log2();
@@ -2657,8 +2665,9 @@ impl App {
     /// Zooms around `anchor`, a window position, or the middle of the window.
     fn zoom_by(&mut self, factor: f64, anchor: Option<(f64, f64)>) {
         let Some(native) = self.native() else { return };
-        let window = self.window_size();
-        let anchor = anchor.unwrap_or((f64::from(window.0) / 2.0, f64::from(window.1) / 2.0));
+        // In the part of the window the picture has, and measured from it.
+        let (left, window) = self.stage();
+        let anchor = anchor.map_or((f64::from(window.0) / 2.0, f64::from(window.1) / 2.0), |(x, y)| (x - f64::from(left), y));
         let scale = self.view.scale(native, window) * factor;
         self.view.zoom_to(scale, anchor, native, window);
         self.view_changed();
@@ -2666,13 +2675,12 @@ impl App {
 
     /// Whether the image, as zoomed, has parts off to the side of the window.
     fn wider_than_window(&self) -> bool {
-        let window = self.window_size();
-        self.native().is_some_and(|native| self.view.layout(native, window).width > window.0)
+        self.native().is_some_and(|native| self.layout_of(native).width > self.stage().1 .0)
     }
 
     fn pan(&mut self, dx: f64, dy: f64) {
         let Some(native) = self.native() else { return };
-        self.view.pan(dx, dy, native, self.window_size());
+        self.view.pan(dx, dy, native, self.stage().1);
         self.view_changed();
     }
 
@@ -2824,9 +2832,20 @@ impl App {
             ToggleWatch => self.set_watch(self.watch.is_none()),
             ToggleList => {
                 self.show_list = !self.show_list;
+                self.apply_video_view();
                 self.list_search = None;
             }
             ListSearch => self.focus_list_search(),
+            // The picture has a different part of the window either way,
+            // which a video has to be told of.
+            ListPin => {
+                self.list_pinned = !self.list_pinned;
+                self.apply_video_view();
+            }
+            ListFlip => {
+                self.list_right = !self.list_right;
+                self.apply_video_view();
+            }
             // From the grid, the picture under its cursor; from the file
             // list, the row the menu was brought up on.
             OpenFromGrid | PlayFromGrid if self.grid.is_some() => self.open_from_grid(),
@@ -3054,6 +3073,7 @@ impl App {
             TogglePrecise => self.precise,
             ToggleScenes => self.scenes_on,
             CycleSubtitles => self.subtitles,
+            ListPin => self.list_pinned,
             SortBy(sort) => self.sort == Some(sort),
             ReverseOrder => self.reversed,
             Shuffle => self.shuffled,
@@ -3447,6 +3467,34 @@ impl App {
         true
     }
 
+    // ---- The file list's place ------------------------------------------
+
+    /// The part of the window the picture has: all of it, or, with the
+    /// file list pinned, what that leaves beside it. As where it starts
+    /// from the left, and its size.
+    fn stage(&self) -> (i32, (u32, u32)) {
+        let (width, height) = self.window_size();
+        match self.list_panel().filter(|_| self.list_pinned) {
+            Some(panel) => (if self.list_right { 0 } else { panel.width }, ((width as i32 - panel.width).max(1) as u32, height)),
+            None => (0, (width, height)),
+        }
+    }
+
+    /// Where a picture of this size is in the window: laid out in the
+    /// part of it the picture has.
+    fn layout_of(&self, native: (u32, u32)) -> crate::view::Layout {
+        let (left, size) = self.stage();
+        let mut layout = self.view.layout(native, size);
+        layout.x += left;
+        layout
+    }
+
+    /// How far in from the right edge of the window things there stand:
+    /// by the width of the file list, when that is on the right.
+    fn right_inset(&self) -> i32 {
+        self.list_panel().filter(|_| self.list_right).map_or(0, |panel| panel.width)
+    }
+
     // ---- Shell commands -------------------------------------------------
 
     /// What the find box lists after a `!`: what is typed, to be run as it
@@ -3520,7 +3568,7 @@ impl App {
         let panel = self.list_panel().filter(|_| self.list_searching())?;
         let px = panel.px as i32;
         let side = px * 3 / 2;
-        let right = panel.width - 2 * side - px / 2 - px / 3;
+        let right = panel.width - 4 * side - px / 2 - px;
         Some([px / 2, px / 2, right - px / 2 - px / 3, side])
     }
 
@@ -3787,7 +3835,7 @@ impl App {
         // is, and how many pixels of the glass one of its pixels takes.
         let (source, across, down, at, scale): (Vec<u32>, i32, i32, (f64, f64), f64) = match &frame {
             Some(frame) => {
-                let layout = self.view.layout(frame.native, window);
+                let layout = self.layout_of(frame.native);
                 let shown = f64::from(layout.width) / f64::from(frame.width.max(1));
                 let native = f64::from(frame.native.0.max(1)) / f64::from(frame.width.max(1));
                 let scale = (shown * 2.0).max(native) * strength;
@@ -4445,7 +4493,7 @@ impl App {
         let video = self.video.as_ref().filter(|video| video.showing)?;
         let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map(|(_, frame)| frame.native)?;
         // Only the picture, without the bars beside it.
-        let place = self.view.layout(native, window);
+        let place = self.layout_of(native);
         let (w, h) = (place.width.min(window.0).max(1), place.height.min(window.1).max(1));
         let mut pixels = vec![0; w as usize * h as usize];
         self.player.as_ref()?.render(&mut pixels, w, h).then(|| Arc::new(Frame::still(w, h, native, pixels)))
@@ -4462,14 +4510,14 @@ impl App {
 
     /// The picture growing out of its cell, and where it has got to on its
     /// way to its place in the window; nothing once it is there.
-    fn growing(&mut self, window: (u32, u32)) -> Option<(Arc<Frame>, [i32; 4])> {
+    fn growing(&mut self) -> Option<(Arc<Frame>, [i32; 4])> {
         let grow = self.grow.as_ref().filter(|grow| grow.opening && self.options.animations)?;
         let picture = grow.picture.clone().or_else(|| self.grow_picture(grow.id)).filter(|_| grow.since.elapsed() < GROW && grow.id == self.id());
         let Some(picture) = picture else {
             self.grow = None;
             return None;
         };
-        let full = self.view.layout(picture.native, window);
+        let full = self.layout_of(picture.native);
         let full = [full.x, full.y, full.width as i32, full.height as i32];
         let part = Glide { from: 0.0, to: 1.0, since: grow.since }.part(GROW);
         self.animating.set(true);
@@ -4488,7 +4536,7 @@ impl App {
             return;
         };
         let Some(cell) = self.grid_cell(pos, layout, window) else { return };
-        let full = self.view.layout(frame.native, window);
+        let full = self.layout_of(frame.native);
         let full = [full.x, full.y, full.width as i32, full.height as i32];
         let part = Glide { from: 0.0, to: 1.0, since: grow.since }.part(GROW);
         let [x, y, w, h]: [i32; 4] = std::array::from_fn(|side| (f64::from(full[side]) + f64::from(cell[side] - full[side]) * part).round() as i32);
@@ -5808,7 +5856,8 @@ impl App {
                 *moved = true;
                 let (scale, anchor) = (*start_scale * ((x - *start_x) / 300.0).exp(), *anchor);
                 if let Some(native) = self.native() {
-                    self.view.zoom_to(scale, anchor, native, self.window_size());
+                    let (left, stage) = self.stage();
+                    self.view.zoom_to(scale, (anchor.0 - f64::from(left), anchor.1), native, stage);
                     self.view_changed();
                 }
             }
@@ -5986,11 +6035,13 @@ impl App {
             (MouseButton::Left, true) => {
                 let height = self.window_size().1;
                 let strip = Strip::for_height(height);
-                let panel = self.list_panel().filter(|panel| (x as i32) < panel.width && (y as i32) < panel.bottom);
-                let inside = |b: &Button| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32));
+                let panel = self.list_panel().filter(|panel| panel.holds(x, y));
+                // The file list's own parts are measured from where it stands.
+                let within = x as i32 - self.list_panel().map_or(0, |panel| panel.left);
+                let inside = |b: &Button| (b.x..b.x + b.width).contains(&within) && (b.y..b.y + b.height).contains(&(y as i32));
                 // A click in the search box of the file list puts the
                 // keyboard there, and one anywhere else takes it away.
-                let in_field = self.list_field().is_some_and(|[fx, fy, w, h]| (fx..fx + w).contains(&(x as i32)) && (fy..fy + h).contains(&(y as i32)));
+                let in_field = self.list_field().is_some_and(|[fx, fy, w, h]| (fx..fx + w).contains(&within) && (fy..fy + h).contains(&(y as i32)));
                 if !in_field {
                     self.list_search = None;
                 }
@@ -6056,7 +6107,7 @@ impl App {
             }
             (MouseButton::Middle, true) => {
                 if let Some(native) = self.native() {
-                    let start_scale = self.view.scale(native, self.window_size());
+                    let start_scale = self.view.scale(native, self.stage().1);
                     self.drag = Some(Drag::Zoom { start_x: x, start_scale, anchor: (x, y), moved: false });
                 }
             }
@@ -6125,7 +6176,7 @@ impl App {
         }
         // Over the file list the wheel moves the list, not the file on view.
         let (x, y) = self.mouse;
-        if let Some(panel) = self.list_panel().filter(|panel| (x as i32) < panel.width && (y as i32) < panel.bottom) {
+        if let Some(panel) = self.list_panel().filter(|panel| panel.holds(x, y)) {
             let rows = (lines * 3.0).round() as i64;
             let last = (self.list.len() - panel.rows) as i64;
             let first = (panel.first as i64 - rows).clamp(0, last) as usize;
@@ -6421,7 +6472,7 @@ impl App {
         // Fresh out of the grid, the picture grows from the cell it had
         // there before anything else of it is drawn.
         if self.grid.is_none() {
-            if let Some((picture, [x, y, w, h])) = self.growing(window) {
+            if let Some((picture, [x, y, w, h])) = self.growing() {
                 pixels.fill(self.options.background);
                 Canvas::new(pixels, window.0, window.1).image_fast(&picture, x, y, w, h);
                 self.scene_live = false;
@@ -6466,7 +6517,7 @@ impl App {
                 }
             }
             Some(frame) => {
-                let layout = self.view.layout(frame.native, window);
+                let layout = self.layout_of(frame.native);
                 let shown = self.shown.as_ref().map(|(id, _)| *id);
                 // Big sources are scaled crudely while zooming or panning,
                 // then smoothly once the view has settled.
@@ -6741,7 +6792,9 @@ impl App {
         self.draw_grid_labels(canvas, &mut text, px);
         self.draw_grid_footer(canvas, &mut text, &footer, px);
         // What sits on the left moves over to make room for the file list.
-        let left = margin + panel.as_ref().map_or(0, |panel| panel.width);
+        let left = margin + panel.as_ref().filter(|_| !self.list_right).map_or(0, |panel| panel.width);
+        // What sits on the right moves over likewise when the list is there.
+        let width = width - self.right_inset();
         if let Some(strip) = &scene_strip {
             self.draw_scene_labels(canvas, &mut text, strip, px);
         }
@@ -6754,7 +6807,14 @@ impl App {
             for pos in panel.first..panel.first + panel.rows {
                 self.want_duration(self.list[pos]);
             }
-            self.draw_list(canvas, &mut text, panel);
+            // Drawn as though it stood at the left edge, on a sheet of its
+            // own that starts as what is under it, and laid where it stands.
+            let (across, down) = (panel.width, canvas.height);
+            let mut sheet = canvas.copy(panel.left, 0, across, down);
+            if sheet.len() == (across * down) as usize {
+                self.draw_list(&mut Canvas::new(&mut sheet, across as u32, down as u32), &mut text, panel);
+                canvas.dissolve(panel.left, 0, across, down, &sheet, 256);
+            }
         }
         let below = rich_block(canvas, &mut text, &top_left, px, (left, margin));
         let pointer = (self.mouse.0 as i32, self.mouse.1 as i32);
@@ -7167,10 +7227,9 @@ impl App {
     }
 
     fn info_line(&mut self) -> String {
-        let window = self.window_size();
         let size = self.current_meta().and_then(|meta| meta.size).map(meta::human_size);
         let Some(native) = self.native() else { return size.unwrap_or_default() };
-        let percent = self.view.scale(native, window) * 100.0;
+        let percent = self.view.scale(native, self.stage().1) * 100.0;
         let mut line = format!("{} x {}   {percent:.0}%", native.0, native.1);
         if let Some(size) = size {
             line.push_str(&format!("   {size}"));
@@ -7493,7 +7552,9 @@ impl App {
         let rows = (((bottom - top) / row_height).max(1) as usize).min(self.list.len());
         let scrolled = self.list_scroll.filter(|(pos, len, _)| (*pos, *len) == (self.pos, self.list.len()));
         let first = scrolled.map_or(self.pos.saturating_sub(rows / 2), |(_, _, first)| first).min(self.list.len() - rows);
-        Some(ListPanel { width: (px as i32 * 30).min(width as i32 / 2), bottom, top, row_height, first, rows, px })
+        let panel_width = (px as i32 * 30).min(width as i32 / 2);
+        let left = if self.list_right { width as i32 - panel_width } else { 0 };
+        Some(ListPanel { left, width: panel_width, bottom, top, row_height, first, rows, px })
     }
 
     /// Asks for the length of a video, once; `Event::Duration` brings it.
@@ -7627,7 +7688,7 @@ impl App {
 
     /// The list position of the file-list row at a window position.
     fn list_row_at(&self, x: f64, y: f64) -> Option<usize> {
-        let panel = self.list_panel().filter(|panel| (x as i32) < panel.width && (y as i32) < panel.bottom)?;
+        let panel = self.list_panel().filter(|panel| panel.holds(x, y))?;
         let row = (y as i32 - panel.top).div_euclid(panel.row_height);
         (0..panel.rows as i32).contains(&row).then(|| panel.first + row as usize)
     }
@@ -7645,6 +7706,11 @@ impl App {
         // or, with the list narrowed, the one that widens it again.
         let beside = if self.list_searching() { Command::ShowAllHere } else { Command::ListSearch };
         buttons.push(Button { x: panel.width - 2 * side - px / 2 - px / 3, y: px / 2, width: side, height: side, command: beside });
+        // Then the pin, which stands the list beside the picture and not
+        // over it, and the one that moves it to the other side.
+        for (at, command) in [(2, Command::ListPin), (3, Command::ListFlip)] {
+            buttons.push(Button { x: panel.width - (at + 1) * side - px / 2 - at * px / 3, y: px / 2, width: side, height: side, command });
+        }
         // The orders, sharing the width of the row under the heading.
         let orders = [Command::SortBy(Sort::Name), Command::SortBy(Sort::Newest), Command::SortBy(Sort::Smallest), Command::Shuffle, Command::ReverseOrder];
         let (gap, height) = (px / 3, Text::line_height(panel.px) + px / 4);
@@ -7658,16 +7724,23 @@ impl App {
     /// window position.
     fn list_star_at(&self, x: f64, y: f64) -> Option<usize> {
         let panel = self.list_panel()?;
-        let star = (panel.width - panel.px as i32 * 2..panel.width).contains(&(x as i32));
+        let star = (panel.width - panel.px as i32 * 2..panel.width).contains(&(x as i32 - panel.left));
         self.list_row_at(x, y).filter(|_| star)
     }
 
     fn draw_list(&self, canvas: &mut Canvas, text: &mut Text, panel: &ListPanel) {
         let px = panel.px;
         let pad = px as i32 / 2;
-        let mouse = (self.mouse.0 as i32, self.mouse.1 as i32);
-        canvas.shade(0, 0, panel.width, panel.bottom, 36);
-        canvas.fill(panel.width - 1, 0, 1, panel.bottom, MENU_EDGE_COLOR);
+        // The pointer, as measured from where the list stands.
+        let mouse = (self.mouse.0 as i32 - panel.left, self.mouse.1 as i32);
+        // Pinned, it is beside the picture and has a ground of its own;
+        // otherwise it lies over the picture, which shows through darkly.
+        match self.list_pinned {
+            true => canvas.fill(0, 0, panel.width, panel.bottom, GRID_COLOR),
+            false => canvas.shade(0, 0, panel.width, panel.bottom, 36),
+        }
+        // A line down the side that faces the picture.
+        canvas.fill(if self.list_right { 0 } else { panel.width - 1 }, 0, 1, panel.bottom, MENU_EDGE_COLOR);
 
         // The heading: how many files, and what they are narrowed to, with
         // a cross at its right to close the list. Under it a row of
@@ -7709,7 +7782,7 @@ impl App {
             }
             None => {
                 let heading = format!("{} files", self.list.len());
-                let heading = clipped(text, &heading, panel.width - px as i32 * 6, px);
+                let heading = clipped(text, &heading, panel.width - px as i32 * 10, px);
                 text.draw(canvas, pad * 2, px as i32 * 3 / 4, px, TEXT_COLOR, &heading);
             }
         }
@@ -7717,12 +7790,14 @@ impl App {
         for button in &buttons {
             let over = (button.x..button.x + button.width).contains(&mouse.0) && (button.y..button.y + button.height).contains(&mouse.1);
             let on = self.is_checked(button.command);
-            if matches!(button.command, Command::ToggleList | Command::ListSearch | Command::ShowAllHere) {
+            if matches!(button.command, Command::ToggleList | Command::ListSearch | Command::ShowAllHere | Command::ListPin | Command::ListFlip) {
                 // The cross is a round button, as the grid's is.
-                canvas.round_fill(button.x, button.y, button.width, button.height, button.width / 2, if over { accent() } else { PLACEHOLDER_COLOR }, 256);
+                canvas.round_fill(button.x, button.y, button.width, button.height, button.width / 2, if over || on { accent() } else { PLACEHOLDER_COLOR }, 256);
                 let cross = match button.command {
                     Command::ListSearch => commands::icons::SEARCH,
                     Command::ShowAllHere => commands::icons::LIST_X,
+                    Command::ListPin => commands::icons::PIN,
+                    Command::ListFlip => commands::icons::REPLACE,
                     _ => commands::icons::X,
                 };
                 let inset = ((button.width - text.width(cross, small)) / 2, (button.height - Text::line_height(small)) / 2);
@@ -7864,6 +7939,8 @@ impl PageBar {
 /// The file list's place and what it shows: `rows` names from list
 /// position `first`, each `row_height` tall, starting `top` down.
 struct ListPanel {
+    /// Where it starts from the left of the window.
+    left: i32,
     width: i32,
     bottom: i32,
     top: i32,
@@ -7871,6 +7948,13 @@ struct ListPanel {
     first: usize,
     rows: usize,
     px: u32,
+}
+
+impl ListPanel {
+    /// Whether a window position is on the list.
+    fn holds(&self, x: f64, y: f64) -> bool {
+        (self.left..self.left + self.width).contains(&(x as i32)) && (y as i32) < self.bottom
+    }
 }
 
 /// What to call a file under its picture: its name without the extension.

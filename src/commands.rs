@@ -138,6 +138,10 @@ pub enum Command {
     ShowPlaying,
     /// Type a search into the heading of the file list.
     ListSearch,
+    /// Stand the file list beside the picture, or over it again; and move
+    /// it to the other side of the window.
+    ListPin,
+    ListFlip,
     /// Drop a kept search without going back to where it was begun.
     ShowAllHere,
     /// The go-to box: type part of a name, pick a match, go to it.
@@ -324,6 +328,7 @@ pub mod icons {
     pub const VOLUME_X: &str = "\u{e1ab}";
     pub const REPEAT: &str = "\u{e149}";
     pub const REPEAT_1: &str = "\u{e1fc}";
+    pub const PIN: &str = "\u{f000}";
     pub const CLAPPERBOARD: &str = "\u{e29a}";
     pub const CAPTIONS: &str = "\u{e3a7}";
     pub const CAPTIONS_OFF: &str = "\u{e5c5}";
@@ -417,6 +422,8 @@ pub fn command_icon(command: Command) -> &'static str {
         ClearFilter | ShowAllHere => LIST_X,
         Shell | RunTyped | RunShell(_) | RepeatShell => TERMINAL,
         ListSearch => SEARCH,
+        ListPin => PIN,
+        ListFlip => REPLACE,
         ClearMarks => STAR_OFF,
         Shuffle => SHUFFLE,
         PlayPause => PLAY,
