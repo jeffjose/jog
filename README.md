@@ -14,24 +14,21 @@ jog clip.mp4           # videos play through libmpv
 
 ## Speed
 
-Measured on a 4K display with an i7-12700K, against jog before its
-optimisation pass. Every figure is the same key script run on both
-versions, alternating, on a quiet machine.
+Measured against feh, mpv and VLC on a 4K display (i7-12700K, X11 with
+XFCE), each viewer fullscreen, reading the screen itself to see when the
+picture is there. "Start" is from launching the process to the first
+image on screen; "next" is from the key press to the next image on
+screen, median of 18 presses. Lower is better.
 
-| What | Metric | Before | Now |
-|---|---|---|---|
-| Cold start, 1080p JPEG | process start to first frame | 90 ms | 53 ms |
-| Cold start, 1440p PNG | process start to first frame | 94 ms | 54 ms |
-| Open a folder whose first file is a video | process start to first frame | 585 ms | 194 ms |
-| Step to an image already decoded | key press to frame, median | 18.7 ms | 9.3 ms |
-| Step every 60 ms through fresh files | key press to frame, median | 15.4 ms | 5.8 ms |
-| | key press to frame, p90 | 27.3 ms | 9.7 ms |
-| | key press to frame, worst | 545 ms | 102 ms |
-| Zoom and pan a 32-megapixel photo | redraw while moving | 17.3 ms | 2.6 ms |
-| Grid of thumbnails | redraw while scrolling | 10.7 ms | 8.2 ms |
-| Start a video | file open to first frame | 88 ms | 62 ms |
-| Quit while a video plays | time to exit | ~300 ms | ~70 ms |
+| Image | Metric | jog | feh | mpv | VLC |
+|---|---|---|---|---|---|
+| 1080p JPEG | start | 133 ms | 85 ms | 415 ms | 574 ms |
+| | next | 33 ms | 36 ms | 47 ms | 47 ms |
+| 4K JPEG | start | 121 ms | 142 ms | 441 ms | 577 ms |
+| | next | 34 ms | 69 ms | 67 ms | 64 ms |
+| 24-megapixel JPEG | start | 184 ms | 225 ms | 567 ms | 712 ms |
+| | next | 29 ms | 189 ms | 182 ms | 165 ms |
 
-On a four-core machine the same work gives a 1.3x to 2x speedup
-instead; run with `--debug` to see every decode, frame and wait timed
-on your own.
+The next image takes the same ~30 ms whatever its size, because it was
+decoded while you looked at the last one. Run with `--debug` to see
+every decode, frame and wait timed on your own machine.

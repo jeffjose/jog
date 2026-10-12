@@ -96,8 +96,6 @@ const EASE: Duration = Duration::from_millis(170);
 /// How far into its movement something is shown on the frame it sets out
 /// on: one frame of a display that shows sixty a second.
 const HEAD_START: Duration = Duration::from_millis(16);
-/// How long one picture takes to give way to the next.
-const CROSSFADE: Duration = Duration::from_millis(130);
 /// How long a picture takes to grow out of its cell in the grid, or to
 /// shrink back into it.
 const GROW: Duration = Duration::from_millis(170);
@@ -852,13 +850,10 @@ pub struct App {
     /// what was there before it.
     box_fade: Cell<Glide>,
     fade_buf: Vec<u32>,
-    /// The picture that was on view, which the one now on view takes over
-    /// from gradually: its pixels, whose they were, whether they are what
-    /// the window last showed, and when the change began.
-    scene_was: Vec<u32>,
+    /// Whose picture `scene` holds, and whether it is what the window
+    /// last showed.
     scene_id: Option<usize>,
     scene_live: bool,
-    crossfade: Option<Instant>,
     /// A picture growing out of its cell in the grid or shrinking into it.
     grow: Option<Grow>,
     /// When videos were found to have been watched, for their dots to fade.
@@ -1405,10 +1400,8 @@ impl App {
             row_faded: Cell::new(None),
             box_fade: Cell::new(Glide::at(0.0)),
             fade_buf: Vec::new(),
-            scene_was: Vec::new(),
             scene_id: None,
             scene_live: false,
-            crossfade: None,
             grow: None,
             seen_at: RefCell::new(HashMap::new()),
             anim_due: None,
@@ -7101,13 +7094,6 @@ impl App {
                 let picture = if frame.animation.is_some() { self.picture } else { 0 };
                 let key = SceneKey { frame, picture, layout, smooth, window };
                 if !self.scene_key.as_ref().is_some_and(|current| current.matches(&key)) {
-                    // Another file's picture takes over from the one on
-                    // view gradually: that one is kept to be laid over it.
-                    let another = self.scene_id.is_some() && self.scene_id != shown;
-                    if another && self.scene_live && self.options.animations && self.scene.len() == pixels.len() {
-                        std::mem::swap(&mut self.scene, &mut self.scene_was);
-                        self.crossfade = Some(Instant::now());
-                    }
                     self.scene_id = shown;
                     let started = Instant::now();
                     ui::size_for(&mut self.scene, pixels.len());
@@ -7124,18 +7110,6 @@ impl App {
                     self.repainted.set(true);
                 }
                 ui::copy_into(pixels, &self.scene);
-                // It is well on its way from the first frame, so that
-                // nothing seems to wait.
-                if let Some(since) = self.crossfade {
-                    let part = since.elapsed().as_secs_f64() / CROSSFADE.as_secs_f64();
-                    if part < 1.0 && self.scene_was.len() == pixels.len() {
-                        ui::dissolve_all(pixels, &self.scene_was, ((1.0 - part) * 0.65 * 256.0) as u32);
-                        self.animating.set(true);
-                        self.repainted.set(true);
-                    } else {
-                        self.crossfade = None;
-                    }
-                }
                 self.scene_live = true;
             }
             None => {
@@ -9043,6 +9017,9 @@ impl ApplicationHandler<Event> for App {
         if self.window.is_some() {
             return;
         }
+        if self.options.debug {
+            eprintln!("jog: {:>7.1?} start resumed", self.perf.arrived.elapsed());
+        }
         // Start decoding before the window exists, so the first image is
         // ready by the time the window is mapped.
         let monitor = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next());
@@ -9059,7 +9036,17 @@ impl ApplicationHandler<Event> for App {
             let size = self.options.geometry.unwrap_or(self.monitor);
             attributes = attributes.with_visible(false).with_inner_size(PhysicalSize::new(size.0, size.1));
         } else if self.options.fullscreen {
-            attributes = attributes.with_fullscreen(Some(Fullscreen::Borderless(None)));
+            // Made the size of the screen and marked fullscreen while
+            // still hidden, then shown: the window manager then puts it up
+            // fullscreen in one go. Shown first and marked after, it is
+            // put up at a size of the manager's own, resized to the work
+            // area and only then to the screen, a burst of events that the
+            // first frame has to wait behind.
+            let (width, height) = self.monitor;
+            attributes = attributes
+                .with_visible(false)
+                .with_inner_size(PhysicalSize::new(width.max(1), height.max(1)))
+                .with_fullscreen(Some(Fullscreen::Borderless(None)));
         } else {
             let fallback = (self.monitor.0 * 3 / 5, self.monitor.1 * 3 / 5);
             let (width, height) = self.options.geometry.unwrap_or(fallback);
@@ -9067,12 +9054,27 @@ impl ApplicationHandler<Event> for App {
         }
         let creating = Instant::now();
         let window = Arc::new(event_loop.create_window(attributes).expect("failed to create window"));
+        let created = creating.elapsed();
         window.set_cursor_visible(self.pointer_visible);
+        // The connection the frames go over is set up while the window is
+        // still hidden: its round trips to the display are answered at
+        // once then, rather than behind the window manager's work of
+        // putting the window up.
         let context = Context::new(window.clone()).expect("failed to connect to display");
+        let connected = creating.elapsed();
         self.surface = Some(Surface::new(&context, window.clone()).expect("failed to create surface"));
+        if self.options.fullscreen && self.snapshot.is_none() {
+            crate::x11::mark_fullscreen(&window);
+            window.set_visible(true);
+        }
         self.window = Some(window);
         if self.options.debug {
-            eprintln!("jog: {:>7.1?} start window made, {:.1?} since the loop began", creating.elapsed(), self.perf.arrived.elapsed());
+            eprintln!(
+                "jog: {:>7.1?} start window made ({created:.1?} to create, {:.1?} to connect and show), {:.1?} since the loop began",
+                creating.elapsed(),
+                connected - created,
+                self.perf.arrived.elapsed()
+            );
         }
         // The buffers a frame goes through are given their size now, as
         // pages the system hands out blank, which cost nothing until they
@@ -9080,7 +9082,7 @@ impl ApplicationHandler<Event> for App {
         // to size one row after another they would take this thread
         // tens of milliseconds, just as the first image arrives.
         let (width, height) = self.window_size();
-        for buffer in [&mut self.scene, &mut self.scene_was, &mut self.presented] {
+        for buffer in [&mut self.scene, &mut self.presented] {
             *buffer = ui::blank(width as usize * height as usize);
         }
         self.presented.clear();
@@ -9104,6 +9106,9 @@ impl ApplicationHandler<Event> for App {
         // rather than at the first key press that brings up some text.
         let proxy = self.proxy.clone();
         std::thread::spawn(move || drop(proxy.send_event(Event::Font(Text::load()))));
+        if self.options.debug {
+            eprintln!("jog: {:>7.1?} start resumed done", self.perf.arrived.elapsed());
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
@@ -9213,7 +9218,10 @@ impl ApplicationHandler<Event> for App {
         match event {
             WindowEvent::CloseRequested => self.leave(event_loop),
             WindowEvent::RedrawRequested => self.draw(),
-            WindowEvent::Resized(_) => {
+            WindowEvent::Resized(size) => {
+                if self.options.debug {
+                    eprintln!("jog: window resized to {}x{}", size.width, size.height);
+                }
                 self.update_monitor();
                 self.menu = None;
                 self.request();
@@ -9224,6 +9232,13 @@ impl ApplicationHandler<Event> for App {
             // that was covered may have been uncovered while a frame of
             // this program's own asking was already due, and missed.
             WindowEvent::Focused(true) | WindowEvent::CursorEntered { .. } | WindowEvent::Occluded(false) => {
+                if self.options.debug {
+                    eprintln!("jog: window {}", match event {
+                        WindowEvent::Focused(_) => "focused",
+                        WindowEvent::CursorEntered { .. } => "entered by the pointer",
+                        _ => "uncovered",
+                    });
+                }
                 self.presented.clear();
                 self.redraw();
             }

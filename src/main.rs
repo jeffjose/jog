@@ -24,6 +24,7 @@ mod trailer;
 mod triage;
 mod ui;
 mod view;
+mod x11;
 
 use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
