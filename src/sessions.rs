@@ -14,6 +14,9 @@ const KEPT: usize = 10;
 /// One run of jog, as it stood when it was quit.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Session {
+    /// A short name of its own, made up when it is first kept, by which
+    /// it can be asked for from anywhere.
+    pub id: String,
     /// The folder jog was started in.
     pub cwd: PathBuf,
     /// When it was quit, in seconds since 1970.
@@ -68,14 +71,23 @@ fn render(session: &Session) -> String {
         session.total.to_string(),
         format!("{:.1}", session.seconds),
         paths.join("\u{1f}"),
+        session.id.clone(),
     ];
     parts.join("\t")
 }
 
 fn parse(line: &str) -> Option<Session> {
     let parts: Vec<&str> = line.split('\t').collect();
+    // One kept before sessions had ids has none; it is given one that
+    // comes out the same each time it is read.
+    let (parts, id) = match parts.len() {
+        13 => (&parts[..12], parts[12].to_string()),
+        _ => (&parts[..], String::new()),
+    };
     let [cwd, when, recursive, sort, reverse, filelist, filter, file, pos, total, seconds, paths] = parts[..] else { return None };
+    let id = if id.is_empty() { id_from(when.parse::<u64>().ok()? ^ cwd.len() as u64 * 0x9E37_79B9) } else { id };
     Some(Session {
+        id,
         cwd: cwd.into(),
         when: when.parse().ok()?,
         paths: paths.split('\u{1f}').filter(|path| !path.is_empty()).map(PathBuf::from).collect(),
@@ -108,12 +120,21 @@ pub fn here(cwd: &Path) -> Vec<Session> {
 }
 
 /// Keeps a session, and of those of its folder only the latest few.
-pub fn save(session: Session) {
+pub fn save(mut session: Session) {
     let Some(file) = file() else { return };
     let mut all = load();
     // One of the same things opened takes the place of the one before:
-    // the sessions of a folder are told apart by what they were of.
-    all.retain(|other| !(other.cwd == session.cwd && other.paths == session.paths && other.filelist == session.filelist));
+    // the sessions of a folder are told apart by what they were of. It
+    // keeps that one's id; a new one gets its own.
+    let (cwd, paths, filelist) = (session.cwd.clone(), session.paths.clone(), session.filelist.clone());
+    let same = |other: &Session| other.cwd == cwd && other.paths == paths && other.filelist == filelist;
+    // One picked up by its id is itself again, whatever has changed.
+    let id = session.id.clone();
+    all.retain(|other| id.is_empty() || other.id != id);
+    if session.id.is_empty() {
+        session.id = all.iter().find(|other| same(other)).map_or_else(new_id, |other| other.id.clone());
+    }
+    all.retain(|other| !same(other));
     all.push(session.clone());
     let mut of_folder = all.iter().filter(|other| other.cwd == session.cwd).count();
     all.retain(|other| {
@@ -131,6 +152,40 @@ pub fn save(session: Session) {
     if let Err(error) = written {
         eprintln!("jog: cannot keep this session in {}: {error}", file.display());
     }
+}
+
+/// The letters an id is made of: ones that are easy to type and to say.
+const LETTERS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+/// How many of them an id has.
+const ID_LENGTH: usize = 8;
+
+/// An id spelt out from a number, the same for the same number.
+fn id_from(mut number: u64) -> String {
+    let mut id = String::new();
+    for _ in 0..ID_LENGTH {
+        // Stirred between letters, so that numbers close together do
+        // not come out as ids that are.
+        number = number.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        id.push(LETTERS[(number >> 33) as usize % LETTERS.len()] as char);
+    }
+    id
+}
+
+/// A new id, as good as certain to be no other session's.
+fn new_id() -> String {
+    let clock = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_nanos() as u64);
+    id_from(clock ^ u64::from(std::process::id()) << 32)
+}
+
+/// The session with this id, or the one whose id begins with it when
+/// there is only one such, whichever folder it is of.
+pub fn by_id(id: &str) -> Option<Session> {
+    let all = load();
+    let exact = all.iter().find(|session| session.id == id).cloned();
+    exact.or_else(|| {
+        let mut starting = all.iter().filter(|session| id.len() >= 3 && session.id.starts_with(id));
+        starting.next().filter(|_| starting.next().is_none()).cloned()
+    })
 }
 
 pub fn now() -> u64 {
@@ -158,7 +213,7 @@ pub fn title(session: &Session) -> String {
 /// through, and the file.
 pub fn caption(session: &Session) -> String {
     let name = session.file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    format!("{}   {} of {}   {name}", ago(session), session.pos + 1, session.total)
+    format!("{}   {} of {}   {name}   {}", ago(session), session.pos + 1, session.total, session.id)
 }
 
 /// A session in a line: when, what was opened, how far through, and the
@@ -166,7 +221,7 @@ pub fn caption(session: &Session) -> String {
 pub fn describe(session: &Session) -> String {
     let opened: Vec<String> = session.paths.iter().map(|path| path.to_string_lossy().into_owned()).collect();
     let name = session.file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut line = format!("{:<11} {}   {} of {}   {name}", ago(session), opened.join(" "), session.pos + 1, session.total);
+    let mut line = format!("{}  {:<11} {}   {} of {}   {name}", session.id, ago(session), opened.join(" "), session.pos + 1, session.total);
     if session.seconds >= 1.0 {
         let whole = session.seconds as u64;
         line.push_str(&format!(" at {}:{:02}", whole / 60, whole % 60));
@@ -183,6 +238,7 @@ mod tests {
 
     fn session(cwd: &str, when: u64) -> Session {
         Session {
+            id: "k3x9q2ab".to_string(),
             cwd: cwd.into(),
             when,
             paths: vec!["/clips".into(), "/more clips".into()],
@@ -210,7 +266,7 @@ mod tests {
     #[test]
     fn a_session_is_told_in_a_line() {
         let told = describe(&session("/home/me", now()));
-        assert!(told.starts_with("just now"), "{told}");
+        assert!(told.starts_with("k3x9q2ab  just now"), "{told}");
         assert!(told.contains("23 of 300") && told.contains("a b.mp4 at 12:03") && told.contains("narrowed to \"pix #video\""), "{told}");
     }
 }

@@ -75,7 +75,11 @@ Slideshow and actions:
                              several to choose from they are shown, to be
                              picked with the arrows or a click
       --latest               with --resume, the latest of them, unasked
-      --sessions             list this folder's sessions here, and quit
+      --resume ID            the session with that id, whichever folder it is
+                             of; the start of an id will do when it is enough
+                             to tell it by
+      --sessions             list this folder's sessions here, each with its id,
+                             and quit
 
       --precise-seeking      seek to the exact moment asked for. The usual is
                              the nearest keyframe, which is much quicker and
@@ -278,6 +282,8 @@ pub struct Options {
     pub list_sessions: bool,
     pub sessions: Vec<crate::sessions::Session>,
     pub begin_at: Option<f64>,
+    /// The id of the session picked up, which it keeps when kept again.
+    pub session_id: Option<String>,
 }
 
 /// A folder with a name, to switch to by it. It may say how it is to be
@@ -522,6 +528,7 @@ fn parse_with(
         list_sessions: false,
         sessions: Vec::new(),
         begin_at: None,
+        session_id: None,
     };
     let mut fullscreen = None;
     if let Some((path, text)) = config {

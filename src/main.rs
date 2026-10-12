@@ -50,9 +50,21 @@ fn main() -> ExitCode {
 
     // The sessions of the folder jog is started in: to be listed, or one
     // of them picked up in place of what was named to open.
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut cwd = std::env::current_dir().unwrap_or_default();
     if options.list_sessions || options.session {
-        let found = sessions::here(&cwd);
+        // One asked for by its id is that one, whichever folder it is of:
+        // a single word after --resume that is no file or folder.
+        let asked: Option<String> = match options.paths.as_slice() {
+            [only] if options.session && !only.exists() => Some(only.to_string_lossy().into_owned()),
+            _ => None,
+        };
+        let by_id = asked.as_deref().map(sessions::by_id);
+        if let Some(None) = by_id {
+            eprintln!("jog: there is no session with the id {}", asked.unwrap_or_default());
+            return ExitCode::FAILURE;
+        }
+        let named = by_id.flatten();
+        let found = named.clone().map_or_else(|| sessions::here(&cwd), |session| vec![session]);
         if options.list_sessions {
             match found.is_empty() {
                 true => println!("No sessions in {}", cwd.display()),
@@ -74,6 +86,10 @@ fn main() -> ExitCode {
         options.listing.start_at = Some(latest.file.clone());
         options.filter = latest.filter.clone();
         options.begin_at = Some(latest.seconds).filter(|seconds| *seconds >= 1.0);
+        // It stays the session it was, of the folder it was of, when it
+        // is kept again on quitting.
+        options.session_id = Some(latest.id.clone());
+        cwd = latest.cwd.clone();
         if !options.latest && found.len() > 1 {
             options.sessions = found;
         }

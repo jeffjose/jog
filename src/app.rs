@@ -687,6 +687,9 @@ struct PaletteLayout {
 /// Where a session was left: the file, how far into it for a video, and
 /// the search the list was narrowed to.
 struct Spot {
+    /// Which session it is, and the folder it is of.
+    id: String,
+    cwd: PathBuf,
     file: PathBuf,
     seconds: f64,
     filter: Option<String>,
@@ -1345,7 +1348,7 @@ impl App {
                 saved: false,
                 kept: None,
                 asked: false,
-                spot: Some(Spot { file: session.file.clone(), seconds: session.seconds, filter: session.filter.clone() }),
+                spot: Some(Spot { id: session.id.clone(), cwd: session.cwd.clone(), file: session.file.clone(), seconds: session.seconds, filter: session.filter.clone() }),
             }));
         }
         App {
@@ -3525,6 +3528,8 @@ impl App {
         let full = |path: &PathBuf| std::path::absolute(path).unwrap_or_else(|_| path.clone());
         let listing = &self.options.listing;
         sessions::save(Session {
+            // Its own if it was picked up; otherwise given by the keeping.
+            id: self.options.session_id.clone().unwrap_or_default(),
             cwd: self.cwd.clone(),
             when: sessions::now(),
             paths: self.options.paths.iter().map(full).collect(),
@@ -3550,6 +3555,8 @@ impl App {
     /// just been listed for it: narrowed as it was, and for a video as
     /// far in.
     fn take_up(&mut self, spot: Spot) {
+        // From here on it is this session that is on view, and kept.
+        (self.options.session_id, self.cwd) = (Some(spot.id.clone()), spot.cwd.clone());
         if let Some(typed) = &spot.filter {
             self.start_filter(typed);
         }
