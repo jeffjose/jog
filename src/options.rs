@@ -34,8 +34,8 @@ Zoom:
 
 File list:
   -r, --recursive            descend into directories
-  -S, --sort ORDER           name, filename, dirname, newest, oldest,
-                             largest or smallest
+  -S, --sort ORDER           name, filename, dirname, newest (or latest),
+                             oldest, largest or smallest
   -n, --reverse              reverse the order
   -z, --randomize            shuffle the list
       --start-at FILE        start at this file
@@ -893,11 +893,11 @@ fn parse_sort(text: &str) -> Result<Sort, String> {
         "name" => Sort::Name,
         "filename" => Sort::Filename,
         "dirname" => Sort::Dirname,
-        "newest" => Sort::Newest,
+        "newest" | "latest" => Sort::Newest,
         "oldest" => Sort::Oldest,
         "largest" => Sort::Largest,
         "smallest" => Sort::Smallest,
-        other => return Err(format!("invalid sort order '{other}', expected name, filename, dirname, newest, oldest, largest or smallest")),
+        other => return Err(format!("invalid sort order '{other}', expected name, filename, dirname, newest (or latest), oldest, largest or smallest")),
     })
 }
 
@@ -990,6 +990,9 @@ mod tests {
         assert!(!parse_args(&["--no-auto-zoom"]).unwrap().auto_zoom);
         assert_eq!(options.slideshow_delay, Some(2.5));
         assert_eq!(options.listing.sort, Some(Sort::Newest));
+        // The latest first is the newest first, by either word.
+        assert_eq!(parse_args(&["--sort=latest"]).unwrap().listing.sort, Some(Sort::Newest));
+        assert_eq!(parse_args(&["--sort", "newest"]).unwrap().listing.sort, Some(Sort::Newest));
         assert_eq!(options.paths, [PathBuf::from("a.jpg"), PathBuf::from("dir")]);
 
         let options = parse_args(&["-o", "/keep", "--print-marked"]).unwrap();
