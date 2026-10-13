@@ -1937,13 +1937,20 @@ impl App {
         };
         // A request that never produced a frame must not block the rest.
         let busy = self.preview_busy.is_some_and(|since| since.elapsed() < PREVIEW_TIMEOUT);
-        if busy || self.preview_sent == Some(want) {
+        if busy {
             return;
         }
+        // Another video than the one it has open: that one is opened, and
+        // the spot is asked for afresh even if it is the same time along
+        // as the last one asked of the video before.
         if self.preview_id != Some(video.id) {
             preview.open(&self.files[video.id]);
             self.preview_id = Some(video.id);
             self.preview_frame = None;
+            self.preview_sent = None;
+        }
+        if self.preview_sent == Some(want) {
+            return;
         }
         // The nearest keyframe is close enough, and much quicker to reach.
         preview.command_later(&[b"seek", want.to_string().as_bytes(), b"absolute+keyframes"]);
@@ -7529,6 +7536,13 @@ impl App {
                 canvas.fill(at - 1, top - unit / 3, 2, thickness + unit * 2 / 3, MARK_COLOR);
                 let label_top = bar.middle - unit * 2 - line / 2;
                 labels.push((at.clamp(unit * 4, width - unit * 4), label_top, Ordering::Equal, clock(fraction * length)));
+                // The video has changed under a pointer that has not moved:
+                // the frame kept is of the one before, and is not shown;
+                // the one for this video is asked for.
+                if self.preview_id != self.video.as_ref().map(|video| video.id) {
+                    self.preview_frame = None;
+                    self.request_preview(fraction);
+                }
                 if let Some(frame) = &self.preview_frame {
                     let (w, h) = (frame.width as i32, frame.height as i32);
                     let left = (at - w / 2).clamp(unit, (width - unit - w).max(unit));
