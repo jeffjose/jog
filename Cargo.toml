@@ -3,6 +3,7 @@ name = "jog"
 version = "0.1.0"
 edition = "2021"
 description = "An extremely fast, lightweight image viewer"
+license = "MIT"
 
 [dependencies]
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
