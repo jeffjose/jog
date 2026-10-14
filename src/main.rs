@@ -5,6 +5,7 @@ mod decode;
 mod files;
 mod frame;
 mod heif;
+mod hdrmeta;
 mod history;
 mod loader;
 mod meta;
@@ -189,4 +190,31 @@ fn main() -> ExitCode {
     // file takes it half a second, with the window standing meanwhile.
     let _ = std::io::Write::flush(&mut std::io::stdout());
     std::process::exit(0)
+}
+
+#[cfg(test)]
+mod hdrmeta_samples {
+    /// Reads every sample in a folder named by `JOG_HDR_SAMPLES`, when set,
+    /// and prints what was found: a check against real files, kept out of
+    /// the ordinary run of the tests.
+    #[test]
+    fn samples() {
+        let Some(folder) = std::env::var_os("JOG_HDR_SAMPLES") else { return };
+        let mut paths: Vec<_> = std::fs::read_dir(folder).unwrap().filter_map(|entry| Some(entry.ok()?.path())).collect();
+        paths.sort();
+        for path in paths {
+            let Some(info) = crate::hdrmeta::read(&path) else { continue };
+            let first = info.agtm.first().map(|t| (t.value.baseline, t.value.altr.iter().map(|a| a.headroom).collect::<Vec<_>>()));
+            println!(
+                "{:<46} {:?} agtm={} hdr10+={} {:?} first={:?} hdr10+target={:?}",
+                path.file_name().unwrap().to_string_lossy(),
+                info.badges(),
+                info.agtm.len(),
+                info.hdr10plus.len(),
+                info.carried,
+                first,
+                info.hdr10plus.first().map(|t| t.value.target)
+            );
+        }
+    }
 }

@@ -21,6 +21,7 @@ use crate::commands::{self, Applies, Command, MenuItem};
 use crate::convert::{self, Format};
 use crate::scopes;
 use crate::ultrahdr::{self, Hdr};
+use crate::hdrmeta;
 use crate::files::{self, Sort};
 use crate::frame::{fit_size, Frame, Transform};
 use crate::loader::{Job, Loader, Request};
@@ -204,6 +205,8 @@ pub enum Event {
     Trailer(Note),
     /// The files of a workspace not yet gone to, listed for the overview.
     SpaceListed(usize, Vec<PathBuf>),
+    /// What a video says about its HDR, read on another thread.
+    HdrInfo(usize, Option<Arc<hdrmeta::Info>>),
 }
 
 /// A file operation that `u` can take back.
@@ -986,6 +989,11 @@ pub struct App {
     /// been found to be such photos.
     hdr: Hdr,
     ultra_hdr: RefCell<HashMap<usize, bool>>,
+    /// What each video says about its HDR, once read: `None` while it
+    /// is being read. And the headroom, in stops, its curves are drawn
+    /// for: none, for this screen.
+    hdr_infos: HashMap<usize, Option<Arc<hdrmeta::Info>>>,
+    hdr_headroom: f64,
     scope_counts: scopes::Measured,
     scope_cost: Duration,
     perf: Perf,
@@ -1510,6 +1518,8 @@ impl App {
             scope_log: true,
             hdr: options.hdr,
             ultra_hdr: RefCell::new(HashMap::new()),
+            hdr_infos: HashMap::new(),
+            hdr_headroom: 0.0,
             scope_counts: scopes::Measured::default(),
             scope_cost: Duration::ZERO,
             perf: Perf::new(),
@@ -3096,6 +3106,9 @@ impl App {
                 }
             }
             ScopeLog => self.scope_log = !self.scope_log,
+            HdrHeadroom(up) => {
+                self.hdr_headroom = (self.hdr_headroom + if up { 0.25 } else { -0.25 }).clamp(0.0, 6.0);
+            }
             CycleHdr => {
                 self.hdr = self.hdr.next();
                 self.request();
@@ -3947,7 +3960,7 @@ impl App {
     /// overlay: a row of buttons to choose them and how they count, then
     /// each one chosen under its name, then how much of the picture is
     /// at pure black and at pure white. Gives back where the buttons went.
-    fn draw_scopes(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32, at: (i32, i32), pointer: (i32, i32)) -> Vec<Button> {
+    fn draw_scopes(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32, at: (i32, i32), pointer: (i32, i32)) -> (Vec<Button>, i32) {
         let small = (px * 5 / 6).max(11);
         let (pad, row) = (px as i32, Text::line_height(small) + px as i32 / 6);
         let button_height = row + pad / 3;
@@ -4018,6 +4031,112 @@ impl App {
         for (words, warn) in [("clipped   black ".to_string(), false), (format!("{black:.1}%"), black > 2.0), ("   white ".to_string(), false), (format!("{white:.1}%"), white > 2.0)] {
             text.draw(canvas, words_left, top, small, if warn { MARK_COLOR } else if words.ends_with('%') { TEXT_COLOR } else { DIM_TEXT_COLOR }, &words);
             words_left += text.width(&words, small);
+        }
+        (drawn, y + height + pad / 2)
+    }
+
+    /// A video's HDR, on a panel under the other debug panels: what it is
+    /// and how its metadata is carried, the figures of the frame on view,
+    /// and its curves. The 2094-50 ones as hdr-explorer draws them: input
+    /// and output as multiples of the reference white, the stored curves
+    /// in grey, and in green the curve for the headroom chosen with the
+    /// buttons, a dashed line at its peak. Beside them the HDR10+ curve,
+    /// as fractions of the scene's brightest and of the screen's peak.
+    fn draw_hdr(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32, at: (i32, i32), pointer: (i32, i32)) -> Vec<Button> {
+        let Some(info) = self.hdr_info() else { return Vec::new() };
+        let badges = self.hdr_badges();
+        if badges.is_empty() && !info.is_hdr() {
+            return Vec::new();
+        }
+        let seconds = self.video_time().map_or(0.0, |(position, _)| position);
+        let (agtm, plus) = (info.agtm_at(seconds), info.hdr10plus_at(seconds));
+        let small = (px * 5 / 6).max(11);
+        let (pad, row) = (px as i32, Text::line_height(small) + px as i32 / 6);
+        let side = px as i32 * 13;
+
+        // The words: what it is, how it is carried, the figures.
+        let mut lines: Vec<(String, u32)> = Vec::new();
+        for (what, how) in &info.carried {
+            lines.push((format!("{what} in {how}"), DIM_TEXT_COLOR));
+        }
+        if let Some((peak, floor)) = info.mastering {
+            lines.push((format!("Mastering display {peak:.0} nits, black {floor:.4}"), DIM_TEXT_COLOR));
+        }
+        if let Some((cll, fall)) = info.light {
+            lines.push((format!("MaxCLL {cll} nits, MaxFALL {fall} nits"), DIM_TEXT_COLOR));
+        }
+        if let Some(agtm) = agtm {
+            let heads: Vec<String> = agtm.altr.iter().map(|altr| format!("{:.2}", altr.headroom)).collect();
+            lines.push((format!("2094-50  graded for {:.2} stops, white {:.0} nits, curves at {} stops", agtm.baseline, agtm.reference_white, heads.join(", ")), TEXT_COLOR));
+        }
+        if let Some(plus) = plus {
+            let [r, g, b] = plus.maxscl;
+            lines.push((format!("HDR10+  for a {:.0}-nit screen, brightest {r:.0} / {g:.0} / {b:.0} nits, mean {:.0}", plus.target, plus.average), TEXT_COLOR));
+        }
+        let graphs = usize::from(agtm.is_some()) + usize::from(plus.is_some());
+        let words = lines.iter().map(|(line, _)| text.width(line, small)).max().unwrap_or(0);
+        let width = words.max(graphs as i32 * (side + pad) - pad).max(px as i32 * 16) + 2 * pad;
+        let graph_rows = if graphs > 0 { row + side + row + pad / 2 } else { 0 };
+        let controls = if agtm.is_some() { row + pad / 3 + pad / 2 } else { 0 };
+        let height = pad + row + lines.len() as i32 * row + pad / 2 + controls + graph_rows + pad / 2;
+        let (x, y) = at;
+        canvas.round_fill(x, y, width, height, pad / 2, 0x000000, 190);
+        canvas.round_outline(x, y, width, height, pad / 2, 1, MENU_EDGE_COLOR);
+
+        // A heading with the badges.
+        let mut left = x + pad;
+        text.draw(canvas, left, y + pad, small, accent_soft(), "HDR");
+        left += text.width("HDR", small);
+        for name in &badges {
+            let (run, color) = badge(name);
+            left += draw_run(canvas, text, left, y + pad, small, color, &run);
+        }
+        let mut top = y + pad + row;
+        for (line, color) in &lines {
+            text.draw(canvas, x + pad, top, small, *color, line);
+            top += row;
+        }
+        top += pad / 2;
+
+        // The headroom the 2094-50 curve is for, with buttons to move it.
+        let mut drawn = Vec::new();
+        if agtm.is_some() {
+            let button_height = row + pad / 3;
+            let mut left = x + pad;
+            for (label, up) in [("−", false), ("+", true)] {
+                let button_width = text.width(label, small) + pad;
+                let over = (left..left + button_width).contains(&pointer.0) && (top..top + button_height).contains(&pointer.1);
+                canvas.round_fill(left, top, button_width, button_height, pad / 3, if over { accent() } else { PLACEHOLDER_COLOR }, 256);
+                canvas.round_outline(left, top, button_width, button_height, pad / 3, 1, if over { accent() } else { MENU_EDGE_COLOR });
+                text.draw(canvas, left + pad / 2, top + (button_height - Text::line_height(small)) / 2, small, if over { on_accent() } else { TEXT_COLOR }, label);
+                drawn.push(Button { x: left, y: top, width: button_width, height: button_height, command: Command::HdrHeadroom(up) });
+                left += button_width + pad / 3;
+            }
+            let what = if self.hdr_headroom == 0.0 { " (SDR, as this screen)".to_string() } else { format!(" ({:.0} times SDR white)", self.hdr_headroom.exp2()) };
+            text.draw(canvas, left + pad / 2, top + (button_height - Text::line_height(small)) / 2, small, TEXT_COLOR, &format!("Headroom {:.2} stops{what}", self.hdr_headroom));
+            top += button_height + pad / 2;
+        }
+
+        let mut left = x + pad;
+        let place = |left: i32| [left, top + row, side, side];
+        if let Some(agtm) = agtm {
+            let headroom = self.hdr_headroom;
+            let most = agtm.altr.iter().map(|altr| altr.headroom).fold(agtm.baseline, f64::max).max(headroom);
+            let range = most.exp2().ceil().max(2.0);
+            text.draw(canvas, left, top, small, DIM_TEXT_COLOR, &format!("2094-50, 0 to {range:.0} times white"));
+            let mut lines: Vec<(Box<dyn Fn(f64) -> f64 + '_>, u32, bool)> = vec![(Box::new(|x| x), 0x6A6A6A, true)];
+            for altr in &agtm.altr {
+                lines.push((Box::new(move |x| hdrmeta::Agtm::output(altr, x)), 0x9A9A9A, false));
+            }
+            lines.push((Box::new(move |_| headroom.exp2()), 0x3DD68C, true));
+            lines.push((Box::new(move |x| agtm.output_at(headroom, x)), 0x3DD68C, false));
+            plot(canvas, place(left), (range, range), 1.0, &lines);
+            left += side + pad;
+        }
+        if let Some(plus) = plus {
+            text.draw(canvas, left, top, small, DIM_TEXT_COLOR, &format!("HDR10+, for {:.0} nits", plus.target));
+            let lines: Vec<(Box<dyn Fn(f64) -> f64 + '_>, u32, bool)> = vec![(Box::new(|x| x), 0x6A6A6A, true), (Box::new(move |x| plus.tone(x)), 0xB48CF0, false)];
+            plot(canvas, place(left), (1.0, 1.0), 0.25, &lines);
         }
         drawn
     }
@@ -4576,6 +4695,51 @@ impl App {
 
     /// Asks for a frame from each of the equal parts of the video on view,
     /// once it is showing and unless they have been asked for before.
+    /// What the video on view says about its HDR, read on another thread
+    /// the first time it is asked for: `None` until then, and for a file
+    /// that says nothing.
+    fn hdr_info(&mut self) -> Option<Arc<hdrmeta::Info>> {
+        let id = self.video.as_ref().map(|video| video.id)?;
+        if let Some(known) = self.hdr_infos.get(&id) {
+            return known.clone();
+        }
+        self.hdr_infos.insert(id, None);
+        let (path, proxy) = (self.files[id].clone(), self.proxy.clone());
+        std::thread::spawn(move || {
+            let info = hdrmeta::read(&path).map(Arc::new);
+            let _ = proxy.send_event(Event::HdrInfo(id, info));
+        });
+        None
+    }
+
+    /// Badges for what a video is: from the file, and from the player for
+    /// what the file does not say, as an HEVC one keeps its colour inside
+    /// the stream.
+    fn hdr_badges(&mut self) -> Vec<String> {
+        let info = self.hdr_info();
+        let mut badges = info.as_ref().map(|info| info.badges()).unwrap_or_default();
+        let known = info.as_ref().is_some_and(|info| info.transfer.is_some());
+        if !known {
+            let gamma = self.player.as_ref().and_then(|player| player.text("video-params/gamma"));
+            let named = match gamma.as_deref() {
+                Some("pq") => Some("PQ"),
+                Some("hlg") => Some("HLG"),
+                _ => None,
+            };
+            let plus = info.as_ref().is_some_and(|info| !info.hdr10plus.is_empty());
+            match named {
+                Some("PQ") if plus => badges.insert(0, "HDR10+".to_string()),
+                Some(name) => badges.insert(0, name.to_string()),
+                None => {}
+            }
+            let bt2020 = self.player.as_ref().and_then(|player| player.text("video-params/primaries")).as_deref() == Some("bt.2020");
+            if bt2020 && !badges.iter().any(|badge| badge == "BT.2020") {
+                badges.push("BT.2020".to_string());
+            }
+        }
+        badges
+    }
+
     fn want_scenes(&mut self) {
         let Some(id) = self.video.as_ref().filter(|video| video.showing).map(|video| video.id) else { return };
         if self.scenes.contains_key(&id) {
@@ -7563,7 +7727,23 @@ impl App {
                 line.insert(0, (format!("@{}   ", self.spaces[self.space].name), soft));
             }
             top_left.push(line);
-            top_left.push(vec![(self.info_line(), dim)]);
+            // After the size, badges for what the picture is: an Ultra HDR
+            // photo with the rendition on view, a video's HDR formats.
+            let mut details = vec![(self.info_line(), dim)];
+            let mut badges: Vec<String> = Vec::new();
+            if self.video.is_some() {
+                badges = self.hdr_badges();
+            } else if self.is_ultra_hdr(self.id()) {
+                badges.push("Ultra HDR".to_string());
+            }
+            for name in &badges {
+                details.push(("  ".to_string(), dim));
+                details.push(badge(name));
+            }
+            if badges.first().is_some_and(|name| name == "Ultra HDR") {
+                details.push((format!(" {}", self.hdr.name()), soft));
+            }
+            top_left.push(details);
             if let Some((position, length)) = self.video_time() {
                 let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
                 let sign = if paused { commands::icons::PAUSE } else { commands::icons::PLAY };
@@ -7759,11 +7939,18 @@ impl App {
         let (debug_buttons, debug_bottom) = draw_debug(canvas, &mut text, &debug, px, (left, below), &mut self.debug_keep, pointer);
         self.debug_buttons = debug_buttons;
         self.debug_last = debug;
+        let mut below_debug = debug_bottom;
         if graphing {
             let drawing = Instant::now();
-            let graph_buttons = self.draw_scopes(canvas, &mut text, px, (left, debug_bottom), pointer);
+            let (graph_buttons, graphs_bottom) = self.draw_scopes(canvas, &mut text, px, (left, debug_bottom), pointer);
             self.debug_buttons.extend(graph_buttons);
             self.scope_cost = graph_cost + drawing.elapsed();
+            below_debug = graphs_bottom;
+        }
+        // Under them, a video's HDR: its formats and its curves.
+        if viewing && self.show_debug && self.video.is_some() {
+            let hdr_buttons = self.draw_hdr(canvas, &mut text, px, (left, below_debug), pointer);
+            self.debug_buttons.extend(hdr_buttons);
         }
         text_block(canvas, &mut text, &exif, px, |_, h| (left, bottom - h));
         text_block(canvas, &mut text, &actions, px, |w, h| (width - margin - w, bottom - h));
@@ -8220,13 +8407,9 @@ impl App {
         let size = self.current_meta().and_then(|meta| meta.size).map(meta::human_size);
         let Some(native) = self.native() else { return size.unwrap_or_default() };
         let percent = self.view.scale(native, self.stage().1) * 100.0;
-        let mut line: String = format!("{} x {}   {percent:.0}%", native.0, native.1);
+        let mut line = format!("{} x {}   {percent:.0}%", native.0, native.1);
         if let Some(size) = size {
             line.push_str(&format!("   {size}"));
-        }
-        // An Ultra HDR photo says so, and which rendition is on view.
-        if self.is_ultra_hdr(self.id()) {
-            line.push_str(&format!("   Ultra HDR: {}", self.hdr.name()));
         }
         line
     }
@@ -9042,6 +9225,90 @@ fn panel(canvas: &mut Canvas, x: i32, y: i32, width: i32, height: i32, radius: i
     canvas.round_outline(x, y, width, height, radius, 1, MENU_EDGE_COLOR);
 }
 
+/// Begins a run of words that is drawn as a badge: small, on a rounded
+/// ground of the run's colour.
+const BADGE: char = '\u{1}';
+
+/// The colour of a badge for what a picture or video is.
+fn badge_color(name: &str) -> u32 {
+    match name {
+        "HDR10+" => 0x8E5BD6,
+        "2094-50" => 0x2FA36B,
+        "HLG" => 0xD9822B,
+        "HDR10" | "PQ" => 0x3E7BD6,
+        "Ultra HDR" => 0xC9A227,
+        _ => 0x6A6A6A,
+    }
+}
+
+/// A run for a badge with this name.
+fn badge(name: &str) -> (String, u32) {
+    (format!("{BADGE}{name}"), badge_color(name))
+}
+
+/// How wide a run is drawn: a badge with its ground and the gap after it.
+fn run_width(text: &mut Text, run: &str, px: u32) -> i32 {
+    match run.strip_prefix(BADGE) {
+        Some(name) => text.width(name, (px * 4 / 5).max(10)) + px as i32 * 3 / 2,
+        None => text.width(run, px),
+    }
+}
+
+/// Draws a run, a badge as one; gives back how wide it was.
+fn draw_run(canvas: &mut Canvas, text: &mut Text, x: i32, y: i32, px: u32, color: u32, run: &str) -> i32 {
+    let Some(name) = run.strip_prefix(BADGE) else {
+        text.draw(canvas, x, y, px, color, run);
+        return text.width(run, px);
+    };
+    let small = (px * 4 / 5).max(10);
+    let (pad, line) = (px as i32 / 2, Text::line_height(px));
+    let (w, h) = (text.width(name, small) + pad, Text::line_height(small) + pad / 3);
+    let top = y + (line - h) / 2;
+    canvas.round_fill(x + pad / 2, top, w, h, h / 3, color, 200);
+    text.draw(canvas, x + pad, top + (h - Text::line_height(small)) / 2, small, TEXT_COLOR, name);
+    run_width(text, run, px)
+}
+
+/// Draws lines of a function each on a small graph: a dark square with a
+/// faint grid every `tick`, the axes running from 0 to `max`. A line is a
+/// function from x to y, its colour, and whether it is dashed.
+#[allow(clippy::type_complexity)]
+fn plot(canvas: &mut Canvas, [x, y, w, h]: [i32; 4], max: (f64, f64), tick: f64, lines: &[(Box<dyn Fn(f64) -> f64 + '_>, u32, bool)]) {
+    canvas.fill(x, y, w, h, 0x0B0B0B);
+    let mut at = tick;
+    while at < max.0.max(max.1) - 1e-9 {
+        if at < max.0 {
+            canvas.fill(x + (at / max.0 * f64::from(w)) as i32, y, 1, h, 0x262626);
+        }
+        if at < max.1 {
+            canvas.fill(x, y + h - 1 - (at / max.1 * f64::from(h)) as i32, w, 1, 0x262626);
+        }
+        at += tick;
+    }
+    let thick = (w / 150).max(2);
+    for (line, color, dashed) in lines {
+        let mut last: Option<i32> = None;
+        for column in 0..w {
+            let value = line((f64::from(column) + 0.5) / f64::from(w) * max.0);
+            if !value.is_finite() || (*dashed && (column / (thick * 4)) % 2 == 1) {
+                last = None;
+                continue;
+            }
+            let row = h - 1 - (value / max.1 * f64::from(h)).round() as i32;
+            // Joined to the last column's, so that a steep part has no gaps.
+            let (from, to) = match last {
+                Some(last) => (last.min(row), last.max(row)),
+                None => (row, row),
+            };
+            last = Some(row);
+            let (from, to) = (from.max(0), to.min(h - 1));
+            if from <= to {
+                canvas.fill(x + column, y + from, thick, to - from + thick.min(h - to), *color);
+            }
+        }
+    }
+}
+
 /// Draws lines made of runs of words, each run in its own colour, on a
 /// darkened panel with its top-left corner at `at`. Returns where the
 /// next thing down should start.
@@ -9051,15 +9318,14 @@ fn rich_block(canvas: &mut Canvas, text: &mut Text, lines: &[Vec<(String, u32)>]
     }
     let pad = px as i32 / 2;
     let line_height = Text::line_height(px);
-    let widths: Vec<i32> = lines.iter().map(|line| line.iter().map(|(run, _)| text.width(run, px)).sum()).collect();
+    let widths: Vec<i32> = lines.iter().map(|line| line.iter().map(|(run, _)| run_width(text, run, px)).sum()).collect();
     let width = widths.into_iter().max().unwrap_or(0) + 3 * pad;
     let height = line_height * lines.len() as i32 + 2 * pad;
     canvas.round_fill(at.0, at.1, width, height, pad, 0x000000, 176);
     for (index, line) in lines.iter().enumerate() {
         let mut x = at.0 + 3 * pad / 2;
         for (run, color) in line {
-            text.draw(canvas, x, at.1 + pad + index as i32 * line_height, px, *color, run);
-            x += text.width(run, px);
+            x += draw_run(canvas, text, x, at.1 + pad + index as i32 * line_height, px, *color, run);
         }
     }
     at.1 + height + pad
@@ -9589,6 +9855,10 @@ impl ApplicationHandler<Event> for App {
                 self.preview_signal(Signal::Events);
             }
             Event::Listed(listed) => self.take_listing(listed, true),
+            Event::HdrInfo(id, info) => {
+                self.hdr_infos.insert(id, info);
+                self.redraw();
+            }
             Event::SpaceListed(which, found) => {
                 // For the overview: what an unvisited workspace holds.
                 let list = self.ids_for(found);

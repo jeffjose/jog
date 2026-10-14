@@ -70,6 +70,9 @@ pub enum Command {
     /// Step an Ultra HDR photo through its renditions: the ordinary
     /// picture, the HDR one, and the gain map that makes it.
     CycleHdr,
+    /// The headroom, in stops, the HDR curves under the debug overlay are
+    /// drawn for: a quarter of a stop up, or down.
+    HdrHeadroom(bool),
     /// Go to a workspace by its number, counted from 0, or to the one after
     /// or before; list them to pick from; save the folder on view as one.
     Workspace(usize),
@@ -701,6 +704,8 @@ const DEBUG: &[Option<MenuItem>] = &[
     item("Graph: RGB parade", "", Command::Scope(3)),
     item("Graph: vectorscope", "", Command::Scope(4)),
     item("Graphs by logarithm", "", Command::ScopeLog),
+    item("HDR curves: more headroom", "", Command::HdrHeadroom(true)),
+    item("HDR curves: less headroom", "", Command::HdrHeadroom(false)),
 ];
 
 /// The menu for a file in the grid, on a right click or Tab.
@@ -925,7 +930,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("t", "Filmstrip"),
                 ("p", "File list down the side; / searches it, its buttons pin and move it"),
                 ("i", "Info: name, size, zoom"),
-                ("I", "Timings, what a video is made of, and graphs of the colours: histogram, waveform, parade, vectorscope"),
+                ("I", "Timings, what a video is made of, graphs of the colours, and a video's HDR: HDR10+ and 2094-50 curves"),
                 ("e", "EXIF data"),
                 ("a", "List of the actions there are"),
                 ("w  o", "Size the window to the picture / hide the pointer"),
