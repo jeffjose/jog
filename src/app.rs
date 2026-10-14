@@ -19,6 +19,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::commands::{self, Applies, Command, MenuItem};
 use crate::convert::{self, Format};
+use crate::scopes;
 use crate::files::{self, Sort};
 use crate::frame::{fit_size, Frame, Transform};
 use crate::loader::{Job, Loader, Request};
@@ -975,6 +976,13 @@ pub struct App {
     /// Whether the grid names each file under its picture.
     grid_titles: bool,
     show_debug: bool,
+    /// Which graphs of the picture's colours stand under the debug
+    /// overlay, by `scopes::KINDS`; whether they count by logarithm; what
+    /// they last counted, and how long counting and drawing them took.
+    scopes: [bool; 5],
+    scope_log: bool,
+    scope_counts: scopes::Measured,
+    scope_cost: Duration,
     perf: Perf,
     show_exif: bool,
     show_actions: bool,
@@ -1493,6 +1501,10 @@ impl App {
             show_info: options.draw_info,
             grid_titles: options.grid_titles,
             show_debug: false,
+            scopes: [true, false, false, true, false],
+            scope_log: true,
+            scope_counts: scopes::Measured::default(),
+            scope_cost: Duration::ZERO,
             perf: Perf::new(),
             show_exif: options.draw_exif,
             show_actions: options.draw_actions,
@@ -3067,6 +3079,15 @@ impl App {
                     self.menu = Some(self.build_menu(commands::GRID_MENU, None, (left + width / 2, top + height / 2)));
                 }
             }
+            Scope(kind) => {
+                self.scopes[kind] = !self.scopes[kind];
+                // A graph asked for brings up the overlay it stands under.
+                if self.scopes[kind] {
+                    self.show_debug = true;
+                    self.show_info = false;
+                }
+            }
+            ScopeLog => self.scope_log = !self.scope_log,
             CopyDebug | CopyDebugJson => {
                 // As lines under headings, or as JSON for pasting elsewhere.
                 let quoted = |text: &str| format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
@@ -3293,6 +3314,8 @@ impl App {
             ToggleFilmstrip => self.strip_pinned,
             ToggleInfo => self.show_info,
             ToggleDebug => self.show_debug,
+            Scope(kind) => self.scopes[kind],
+            ScopeLog => self.scope_log,
             ToggleWatch => self.watch.is_some(),
             Workspace(which) => which == self.space,
             ToggleList => self.show_list,
@@ -3900,6 +3923,85 @@ impl App {
             at += side + pad / 2;
         }
         *self.triage_buttons.borrow_mut() = buttons;
+    }
+
+    /// The graphs of the picture's colours, on a panel under the debug
+    /// overlay: a row of buttons to choose them and how they count, then
+    /// each one chosen under its name, then how much of the picture is
+    /// at pure black and at pure white. Gives back where the buttons went.
+    fn draw_scopes(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32, at: (i32, i32), pointer: (i32, i32)) -> Vec<Button> {
+        let small = (px * 5 / 6).max(11);
+        let (pad, row) = (px as i32, Text::line_height(small) + px as i32 / 6);
+        let button_height = row + pad / 3;
+        let mut choices: Vec<(&str, Command, bool)> = scopes::KINDS.iter().enumerate().map(|(kind, (name, _))| (*name, Command::Scope(kind), self.scopes[kind])).collect();
+        choices.push(("Log", Command::ScopeLog, self.scope_log));
+        let widths: Vec<i32> = choices.iter().map(|(label, ..)| text.width(label, small) + pad).collect();
+        let buttons_width = widths.iter().sum::<i32>() + pad / 3 * (widths.len() as i32 - 1);
+        let graph_width = (px as i32 * 22).max(buttons_width);
+        // How tall each graph is: the vectorscope wants a square.
+        let tall = |kind: usize| if kind == scopes::VECTOR { graph_width * 3 / 5 } else { graph_width * 2 / 5 };
+        let (x, y) = at;
+        // Each graph chosen, under its name: where its name and it go.
+        let mut graphs = Vec::new();
+        let mut top = y + pad + button_height + pad / 2;
+        for kind in (0..scopes::KINDS.len()).filter(|kind| self.scopes[*kind]) {
+            graphs.push((kind, top, top + row));
+            top += row + tall(kind) + pad / 2;
+        }
+        let (width, height) = (graph_width + 2 * pad, top + row + pad - y);
+
+        // Solid, unlike the panel above, and not filled where a graph will
+        // cover it: blending or filling so large a panel each frame would
+        // cost more than the graphs do. Only its two ends are rounded.
+        let (round, ground) = (pad / 2, 0x0D0D0D);
+        canvas.round_fill(x, y, width, 2 * round, round, ground, 256);
+        let mut filled = y + round;
+        for (kind, _, graph_top) in &graphs {
+            canvas.fill(x, filled, width, graph_top - filled, ground);
+            canvas.fill(x, *graph_top, pad, tall(*kind), ground);
+            canvas.fill(x + pad + graph_width, *graph_top, width - pad - graph_width, tall(*kind), ground);
+            filled = graph_top + tall(*kind);
+        }
+        canvas.fill(x, filled, width, y + height - round - filled, ground);
+        canvas.round_fill(x, y + height - 2 * round, width, 2 * round, round, ground, 256);
+        canvas.round_outline(x, y, width, height, round, 1, MENU_EDGE_COLOR);
+
+        // The buttons, as those that copy the figures above: filled in
+        // while their graph is up, and under the pointer.
+        let mut drawn = Vec::new();
+        let (mut left, buttons_top) = (x + pad, y + pad);
+        for ((label, command, on), button_width) in choices.into_iter().zip(widths) {
+            let over = (left..left + button_width).contains(&pointer.0) && (buttons_top..buttons_top + button_height).contains(&pointer.1);
+            let lit = on || over;
+            canvas.round_fill(left, buttons_top, button_width, button_height, pad / 3, if lit { accent() } else { PLACEHOLDER_COLOR }, 256);
+            canvas.round_outline(left, buttons_top, button_width, button_height, pad / 3, 1, if lit { accent() } else { MENU_EDGE_COLOR });
+            let words_top = buttons_top + (button_height - Text::line_height(small)) / 2;
+            text.draw(canvas, left + pad / 2, words_top, small, if lit { on_accent() } else { TEXT_COLOR }, label);
+            drawn.push(Button { x: left, y: buttons_top, width: button_width, height: button_height, command });
+            left += button_width + pad / 3;
+        }
+
+        for (kind, name_top, graph_top) in graphs {
+            text.draw(canvas, x + pad, name_top, small, DIM_TEXT_COLOR, scopes::KINDS[kind].1);
+            let stride = canvas.width;
+            let mut place = scopes::Place { pixels: canvas.all(), stride, x: x + pad, y: graph_top, w: graph_width, h: tall(kind) };
+            match kind {
+                scopes::OVERLAID => scopes::histogram(&mut place, &self.scope_counts, self.scope_log, false),
+                scopes::ROWS => scopes::histogram(&mut place, &self.scope_counts, self.scope_log, true),
+                scopes::WAVEFORM => scopes::waveform(&mut place, &self.scope_counts),
+                scopes::PARADE => scopes::parade(&mut place, &self.scope_counts),
+                _ => scopes::vector(&mut place, &self.scope_counts),
+            }
+        }
+        // How much has lost its detail at either end: a warning colour
+        // past a fiftieth of the picture.
+        let (black, white) = self.scope_counts.clipped();
+        let mut words_left = x + pad;
+        for (words, warn) in [("clipped   black ".to_string(), false), (format!("{black:.1}%"), black > 2.0), ("   white ".to_string(), false), (format!("{white:.1}%"), white > 2.0)] {
+            text.draw(canvas, words_left, top, small, if warn { MARK_COLOR } else if words.ends_with('%') { TEXT_COLOR } else { DIM_TEXT_COLOR }, &words);
+            words_left += text.width(&words, small);
+        }
+        drawn
     }
 
     /// Writes the files of this session out in the three lots of a triage,
@@ -7374,6 +7476,25 @@ impl App {
         self.tend_trailer();
         // The grid replaces the image and everything describing it.
         let viewing = self.grid.is_none() && self.overview.is_none();
+        // The graphs of the picture's colours are counted from it as it is
+        // on the screen, before anything is drawn over it: only the part of
+        // it in view, which zoomed in is the part looked at.
+        let graphing = viewing && self.show_debug && self.scopes.contains(&true);
+        let mut graph_cost = Duration::ZERO;
+        if graphing {
+            let shown = self.shown.as_ref().filter(|(id, _)| *id == self.id()).map(|(_, frame)| frame.native);
+            let (left, stage) = self.stage();
+            let [x, y, w, h] = match shown.map(|native| self.layout_of(native)) {
+                Some(layout) => [layout.x, layout.y, layout.width as i32, layout.height as i32],
+                None => [left, 0, stage.0 as i32, stage.1 as i32],
+            };
+            let (x0, y0) = (x.max(0), y.max(0));
+            let (x1, y1) = ((x + w).min(width), (y + h).min(height));
+            let rect = [x0 as usize, y0 as usize, (x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize];
+            let counting = Instant::now();
+            self.scope_counts.count(canvas.all(), width as usize, rect, self.scopes);
+            graph_cost = counting.elapsed();
+        }
         let strip = (viewing && self.strip_visible()).then(|| Strip::for_height(height as u32));
         if let Some(strip) = strip {
             self.draw_strip(canvas, strip);
@@ -7617,8 +7738,15 @@ impl App {
         }
         let below = rich_block(canvas, &mut text, &top_left, px, (left, margin));
         let pointer = (self.mouse.0 as i32, self.mouse.1 as i32);
-        self.debug_buttons = draw_debug(canvas, &mut text, &debug, px, (left, below), &mut self.debug_keep, pointer);
+        let (debug_buttons, debug_bottom) = draw_debug(canvas, &mut text, &debug, px, (left, below), &mut self.debug_keep, pointer);
+        self.debug_buttons = debug_buttons;
         self.debug_last = debug;
+        if graphing {
+            let drawing = Instant::now();
+            let graph_buttons = self.draw_scopes(canvas, &mut text, px, (left, debug_bottom), pointer);
+            self.debug_buttons.extend(graph_buttons);
+            self.scope_cost = graph_cost + drawing.elapsed();
+        }
         text_block(canvas, &mut text, &exif, px, |_, h| (left, bottom - h));
         text_block(canvas, &mut text, &actions, px, |w, h| (width - margin - w, bottom - h));
         // A toast slides in from the right edge, and off that way again
@@ -8071,6 +8199,10 @@ impl App {
     fn debug_groups(&mut self) -> Vec<Group> {
         let perf = &self.perf;
         let mut drawing = vec![("paint", ms(perf.paint)), ("present", ms(perf.present))];
+        // What the graphs under the overlay cost, counting and drawing.
+        if self.scopes.contains(&true) {
+            drawing.push(("graphs", ms(self.scope_cost)));
+        }
         if self.video.as_ref().is_some_and(|video| video.showing) {
             // Asking the player on every frame would get in its way, and
             // the figures would change too fast to read.
@@ -8908,9 +9040,9 @@ struct DebugKeep {
 /// Draws the debug overlay: a panel of clusters side by side, each a
 /// heading over its figures, the names muted and the values bright, and
 /// under them buttons to copy the lot. Returns where the buttons went.
-fn draw_debug(canvas: &mut Canvas, text: &mut Text, groups: &[Group], px: u32, at: (i32, i32), keep: &mut DebugKeep, pointer: (i32, i32)) -> Vec<Button> {
+fn draw_debug(canvas: &mut Canvas, text: &mut Text, groups: &[Group], px: u32, at: (i32, i32), keep: &mut DebugKeep, pointer: (i32, i32)) -> (Vec<Button>, i32) {
     if groups.is_empty() {
-        return Vec::new();
+        return (Vec::new(), at.1);
     }
     let small = (px * 5 / 6).max(11);
     let (pad, row) = (px as i32, Text::line_height(small) + px as i32 / 6);
@@ -8968,7 +9100,7 @@ fn draw_debug(canvas: &mut Canvas, text: &mut Text, groups: &[Group], px: u32, a
         drawn.push(Button { x, y, width: button_width, height: button_height, command });
         x += button_width + pad / 2;
     }
-    drawn
+    (drawn, at.1 + height + pad / 2)
 }
 
 /// Draws lines of text on a darkened panel. `place` is given the panel size

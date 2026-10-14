@@ -15,6 +15,7 @@ mod positions;
 mod render;
 mod rng;
 mod scenes;
+mod scopes;
 mod screen;
 mod search;
 mod sessions;
