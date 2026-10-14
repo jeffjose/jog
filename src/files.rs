@@ -11,7 +11,10 @@ const RASTER_EXTS: &[&str] = &[
 
 /// Formats left to ffmpeg, which decodes them when it was built with the
 /// right libraries.
-const FFMPEG_EXTS: &[&str] = &["svg", "svgz", "jxl", "psd"];
+const FFMPEG_EXTS: &[&str] = &["svg", "svgz", "psd"];
+
+/// JPEG XL, decoded by jxl-oxide, in Rust and with no library to install.
+const JXL_EXTS: &[&str] = &["jxl"];
 
 /// HEIC and AVIF: libheif's where it is installed, and ffmpeg's otherwise.
 const HEIF_EXTS: &[&str] = &["heic", "heif", "hif", "avif"];
@@ -44,6 +47,10 @@ pub fn needs_ffmpeg(path: &Path) -> bool {
     has_ext(path, FFMPEG_EXTS)
 }
 
+pub fn is_jxl(path: &Path) -> bool {
+    has_ext(path, JXL_EXTS)
+}
+
 /// A JPEG, which may be an Ultra HDR one with a gain map after it.
 pub fn is_jpeg(path: &Path) -> bool {
     has_ext(path, &["jpg", "jpeg", "jpe", "jfif"])
@@ -54,7 +61,7 @@ pub fn is_heif(path: &Path) -> bool {
 }
 
 fn is_supported(path: &Path) -> bool {
-    has_ext(path, RASTER_EXTS) || needs_ffmpeg(path) || is_heif(path) || is_raw(path) || is_video(path)
+    has_ext(path, RASTER_EXTS) || needs_ffmpeg(path) || is_heif(path) || is_jxl(path) || is_raw(path) || is_video(path)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]

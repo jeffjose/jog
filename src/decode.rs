@@ -116,6 +116,11 @@ fn decode_file(path: &Path, target: Option<(u32, u32)>, thumbnail: bool) -> Resu
         let image = heif::decode(&bytes).map(|image| (image, Orientation::NoTransforms));
         return image.or_else(|error| ffmpeg_image(path).and_then(|bmp| decode(&bmp)).map_err(|_| error)).map(Decoded::still);
     }
+    if files::is_jxl(path) {
+        let mut decoder = jxl_oxide::integration::JxlDecoder::new(Cursor::new(&bytes[..]))?;
+        let orientation = decoder.orientation()?;
+        return Ok(Decoded::still((DynamicImage::from_decoder(decoder)?, orientation)));
+    }
     if files::is_raw(path) {
         return decode_raw_preview(&bytes, target).map(Decoded::still);
     }
