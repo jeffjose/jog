@@ -70,6 +70,8 @@ pub enum Command {
     /// Step an Ultra HDR photo through its renditions: the ordinary
     /// picture, the HDR one, and the gain map that makes it.
     CycleHdr,
+    /// Show Ultra HDR photos in this rendition.
+    SetHdr(crate::ultrahdr::Hdr),
     /// The headroom, in stops, the HDR curves under the debug overlay are
     /// drawn for: a quarter of a stop up, or down.
     HdrHeadroom(bool),

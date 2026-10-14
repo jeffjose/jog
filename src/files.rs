@@ -259,3 +259,73 @@ mod tests {
         assert_eq!(names, ["a.png", "img1.jpg", "IMG2.jpg", "img02.jpg", "img002b.jpg", "img10.jpg"]);
     }
 }
+
+/// What format an image file is, by its first bytes and, for camera RAW
+/// files, which share TIFF's, by its ending: a short name for a badge.
+pub fn format_name(path: &Path) -> Option<String> {
+    use std::io::Read;
+    if is_raw(path) {
+        let ending = path.extension()?.to_str()?.to_uppercase();
+        return Some(format!("RAW {ending}"));
+    }
+    let mut head = [0u8; 48];
+    let read = std::fs::File::open(path).and_then(|mut file| file.read(&mut head)).ok()?;
+    Some(sniff(&head[..read])?.to_string())
+}
+
+fn sniff(head: &[u8]) -> Option<&'static str> {
+    let brand_is = |brands: &[&[u8; 4]]| {
+        // The major brand, then the compatible ones, in the ftyp box.
+        let size = u32::from_be_bytes(head.get(..4)?.try_into().ok()?) as usize;
+        let listed: Vec<&[u8]> = std::iter::once(head.get(8..12)?).chain(head.get(16..size.min(head.len()))?.chunks(4)).collect();
+        Some(listed.iter().any(|brand| brands.iter().any(|wanted| brand == wanted)))
+    };
+    Some(match head {
+        [0xFF, 0xD8, 0xFF, ..] => "JPEG",
+        [0x89, b'P', b'N', b'G', ..] => "PNG",
+        [b'G', b'I', b'F', b'8', ..] => "GIF",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "WebP",
+        [0xFF, 0x0A, ..] | [0, 0, 0, 0x0C, b'J', b'X', b'L', b' ', ..] => "JPEG XL",
+        [_, _, _, _, b'f', b't', b'y', b'p', ..] => {
+            if brand_is(&[b"avif", b"avis"])? {
+                "AVIF"
+            } else if brand_is(&[b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx"])? {
+                "HEIC"
+            } else if brand_is(&[b"mif1", b"msf1"])? {
+                "HEIF"
+            } else {
+                return None;
+            }
+        }
+        [b'I', b'I', 0x2A, 0, ..] | [b'M', b'M', 0, 0x2A, ..] => "TIFF",
+        [b'B', b'M', ..] => "BMP",
+        [b'q', b'o', b'i', b'f', ..] => "QOI",
+        [0x76, 0x2F, 0x31, 0x01, ..] => "EXR",
+        [b'8', b'B', b'P', b'S', ..] => "PSD",
+        [b'#', b'?', b'R', b'A', ..] | [b'#', b'?', b'R', b'G', ..] => "HDR",
+        [b'D', b'D', b'S', b' ', ..] => "DDS",
+        [0, 0, 1, 0, ..] => "ICO",
+        [b'P', b'1'..=b'7', ..] => "PNM",
+        _ if head.starts_with(b"<?xml") || head.starts_with(b"<svg") => "SVG",
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn formats_are_told_by_their_first_bytes() {
+        assert_eq!(sniff(b"\xFF\xD8\xFF\xE1rest"), Some("JPEG"));
+        assert_eq!(sniff(b"\x89PNG\r\n\x1a\n"), Some("PNG"));
+        assert_eq!(sniff(b"\x00\x00\x00\x1cftypavif\x00\x00\x00\x00avifmif1miaf"), Some("AVIF"));
+        assert_eq!(sniff(b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic"), Some("HEIC"));
+        // A HEIF whose major brand is the general one, with AVIF among the rest.
+        assert_eq!(sniff(b"\x00\x00\x00\x1cftypmif1\x00\x00\x00\x00mif1avifmiaf"), Some("AVIF"));
+        assert_eq!(sniff(b"\xFF\x0A\xFA"), Some("JPEG XL"));
+        assert_eq!(sniff(b"\x00\x00\x00\x0cJXL \r\n\x87\n"), Some("JPEG XL"));
+        assert_eq!(sniff(b"RIFF\x00\x00\x00\x00WEBPVP8 "), Some("WebP"));
+        assert_eq!(sniff(b"nothing known"), None);
+    }
+}

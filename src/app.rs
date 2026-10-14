@@ -994,6 +994,10 @@ pub struct App {
     /// for: none, for this screen.
     hdr_infos: HashMap<usize, Option<Arc<hdrmeta::Info>>>,
     hdr_headroom: f64,
+    /// Where the choices of rendition in the info panel were drawn.
+    info_buttons: Vec<Button>,
+    /// The format of each image looked at, by its first bytes.
+    formats: RefCell<HashMap<usize, Option<String>>>,
     scope_counts: scopes::Measured,
     scope_cost: Duration,
     perf: Perf,
@@ -1514,12 +1518,14 @@ impl App {
             show_info: options.draw_info,
             grid_titles: options.grid_titles,
             show_debug: false,
-            scopes: [true, false, false, true, false],
+            scopes: [false, true, false, true, false],
             scope_log: true,
             hdr: options.hdr,
             ultra_hdr: RefCell::new(HashMap::new()),
             hdr_infos: HashMap::new(),
             hdr_headroom: 0.0,
+            info_buttons: Vec::new(),
+            formats: RefCell::new(HashMap::new()),
             scope_counts: scopes::Measured::default(),
             scope_cost: Duration::ZERO,
             perf: Perf::new(),
@@ -1678,9 +1684,14 @@ impl App {
     }
 
     fn toast(&mut self, message: impl Into<String>) {
+        // It slides in from the edge, unless one is already up: then the
+        // words change where it stands, so that pressing a key again and
+        // again does not set it sliding in each time.
+        let showing = self.toast.as_ref().is_some_and(|(_, until)| *until > Instant::now());
+        if !showing {
+            self.toast_slide.set(Glide { from: 0.0, to: 1.0, since: Instant::now() });
+        }
         self.toast = Some((message.into(), Instant::now() + TOAST));
-        // It slides in from the edge.
-        self.toast_slide.set(Glide { from: 0.0, to: 1.0, since: Instant::now() });
         self.redraw();
     }
 
@@ -3106,6 +3117,11 @@ impl App {
                 }
             }
             ScopeLog => self.scope_log = !self.scope_log,
+            SetHdr(mode) => {
+                self.hdr = mode;
+                self.request();
+                self.toast(format!("Ultra HDR: {}", mode.name()));
+            }
             HdrHeadroom(up) => {
                 self.hdr_headroom = (self.hdr_headroom + if up { 0.25 } else { -0.25 }).clamp(0.0, 6.0);
             }
@@ -4089,7 +4105,7 @@ impl App {
         left += text.width("HDR", small);
         for name in &badges {
             let (run, color) = badge(name);
-            left += draw_run(canvas, text, left, y + pad, small, color, &run);
+            left += draw_run(canvas, text, left, y + pad, small, color, &run).0;
         }
         let mut top = y + pad + row;
         for (line, color) in &lines {
@@ -6925,6 +6941,13 @@ impl App {
                 }
             }
             // The buttons on the debug overlay copy its figures.
+            // The choices of rendition in the info panel.
+            (MouseButton::Left, true) if self.info_buttons.iter().any(|b| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32))) => {
+                let hit = self.info_buttons.iter().find(|b| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32)));
+                if let Some(command) = hit.map(|button| button.command) {
+                    self.execute(command, event_loop);
+                }
+            }
             (MouseButton::Left, true) if self.debug_buttons.iter().any(|b| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32))) => {
                 let hit = self.debug_buttons.iter().find(|b| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32)));
                 if let Some(command) = hit.map(|button| button.command) {
@@ -7726,22 +7749,36 @@ impl App {
             if self.spaces.len() > 1 {
                 line.insert(0, (format!("@{}   ", self.spaces[self.space].name), soft));
             }
-            top_left.push(line);
-            // After the size, badges for what the picture is: an Ultra HDR
-            // photo with the rendition on view, a video's HDR formats.
-            let mut details = vec![(self.info_line(), dim)];
+            // Beside the name, badges for what the file is: an image's
+            // format and whether it is an Ultra HDR photo; a video's codec
+            // and HDR formats.
+            let ultra = self.video.is_none() && self.is_ultra_hdr(self.id());
             let mut badges: Vec<String> = Vec::new();
-            if self.video.is_some() {
-                badges = self.hdr_badges();
-            } else if self.is_ultra_hdr(self.id()) {
-                badges.push("Ultra HDR".to_string());
+            match self.video.is_some() {
+                true => {
+                    badges.extend(self.codec_name());
+                    badges.extend(self.hdr_badges());
+                }
+                false => {
+                    badges.extend(self.format_of(self.id()));
+                    if ultra {
+                        badges.push("Ultra HDR".to_string());
+                    }
+                }
             }
             for name in &badges {
-                details.push(("  ".to_string(), dim));
-                details.push(badge(name));
+                line.push((if line.len() > 2 { "" } else { " " }.to_string(), dim));
+                line.push(badge(name));
             }
-            if badges.first().is_some_and(|name| name == "Ultra HDR") {
-                details.push((format!(" {}", self.hdr.name()), soft));
+            top_left.push(line);
+            let mut details = vec![(self.info_line(), dim)];
+            if ultra {
+                // The three renditions, to be clicked: the one on view filled.
+                details.push(("   ".to_string(), soft));
+                for mode in [Hdr::Sdr, Hdr::Full, Hdr::GainMap] {
+                    let marker = if mode == self.hdr { CHOSEN } else { CHOICE };
+                    details.push((format!("{marker}{}", mode.name()), TEXT_COLOR));
+                }
             }
             top_left.push(details);
             if let Some((position, length)) = self.video_time() {
@@ -7934,7 +7971,15 @@ impl App {
                 canvas.dissolve(panel.left, 0, across, down, &sheet, 256);
             }
         }
-        let below = rich_block(canvas, &mut text, &top_left, px, (left, margin));
+        let (below, choices) = rich_block(canvas, &mut text, &top_left, px, (left, margin));
+        // The renditions of an Ultra HDR photo, to be clicked.
+        self.info_buttons = choices
+            .into_iter()
+            .filter_map(|(name, [x, y, width, height])| {
+                let mode = [Hdr::Sdr, Hdr::Full, Hdr::GainMap].into_iter().find(|mode| mode.name() == name)?;
+                Some(Button { x, y, width, height, command: Command::SetHdr(mode) })
+            })
+            .collect();
         let pointer = (self.mouse.0 as i32, self.mouse.1 as i32);
         let (debug_buttons, debug_bottom) = draw_debug(canvas, &mut text, &debug, px, (left, below), &mut self.debug_keep, pointer);
         self.debug_buttons = debug_buttons;
@@ -8401,6 +8446,30 @@ impl App {
         };
         self.ultra_hdr.borrow_mut().insert(id, found);
         found
+    }
+
+    /// An image's format, found from its first bytes once and remembered.
+    fn format_of(&self, id: usize) -> Option<String> {
+        if let Some(known) = self.formats.borrow().get(&id) {
+            return known.clone();
+        }
+        let found = files::format_name(&self.files[id]);
+        self.formats.borrow_mut().insert(id, found.clone());
+        found
+    }
+
+    /// The codec of the video on view, as it is usually written.
+    fn codec_name(&self) -> Option<String> {
+        let codec = self.player.as_ref()?.text("video-format")?;
+        Some(match codec.as_str() {
+            "hevc" => "HEVC".to_string(),
+            "h264" => "H.264".to_string(),
+            "av1" => "AV1".to_string(),
+            "vp9" => "VP9".to_string(),
+            "vp8" => "VP8".to_string(),
+            "mpeg2video" => "MPEG-2".to_string(),
+            other => other.to_uppercase(),
+        })
     }
 
     fn info_line(&mut self) -> String {
@@ -9229,6 +9298,11 @@ fn panel(canvas: &mut Canvas, x: i32, y: i32, width: i32, height: i32, radius: i
 /// ground of the run's colour.
 const BADGE: char = '\u{1}';
 
+/// Begin a run that is a choice to be clicked, drawn as the buttons of
+/// the debug overlay are: the second for the one chosen, filled in.
+const CHOICE: char = '\u{2}';
+const CHOSEN: char = '\u{3}';
+
 /// The colour of a badge for what a picture or video is.
 fn badge_color(name: &str) -> u32 {
     match name {
@@ -9237,6 +9311,8 @@ fn badge_color(name: &str) -> u32 {
         "HLG" => 0xD9822B,
         "HDR10" | "PQ" => 0x3E7BD6,
         "Ultra HDR" => 0xC9A227,
+        "HEVC" | "AV1" | "VP9" | "H.264" | "VP8" | "MPEG-2" => 0x505A66,
+        "JPEG XL" | "AVIF" | "HEIC" | "HEIF" => 0x4C6A8C,
         _ => 0x6A6A6A,
     }
 }
@@ -9246,27 +9322,42 @@ fn badge(name: &str) -> (String, u32) {
     (format!("{BADGE}{name}"), badge_color(name))
 }
 
-/// How wide a run is drawn: a badge with its ground and the gap after it.
+/// How wide a run is drawn: a badge or a choice with its ground and the
+/// gap after it.
 fn run_width(text: &mut Text, run: &str, px: u32) -> i32 {
-    match run.strip_prefix(BADGE) {
+    match run.strip_prefix([BADGE, CHOICE, CHOSEN]) {
         Some(name) => text.width(name, (px * 4 / 5).max(10)) + px as i32 * 3 / 2,
         None => text.width(run, px),
     }
 }
 
-/// Draws a run, a badge as one; gives back how wide it was.
-fn draw_run(canvas: &mut Canvas, text: &mut Text, x: i32, y: i32, px: u32, color: u32, run: &str) -> i32 {
-    let Some(name) = run.strip_prefix(BADGE) else {
+/// Draws a run, a badge or a choice as one; gives back how wide it was
+/// and, for a choice, where its button is.
+fn draw_run(canvas: &mut Canvas, text: &mut Text, x: i32, y: i32, px: u32, color: u32, run: &str) -> (i32, Option<[i32; 4]>) {
+    let Some(name) = run.strip_prefix([BADGE, CHOICE, CHOSEN]) else {
         text.draw(canvas, x, y, px, color, run);
-        return text.width(run, px);
+        return (text.width(run, px), None);
     };
     let small = (px * 4 / 5).max(10);
     let (pad, line) = (px as i32 / 2, Text::line_height(px));
     let (w, h) = (text.width(name, small) + pad, Text::line_height(small) + pad / 3);
-    let top = y + (line - h) / 2;
-    canvas.round_fill(x + pad / 2, top, w, h, h / 3, color, 200);
-    text.draw(canvas, x + pad, top + (h - Text::line_height(small)) / 2, small, TEXT_COLOR, name);
-    run_width(text, run, px)
+    let (left, top) = (x + pad / 2, y + (line - h) / 2);
+    let place = match run.chars().next() {
+        Some(BADGE) => {
+            canvas.round_fill(left, top, w, h, h / 3, color, 200);
+            None
+        }
+        // A choice, as the debug overlay's buttons: the one chosen filled.
+        first => {
+            let chosen = first == Some(CHOSEN);
+            canvas.round_fill(left, top, w, h, h / 3, if chosen { accent() } else { PLACEHOLDER_COLOR }, 256);
+            canvas.round_outline(left, top, w, h, h / 3, 1, if chosen { accent() } else { MENU_EDGE_COLOR });
+            Some([left, top, w, h])
+        }
+    };
+    let words = if run.starts_with(CHOSEN) { on_accent() } else { TEXT_COLOR };
+    text.draw(canvas, left + pad / 2, top + (h - Text::line_height(small)) / 2, small, words, name);
+    (run_width(text, run, px), place)
 }
 
 /// Draws lines of a function each on a small graph: a dark square with a
@@ -9311,10 +9402,11 @@ fn plot(canvas: &mut Canvas, [x, y, w, h]: [i32; 4], max: (f64, f64), tick: f64,
 
 /// Draws lines made of runs of words, each run in its own colour, on a
 /// darkened panel with its top-left corner at `at`. Returns where the
-/// next thing down should start.
-fn rich_block(canvas: &mut Canvas, text: &mut Text, lines: &[Vec<(String, u32)>], px: u32, at: (i32, i32)) -> i32 {
+/// next thing down should start, and where each choice in it went, by
+/// its name.
+fn rich_block(canvas: &mut Canvas, text: &mut Text, lines: &[Vec<(String, u32)>], px: u32, at: (i32, i32)) -> (i32, Vec<(String, [i32; 4])>) {
     if lines.is_empty() {
-        return at.1;
+        return (at.1, Vec::new());
     }
     let pad = px as i32 / 2;
     let line_height = Text::line_height(px);
@@ -9322,13 +9414,18 @@ fn rich_block(canvas: &mut Canvas, text: &mut Text, lines: &[Vec<(String, u32)>]
     let width = widths.into_iter().max().unwrap_or(0) + 3 * pad;
     let height = line_height * lines.len() as i32 + 2 * pad;
     canvas.round_fill(at.0, at.1, width, height, pad, 0x000000, 176);
+    let mut choices = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let mut x = at.0 + 3 * pad / 2;
         for (run, color) in line {
-            x += draw_run(canvas, text, x, at.1 + pad + index as i32 * line_height, px, *color, run);
+            let (wide, place) = draw_run(canvas, text, x, at.1 + pad + index as i32 * line_height, px, *color, run);
+            if let Some(place) = place {
+                choices.push((run.chars().skip(1).collect(), place));
+            }
+            x += wide;
         }
     }
-    at.1 + height + pad
+    (at.1 + height + pad, choices)
 }
 
 /// The sizes the debug overlay has grown to: its figures change all the
