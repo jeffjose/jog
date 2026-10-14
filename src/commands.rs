@@ -67,6 +67,9 @@ pub enum Command {
     /// overlay, or stop; and draw their counts by logarithm or plainly.
     Scope(usize),
     ScopeLog,
+    /// Step an Ultra HDR photo through its renditions: the ordinary
+    /// picture, the HDR one, and the gain map that makes it.
+    CycleHdr,
     /// Go to a workspace by its number, counted from 0, or to the one after
     /// or before; list them to pick from; save the folder on view as one.
     Workspace(usize),
@@ -268,6 +271,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "m" => ToggleMute,
             "l" => CycleLoop,
             "T" => ToggleScenes,
+            "H" => CycleHdr,
             "j" => CycleSubtitles,
             "J" => CycleAudio,
             "b" => Restart,
@@ -616,6 +620,7 @@ const VIEW: &[Option<MenuItem>] = &[
     None,
     item("Info", "i", Command::ToggleInfo),
     image_item("EXIF data", "e", Command::ToggleExif),
+    image_item("Ultra HDR: SDR, HDR, gain map", "H", Command::CycleHdr),
     item("List of actions", "a", Command::ToggleActions),
     None,
     item("Size the window to the picture", "w", Command::SizeToImage),
@@ -901,6 +906,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("0  *  F", "Fit / actual size / fill"),
                 ("v  Wheel", "Held down: a loupe under the pointer, and how strong it is"),
                 ("Z", "Small images: fit or actual size"),
+                ("H", "Ultra HDR photo: the SDR picture, the HDR one, the gain map"),
                 ("k", "Keep zoom between files"),
                 ("A  R", "Smooth scaling on / off; draw at full quality now"),
                 ("Ctrl+arrows  Alt+arrows", "Scroll, by a page"),

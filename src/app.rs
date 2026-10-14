@@ -20,6 +20,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 use crate::commands::{self, Applies, Command, MenuItem};
 use crate::convert::{self, Format};
 use crate::scopes;
+use crate::ultrahdr::{self, Hdr};
 use crate::files::{self, Sort};
 use crate::frame::{fit_size, Frame, Transform};
 use crate::loader::{Job, Loader, Request};
@@ -981,6 +982,10 @@ pub struct App {
     /// they last counted, and how long counting and drawing them took.
     scopes: [bool; 5],
     scope_log: bool,
+    /// Which rendition of Ultra HDR photos is shown, and which files have
+    /// been found to be such photos.
+    hdr: Hdr,
+    ultra_hdr: RefCell<HashMap<usize, bool>>,
     scope_counts: scopes::Measured,
     scope_cost: Duration,
     perf: Perf,
@@ -1503,6 +1508,8 @@ impl App {
             show_debug: false,
             scopes: [true, false, false, true, false],
             scope_log: true,
+            hdr: options.hdr,
+            ultra_hdr: RefCell::new(HashMap::new()),
             scope_counts: scopes::Measured::default(),
             scope_cost: Duration::ZERO,
             perf: Perf::new(),
@@ -1701,9 +1708,9 @@ impl App {
 
     /// What to ask the loader for before there is a window: the images
     /// around the one to start on, fitted to a screen of `screen`.
-    pub fn first_request(count: usize, start: usize, screen: (u32, u32), enlarge: bool, workers: usize) -> Request {
+    pub fn first_request(count: usize, start: usize, screen: (u32, u32), enlarge: bool, hdr: Hdr, workers: usize) -> Request {
         let list: Vec<usize> = (0..count).collect();
-        Request { wanted: Self::around(&list, start, true, workers), target: screen, enlarge, ..Request::default() }
+        Request { wanted: Self::around(&list, start, true, workers), target: screen, enlarge, hdr, ..Request::default() }
     }
 
     /// Tells the loader what is needed around the current position.
@@ -1761,6 +1768,7 @@ impl App {
             full: self.needs_full().then(|| self.id()),
             thumbs,
             thumb_size,
+            hdr: self.hdr,
         };
         // Panning and zooming call this on every pointer move; most of the
         // time nothing has changed and the loader need not be woken.
@@ -3088,6 +3096,16 @@ impl App {
                 }
             }
             ScopeLog => self.scope_log = !self.scope_log,
+            CycleHdr => {
+                self.hdr = self.hdr.next();
+                self.request();
+                // The setting holds for every Ultra HDR photo from here on;
+                // one that is not such a photo is shown as it always is.
+                self.toast(match self.is_ultra_hdr(self.id()) {
+                    true => format!("Ultra HDR: {}", self.hdr.name()),
+                    false => format!("Ultra HDR photos: {} (this one is not one)", self.hdr.name()),
+                });
+            }
             CopyDebug | CopyDebugJson => {
                 // As lines under headings, or as JSON for pasting elsewhere.
                 let quoted = |text: &str| format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""));
@@ -8182,13 +8200,33 @@ impl App {
         Some(footer)
     }
 
+    /// Whether a file is an Ultra HDR photo, found from its first bytes
+    /// once and remembered.
+    fn is_ultra_hdr(&self, id: usize) -> bool {
+        if let Some(known) = self.ultra_hdr.borrow().get(&id) {
+            return *known;
+        }
+        let path = &self.files[id];
+        let found = files::is_jpeg(path) && {
+            use std::io::Read;
+            let mut head = Vec::new();
+            std::fs::File::open(path).and_then(|file| file.take(256 << 10).read_to_end(&mut head)).is_ok() && ultrahdr::is_ultra_hdr(&head)
+        };
+        self.ultra_hdr.borrow_mut().insert(id, found);
+        found
+    }
+
     fn info_line(&mut self) -> String {
         let size = self.current_meta().and_then(|meta| meta.size).map(meta::human_size);
         let Some(native) = self.native() else { return size.unwrap_or_default() };
         let percent = self.view.scale(native, self.stage().1) * 100.0;
-        let mut line = format!("{} x {}   {percent:.0}%", native.0, native.1);
+        let mut line: String = format!("{} x {}   {percent:.0}%", native.0, native.1);
         if let Some(size) = size {
             line.push_str(&format!("   {size}"));
+        }
+        // An Ultra HDR photo says so, and which rendition is on view.
+        if self.is_ultra_hdr(self.id()) {
+            line.push_str(&format!("   Ultra HDR: {}", self.hdr.name()));
         }
         line
     }

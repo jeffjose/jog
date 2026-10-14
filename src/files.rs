@@ -44,6 +44,11 @@ pub fn needs_ffmpeg(path: &Path) -> bool {
     has_ext(path, FFMPEG_EXTS)
 }
 
+/// A JPEG, which may be an Ultra HDR one with a gain map after it.
+pub fn is_jpeg(path: &Path) -> bool {
+    has_ext(path, &["jpg", "jpeg", "jpe", "jfif"])
+}
+
 pub fn is_heif(path: &Path) -> bool {
     has_ext(path, HEIF_EXTS)
 }

@@ -63,6 +63,8 @@ Slideshow and actions:
       --frame-dir DIR        folder that S saves the frame of a video into; without
                              one it is the -o folder, or beside the video
       --frame-format KIND    png (the usual), jpg or webp
+      --hdr KIND             how an Ultra HDR photo is shown: sdr (the usual),
+                             hdr, or gainmap; H steps through them
       --print-marked         print the marked files on exit
       --benchmark            step, zoom and page through the files by itself,
                              timing each, print the figures and quit
@@ -244,6 +246,8 @@ pub struct Options {
     /// in the folder files are copied to, and as what kind of picture.
     pub frame_dir: Option<PathBuf>,
     pub frame_format: String,
+    /// Which rendition of an Ultra HDR photo is shown first.
+    pub hdr: crate::ultrahdr::Hdr,
     /// Whether the file list stands at the right, and beside the picture
     /// rather than over it.
     pub list_right: bool,
@@ -469,7 +473,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
 fn takes_value(name: &str) -> bool {
     let valued = [
         "geometry", "image-bg", "accent", "zoom", "sort", "start-at", "start", "filelist", "filter", "slideshow-delay", "on-last-slide",
-        "output-dir", "subtitle-font", "subtitle-size", "subtitle-style", "frame-dir", "frame-format",
+        "output-dir", "subtitle-font", "subtitle-size", "subtitle-style", "frame-dir", "frame-format", "hdr",
     ];
     valued.contains(&name) || name.starts_with("action")
 }
@@ -512,6 +516,7 @@ fn parse_with(
         autoplay: true,
         frame_dir: None,
         frame_format: "png".to_string(),
+        hdr: crate::ultrahdr::Hdr::Sdr,
         list_right: false,
         list_pinned: false,
         dry_run: false,
@@ -710,6 +715,10 @@ fn apply(
         "filmstrip" => options.filmstrip = true,
         "output-dir" => options.output_dir = Some(expand_home(&value()?)),
         "frame-dir" => options.frame_dir = Some(expand_home(&value()?)),
+        "hdr" => {
+            let typed = value()?.to_lowercase();
+            options.hdr = crate::ultrahdr::Hdr::parse(&typed).ok_or_else(|| format!("invalid hdr '{typed}', expected sdr, hdr or gainmap"))?;
+        }
         "frame-format" => {
             options.frame_format = match value()?.to_lowercase().as_str() {
                 "png" => "png".to_string(),

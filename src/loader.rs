@@ -5,6 +5,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::decode::{self, Source, Spec};
+use crate::ultrahdr::Hdr;
 use crate::files;
 use crate::frame::{Frame, Transform};
 
@@ -32,6 +33,8 @@ pub struct Request {
     /// Images to make thumbnails of, most urgent first.
     pub thumbs: Vec<usize>,
     pub thumb_size: (u32, u32),
+    /// Which rendition of Ultra HDR pictures to show.
+    pub hdr: Hdr,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -80,6 +83,7 @@ struct Slot {
     frame: Result<Arc<Frame>, String>,
     size: (u32, u32),
     enlarge: bool,
+    hdr: Hdr,
     transform: Transform,
     made: Made,
     /// When it was last asked for. The lowest goes first when room is needed.
@@ -128,7 +132,7 @@ impl State {
     fn is_current(&self, slot: Option<&Slot>, id: usize, size: (u32, u32), at_least: bool) -> bool {
         let fits = |s: &Slot| match at_least {
             true => s.size.0 >= size.0 && s.size.1 >= size.1,
-            false => s.size == size && s.enlarge == self.request.enlarge,
+            false => s.size == size && s.enlarge == self.request.enlarge && s.hdr == self.request.hdr,
         };
         slot.is_some_and(|s| s.frame.is_err() || (fits(s) && s.transform == self.transform(id)))
     }
@@ -166,7 +170,10 @@ impl State {
     }
 
     fn source_for(&self, id: usize) -> Option<Arc<Source>> {
-        self.source.as_ref().filter(|(source_id, _)| *source_id == id).map(|(_, source)| source.clone())
+        // One decoded for the ordinary rendition alone has no gain map to
+        // make another from.
+        let usable = |source: &Source| self.request.hdr == Hdr::Sdr || source.looked;
+        self.source.as_ref().filter(|(source_id, source)| *source_id == id && usable(source)).map(|(_, source)| source.clone())
     }
 
     /// Decides what a job is for and the cheapest way to do it. The last
@@ -182,9 +189,14 @@ impl State {
         // Only a fitted frame is ever enlarged; the flag is kept on a
         // full-resolution one all the same, so that it counts as current.
         let enlarge = !matches!(job, Job::Thumb(_)) && self.request.enlarge;
-        let spec = Spec { target, enlarge, transform, background, thumbnail: matches!(job, Job::Thumb(_)) };
+        // A thumbnail is the ordinary rendition, whatever is on view.
+        let thumbnail = matches!(job, Job::Thumb(_));
+        let hdr = if thumbnail { Hdr::Sdr } else { self.request.hdr };
+        let spec = Spec { target, enlarge, transform, background, thumbnail, hdr };
 
-        let fitted = self.fitted.get(&id).filter(|slot| slot.transform == transform);
+        // A thumbnail is made from the fitted frame only when that is the
+        // ordinary rendition.
+        let fitted = self.fitted.get(&id).filter(|slot| slot.transform == transform && slot.hdr == Hdr::Sdr);
         let fitted = fitted.and_then(|slot| slot.frame.as_ref().ok()).cloned();
         // A video's fitted frame is its opening one, which is often black;
         // its thumbnail is taken from further in instead.
@@ -367,7 +379,7 @@ impl Loader {
     pub fn full(&self, id: usize) -> Option<Arc<Frame>> {
         let state = self.shared.state.lock().unwrap();
         let (full_id, slot) = state.full.as_ref()?;
-        let usable = *full_id == id && slot.transform == state.transform(id);
+        let usable = *full_id == id && slot.transform == state.transform(id) && slot.hdr == state.request.hdr;
         slot.frame.as_ref().ok().filter(|_| usable).cloned()
     }
 
@@ -460,7 +472,7 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
             }
             error.to_string()
         });
-        let slot = Slot { frame, size: spec.target.unwrap_or_default(), enlarge: spec.enlarge, transform: spec.transform, made, used: 0 };
+        let slot = Slot { frame, size: spec.target.unwrap_or_default(), enlarge: spec.enlarge, hdr: spec.hdr, transform: spec.transform, made, used: 0 };
 
         state = shared.state.lock().unwrap();
         state.busy.remove(&job);

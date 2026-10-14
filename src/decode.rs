@@ -12,6 +12,7 @@ use memchr::memmem;
 
 use crate::files;
 use crate::heif;
+use crate::ultrahdr::{self, GainMap, Hdr};
 use crate::story;
 use crate::frame::{fit_size, Animation, Frame, Transform};
 
@@ -31,6 +32,9 @@ pub struct Spec {
     /// Whether this is for a thumbnail, which for a video should be a
     /// telling frame rather than the one playback opens on.
     pub thumbnail: bool,
+    /// Which rendition of an Ultra HDR picture to show; for any other
+    /// picture, and for a thumbnail, it makes no difference.
+    pub hdr: Hdr,
 }
 
 /// A decoded file at full resolution, flattened to RGB but not yet turned
@@ -41,6 +45,11 @@ pub struct Source {
     pub orientation: Transform,
     /// The rest of an animated image; `None` for a still one.
     pub animation: Option<SourceAnimation>,
+    /// The gain map of an Ultra HDR picture, kept beside the ordinary one
+    /// so that either rendition can be made from what is decoded.
+    pub gain: Option<GainMap>,
+    /// Whether the file was looked at for a gain map at all.
+    pub looked: bool,
 }
 
 /// The pictures of an animation after the first, and how long every
@@ -58,7 +67,16 @@ pub fn read(path: &Path, spec: Spec) -> Result<Source> {
         frames: frames.into_iter().map(|frame| flatten(DynamicImage::ImageRgba8(frame), spec.background)).collect(),
         delays,
     });
-    Ok(Source { image: flatten(image, spec.background), orientation: transform_for(orientation), animation })
+    // An Ultra HDR file's gain map, only once another rendition than the
+    // ordinary one is asked for: reading it costs some milliseconds for
+    // each such photo, which the ordinary picture has no use for. A
+    // thumbnail is always the ordinary rendition.
+    let looked = !spec.thumbnail && spec.hdr != Hdr::Sdr && animation.is_none() && files::is_jpeg(path);
+    let gain = match looked {
+        true => std::fs::read(path).ok().and_then(|bytes| ultrahdr::gain_map(&bytes)),
+        false => None,
+    };
+    Ok(Source { image: flatten(image, spec.background), orientation: transform_for(orientation), animation, gain, looked })
 }
 
 /// A decoded file: its picture, or for an animation its first picture, the
@@ -390,7 +408,19 @@ pub fn finish(source: &Source, spec: Spec) -> Result<Frame> {
         }),
         None => None,
     };
-    let frame = Frame { width: size.0, height: size.1, native: (w, h), pixels: fit(&source.image)?, animation };
+    // An Ultra HDR picture in another rendition than the ordinary one is
+    // made at the size it is shown, from the ordinary picture and the gain
+    // map both brought to that size: far fewer pixels than the file's.
+    let pixels = match (&source.gain, spec.hdr) {
+        (Some(gain), Hdr::Full) => {
+            let sdr = if size == (w, h) { source.image.clone() } else { resize(&source.image, size)? };
+            let map = if gain.image.dimensions() == size { gain.image.clone() } else { resize(&gain.image, size)? };
+            to_pixels(&ultrahdr::compose(&sdr, &map, &gain.meta))
+        }
+        (Some(gain), Hdr::GainMap) => to_pixels(&if gain.image.dimensions() == size { gain.image.clone() } else { resize(&gain.image, size)? }),
+        _ => fit(&source.image)?,
+    };
+    let frame = Frame { width: size.0, height: size.1, native: (w, h), pixels, animation };
     Ok(if transform.is_identity() { frame } else { frame.transformed(transform) })
 }
 
@@ -487,7 +517,7 @@ mod tests {
     use image::{ImageFormat, Rgb};
 
     fn spec(target: Option<(u32, u32)>) -> Spec {
-        Spec { target, enlarge: false, transform: Transform::default(), background: 0, thumbnail: false }
+        Spec { target, enlarge: false, transform: Transform::default(), background: 0, thumbnail: false, hdr: Hdr::Sdr }
     }
 
     fn rgb(pixel: u32) -> (u32, u32, u32) {
@@ -592,6 +622,6 @@ mod tests {
     }
 
     fn source(image: DynamicImage, orientation: Orientation, background: u32) -> Source {
-        Source { image: flatten(image, background), orientation: transform_for(orientation), animation: None }
+        Source { image: flatten(image, background), orientation: transform_for(orientation), animation: None, gain: None, looked: false }
     }
 }
