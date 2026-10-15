@@ -270,14 +270,20 @@ mod tests {
 /// What format an image file is, by its first bytes and, for camera RAW
 /// files, which share TIFF's, by its ending: a short name for a badge.
 pub fn format_name(path: &Path) -> Option<String> {
-    use std::io::Read;
     if is_raw(path) {
         let ending = path.extension()?.to_str()?.to_uppercase();
         return Some(format!("RAW {ending}"));
     }
+    Some(sniff_file(path)?.to_string())
+}
+
+/// The format named by a file's first bytes, which RAW files share with
+/// TIFF; `format_name` tells those apart.
+pub fn sniff_file(path: &Path) -> Option<&'static str> {
+    use std::io::Read;
     let mut head = [0u8; 48];
     let read = std::fs::File::open(path).and_then(|mut file| file.read(&mut head)).ok()?;
-    Some(sniff(&head[..read])?.to_string())
+    sniff(&head[..read])
 }
 
 fn sniff(head: &[u8]) -> Option<&'static str> {

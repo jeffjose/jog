@@ -117,20 +117,27 @@ impl<'a> Canvas<'a> {
     pub fn fade_down(&mut self, x: i32, y: i32, w: i32, h: i32, keep: u32) {
         // An ordered dither: which of two neighbouring levels a pixel
         // takes depends on where it is in a 4 x 4 tile.
-        const TILE: [[f64; 4]; 4] =
-            [[0.0, 8.0, 2.0, 10.0], [12.0, 4.0, 14.0, 6.0], [3.0, 11.0, 1.0, 9.0], [15.0, 7.0, 13.0, 5.0]];
+        const TILE: [[u32; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
         let top = y.clamp(0, self.height);
-        for (row, pixels) in self.rows(x, y, w, h).enumerate() {
+        let (x0, x1) = (x.clamp(0, self.width) as usize, (x + w).clamp(0, self.width) as usize);
+        let (y0, y1) = (y.clamp(0, self.height) as usize, (y + h).clamp(0, self.height) as usize);
+        let width = self.width.max(1) as usize;
+        // Across the whole of a wide window, under the seek bar, this is
+        // most of a million pixels on every frame: a row per core, and
+        // the level worked out once for the row, in sixteenths, so that
+        // the dither is a whole number added.
+        let rows = self.pixels[y0 * width..y1.max(y0) * width].par_chunks_exact_mut(width);
+        rows.enumerate().for_each(|(row, pixels)| {
             let down = (f64::from(top + row as i32 - y) / f64::from(h.max(1))).clamp(0.0, 1.0);
             // Gently at first and at the last, as a shadow falls off.
             let eased = down * down * (3.0 - 2.0 * down);
-            let level = 256.0 - (256.0 - f64::from(keep)) * eased;
+            let level = ((256.0 - (256.0 - f64::from(keep)) * eased) * 16.0) as u32;
             let tile = &TILE[(top as usize + row) % 4];
-            for (column, pixel) in pixels.iter_mut().enumerate() {
-                let amount = (level + tile[column % 4] / 16.0).floor().clamp(0.0, 256.0) as u32;
-                *pixel = mix(0, *pixel, amount);
+            let amounts: [u32; 4] = std::array::from_fn(|column| ((level + tile[column]) / 16).min(256));
+            for (column, pixel) in pixels[x0..x1.max(x0)].iter_mut().enumerate() {
+                *pixel = mix(0, *pixel, amounts[column % 4]);
             }
-        }
+        });
     }
 
     /// Darkens a rectangle, keeping `keep`/256 of the brightness.
@@ -361,7 +368,7 @@ fn shrink(frame: &Frame, w: u32, h: u32) -> Option<Vec<u32>> {
         .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom))
         // The fourth byte is padding, not alpha.
         .use_alpha(false);
-    fir::Resizer::new().resize(&source, &mut target, &options).ok()?;
+    crate::render::with_resizer(|resizer| resizer.resize(&source, &mut target, &options)).ok()?;
     Some(pixels)
 }
 

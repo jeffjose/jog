@@ -12,6 +12,7 @@ use memchr::memmem;
 
 use crate::files;
 use crate::heif;
+use crate::render;
 use crate::ultrahdr::{self, GainMap, Hdr};
 use crate::story;
 use crate::frame::{fit_size, Animation, Frame, Transform};
@@ -50,6 +51,11 @@ pub struct Source {
     pub gain: Option<GainMap>,
     /// Whether the file was looked at for a gain map at all.
     pub looked: bool,
+    /// What the file's first bytes say it is, and whether it is an Ultra
+    /// HDR photo: for the badges beside its name, found here rather than
+    /// by the thread drawing the window reading the file.
+    pub format: Option<&'static str>,
+    pub ultra_hdr: bool,
 }
 
 /// The pictures of an animation after the first, and how long every
@@ -62,6 +68,11 @@ pub struct SourceAnimation {
 /// Decodes a file. `spec` says what the result is for, which picks the
 /// still of a video and the preview of a RAW file.
 pub fn read(path: &Path, spec: Spec) -> Result<Source> {
+    // A thumbnail's file is not the one whose badges are shown.
+    let (format, ultra_hdr) = match spec.thumbnail {
+        true => (None, false),
+        false => (files::sniff_file(path), files::is_jpeg(path) && ultrahdr::is_ultra_hdr(&head_of(path))),
+    };
     let Decoded { image, orientation, frames, delays } = decode_file(path, spec.target, spec.thumbnail)?;
     let animation = (!frames.is_empty()).then(|| SourceAnimation {
         frames: frames.into_iter().map(|frame| flatten(DynamicImage::ImageRgba8(frame), spec.background)).collect(),
@@ -76,7 +87,18 @@ pub fn read(path: &Path, spec: Spec) -> Result<Source> {
         true => std::fs::read(path).ok().and_then(|bytes| ultrahdr::gain_map(&bytes)),
         false => None,
     };
-    Ok(Source { image: flatten(image, spec.background), orientation: transform_for(orientation), animation, gain, looked })
+    Ok(Source { image: flatten(image, spec.background), orientation: transform_for(orientation), animation, gain, looked, format, ultra_hdr })
+}
+
+/// The first part of a file, as much as the Ultra HDR marking is looked
+/// for in: it comes before the picture.
+fn head_of(path: &Path) -> Vec<u8> {
+    use std::io::Read;
+    let mut head = Vec::new();
+    if let Ok(file) = std::fs::File::open(path) {
+        let _ = file.take(256 << 10).read_to_end(&mut head);
+    }
+    head
 }
 
 /// A decoded file: its picture, or for an animation its first picture, the
@@ -445,7 +467,7 @@ pub fn shrink(frame: &Frame, bounds: (u32, u32)) -> Result<Frame> {
         .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Lanczos3))
         // The fourth byte is padding, not alpha.
         .use_alpha(false);
-    fir::Resizer::new().resize(&source, &mut target, &options)?;
+    render::with_resizer(|resizer| resizer.resize(&source, &mut target, &options))?;
     Ok(Frame::still(width, height, frame.native, pixels))
 }
 
@@ -497,7 +519,7 @@ fn resize(src: &RgbImage, (width, height): (u32, u32)) -> Result<RgbImage> {
     let view = fir::images::ImageRef::new(src.width(), src.height(), src.as_raw(), fir::PixelType::U8x3)?;
     let mut dst = fir::images::Image::new(width, height, fir::PixelType::U8x3);
     let options = fir::ResizeOptions::new().resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Lanczos3));
-    fir::Resizer::new().resize(&view, &mut dst, &options)?;
+    render::with_resizer(|resizer| resizer.resize(&view, &mut dst, &options))?;
     Ok(RgbImage::from_raw(width, height, dst.into_vec()).expect("buffer matches dimensions"))
 }
 
@@ -512,7 +534,7 @@ fn enlarge(pixels: &[u32], (w, h): (u32, u32), (width, height): (u32, u32)) -> R
         .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom))
         // The fourth byte is padding, not alpha.
         .use_alpha(false);
-    fir::Resizer::new().resize(&source, &mut target, &options)?;
+    render::with_resizer(|resizer| resizer.resize(&source, &mut target, &options))?;
     Ok(out)
 }
 
@@ -627,6 +649,6 @@ mod tests {
     }
 
     fn source(image: DynamicImage, orientation: Orientation, background: u32) -> Source {
-        Source { image: flatten(image, background), orientation: transform_for(orientation), animation: None, gain: None, looked: false }
+        Source { image: flatten(image, background), orientation: transform_for(orientation), animation: None, gain: None, looked: false, format: None, ultra_hdr: false }
     }
 }

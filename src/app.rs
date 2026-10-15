@@ -55,6 +55,9 @@ const SMOOTH_ALWAYS: usize = 12_000_000;
 /// Magnification of the source frame from which scaling stops being smoothed.
 const SHOW_PIXELS_AT: u32 = 4;
 const TOAST: Duration = Duration::from_millis(1500);
+/// How long after a thumbnail comes in the grid or strip is drawn with
+/// it: the ones coming in just behind it get into the same frame.
+const THUMBS_REDRAW: Duration = Duration::from_millis(12);
 const DEFAULT_SLIDE_DELAY: f64 = 3.0;
 /// How often a slideshow checks whether the video it is waiting on is over.
 const VIDEO_END_POLL: Duration = Duration::from_millis(200);
@@ -976,6 +979,15 @@ pub struct App {
     /// The image layer as last rendered, reused when only overlays change.
     scene: Vec<u32>,
     scene_key: Option<SceneKey>,
+    /// The video frame as the player last drew it, and the window size and
+    /// video it was drawn for; copied from while the player has no newer.
+    /// Forgotten when a frame is taken from the player for anything else.
+    video_copy: Vec<u32>,
+    video_kept: Cell<Option<((u32, u32), Option<usize>)>>,
+    /// The filmstrip's pictures at the size its cells take them, by file
+    /// id and size, each with the thumbnail it was made from: shrinking
+    /// the thumbnails again on every frame is most of drawing the strip.
+    strip_thumbs: RefCell<HashMap<(usize, u32, u32), (Arc<Frame>, Arc<Frame>)>>,
 
     show_info: bool,
     /// Whether the grid names each file under its picture.
@@ -1516,6 +1528,9 @@ impl App {
             trailer_due: None,
             scene: Vec::new(),
             scene_key: None,
+            video_copy: Vec::new(),
+            video_kept: Cell::new(None),
+            strip_thumbs: RefCell::new(HashMap::new()),
             show_info: options.draw_info,
             grid_titles: options.grid_titles,
             show_debug: false,
@@ -2226,6 +2241,10 @@ impl App {
         // again once its queue has been emptied.
         let mut events = if let Signal::Events = signal { player.events() } else { Vec::new() };
         let mut video_started = None;
+        // Whether the time along is written anywhere: on the seek bar, in
+        // the info line, under the grid, or along the scenes. Elsewhere
+        // its moving on with every frame changes nothing in the window.
+        let time_shown = self.hover.is_some() || self.time_until.is_some() || self.show_info || self.show_debug || self.grid.is_some() || self.scenes_shown() || self.slide_at.is_some();
         let Some(video) = &mut self.video else { return };
         // One held ready by the spare player announced its frame before it
         // was this player, so that has to be looked for.
@@ -2233,9 +2252,22 @@ impl App {
             events.insert(0, PlayerEvent::Showing);
         }
         let mut at_end = false;
+        // Whether there is anything new to draw: a frame, or a property
+        // that moved, the time along say. The player also answers each
+        // setting made, and a frame drawn for the answer would set it
+        // again, the bar on its way up moving the subtitles' margin: a
+        // round of frames as fast as the answers come, until it stops.
+        let mut changed = matches!(signal, Signal::Frame);
         for event in events {
             if event == PlayerEvent::AtEnd {
                 at_end = true;
+                continue;
+            }
+            if event == PlayerEvent::Changed || (event == PlayerEvent::Moved && time_shown) {
+                changed = true;
+                continue;
+            }
+            if event == PlayerEvent::Moved {
                 continue;
             }
             // The still stays up until the player has a frame to show.
@@ -2270,9 +2302,10 @@ impl App {
         }
         // mpv stalls, for over half a second when changing file, if a frame
         // it has announced is not taken. Redrawing takes it, but that only
-        // happens once the video is showing, and never for the hidden window
-        // of a scripted run; in those cases take it here and discard it.
-        if matches!(signal, Signal::Frame) && (!video.showing || self.snapshot.is_some()) {
+        // happens once the video is showing; until then take it here and
+        // discard it. The hidden window of a scripted run is drawn like
+        // any other, and takes its frames the same way.
+        if matches!(signal, Signal::Frame) && !video.showing {
             let (width, height): (u32, u32) = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
             ui::size_for(&mut self.scene, width as usize * height as usize);
             self.scene_key = None;
@@ -2295,7 +2328,7 @@ impl App {
             video.tracks = Some((tracks_of(player, "sub").len(), tracks_of(player, "audio").len()));
         }
         let (id, showing) = (video.id, video.showing);
-        if showing || asked {
+        if (showing && (changed || video_started.is_some())) || asked {
             self.redraw();
         }
         if watched {
@@ -2624,13 +2657,16 @@ impl App {
         let (Some(player), Some(video)) = (&self.player, &mut self.video) else { return };
         match action {
             VideoAction::File(forward) => return self.step(forward),
-            VideoAction::Pause => player.command(&[b"cycle", b"pause"]),
+            // Queued, not waited for: the player's core gets to a command
+            // only when it is done with what it has in hand, which in the
+            // middle of a seek is the rest of the seek.
+            VideoAction::Pause => player.command_later(&[b"cycle", b"pause"]),
             VideoAction::Seek(seconds) => {
                 // To the nearest keyframe, which the player can show at
                 // once, unless the very moment asked for is wanted: getting
                 // there means decoding every frame from the keyframe before.
                 let how: &[u8] = if self.precise { b"relative+exact" } else { b"relative+keyframes" };
-                player.command(&[b"seek", seconds.to_string().as_bytes(), how]);
+                player.command_later(&[b"seek", seconds.to_string().as_bytes(), how]);
                 // mpv has not moved yet when asked straight after a seek, so
                 // quick presses build on where the last one was heading.
                 let from = match video.seeking {
@@ -2648,10 +2684,10 @@ impl App {
             }
             // Both leave the video paused on the frame they land on.
             VideoAction::Frame(true) => {
-                player.command(&[b"frame-step"]);
+                player.command_later(&[b"frame-step"]);
                 video.to_end = Some(Instant::now());
             }
-            VideoAction::Frame(false) => player.command(&[b"frame-back-step"]),
+            VideoAction::Frame(false) => player.command_later(&[b"frame-back-step"]),
             VideoAction::Volume(change) => {
                 player.command(&[b"add", b"volume", change.to_string().as_bytes()]);
                 let volume = player.number("volume").unwrap_or(0.0);
@@ -4485,6 +4521,8 @@ impl App {
         let (Some([_, _, w, h]), Some(player)) = (place, &self.player) else { return self.pip_live = None };
         let mut pixels = self.pip_live.take().map(|frame| frame.pixels).unwrap_or_default();
         pixels.resize((w * h) as usize, 0);
+        // The frame kept for the window is not the one the player has now.
+        self.video_kept.set(None);
         if player.render(&mut pixels, w as u32, h as u32) {
             // Its full size is the video's, for when it grows out of the cell.
             let native = self.shown.as_ref().filter(|(id, _)| *id == self.id()).map_or((w as u32, h as u32), |(_, frame)| frame.native);
@@ -5351,6 +5389,8 @@ impl App {
         let place = self.layout_of(native);
         let (w, h) = (place.width.min(window.0).max(1), place.height.min(window.1).max(1));
         let mut pixels = vec![0; w as usize * h as usize];
+        // The frame kept for the window is not the one the player has now.
+        self.video_kept.set(None);
         self.player.as_ref()?.render(&mut pixels, w, h).then(|| Arc::new(Frame::still(w, h, native, pixels)))
     }
 
@@ -7606,16 +7646,43 @@ impl App {
         let playing = self.grid.is_none() && self.video.as_ref().is_some_and(|video| video.showing);
         let player = self.player.as_ref().filter(|_| playing);
         let started = Instant::now();
-        if player.is_some_and(|player| player.render(pixels, window.0, window.1)) {
-            self.perf.render = started.elapsed();
-            self.repainted.set(true);
-            self.scene_live = false;
-            let overlays = Instant::now();
-            self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
-            if self.options.debug {
-                eprintln!("jog: {:>7.1?} draw  video  overlays {:>7.1?}", self.perf.render, overlays.elapsed());
+        if let Some(player) = player {
+            // The player draws a new frame straight into the window. A
+            // frame drawn over again, for the pointer moving over the bar
+            // or a word coming up, is copied from a copy kept of it: a
+            // fraction of what the player takes to scale it to a large
+            // window, and the display is then told only of what moved
+            // over it. The copy is made the first time it is wanted,
+            // so that playback with nothing over it pays nothing for it.
+            let len = window.0 as usize * window.1 as usize;
+            let showing = self.video.as_ref().map(|video| video.id);
+            let kept = self.video_kept.get() == Some((window, showing)) && self.video_copy.len() == len;
+            let drawn = if player.frame_waiting() {
+                self.video_kept.set(None);
+                self.repainted.set(true);
+                player.render(pixels, window.0, window.1)
+            } else if !kept {
+                ui::size_for(&mut self.video_copy, len);
+                let drawn = player.render(&mut self.video_copy, window.0, window.1);
+                self.video_kept.set(drawn.then_some((window, showing)));
+                if drawn {
+                    ui::copy_into(pixels, &self.video_copy);
+                }
+                drawn
+            } else {
+                ui::copy_into(pixels, &self.video_copy);
+                true
+            };
+            if drawn {
+                self.perf.render = started.elapsed();
+                self.scene_live = false;
+                let overlays = Instant::now();
+                self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
+                if self.options.debug {
+                    eprintln!("jog: {:>7.1?} draw  video  overlays {:>7.1?}", self.perf.render, overlays.elapsed());
+                }
+                return;
             }
-            return;
         }
         let source = if self.grid.is_some() { None } else { self.source() };
         match source {
@@ -7665,12 +7732,23 @@ impl App {
                 }
                 let picture = if frame.animation.is_some() { self.picture } else { 0 };
                 let key = SceneKey { frame, picture, layout, smooth, window };
-                if !self.scene_key.as_ref().is_some_and(|current| current.matches(&key)) {
-                    self.scene_id = shown;
-                    let started = Instant::now();
+                let same = self.scene_key.as_ref().is_some_and(|current| current.matches(&key));
+                // A picture shown at the size it was made, which most are,
+                // is copied straight into the window: scaling it would be
+                // a copy anyway, and a copy kept to copy from is only the
+                // same copy twice over. A scaled picture is kept, so that
+                // a frame drawn over it again does not scale it again.
+                let direct = (key.frame.width, key.frame.height) == (layout.width, layout.height);
+                let background = self.options.background;
+                let started = Instant::now();
+                if direct {
+                    render::draw_image(pixels, window, &key.frame, picture, layout, smooth, background);
+                } else if !same {
                     ui::size_for(&mut self.scene, pixels.len());
-                    let background = self.options.background;
                     render::draw_image(&mut self.scene, window, &key.frame, picture, layout, smooth, background);
+                }
+                if !same {
+                    self.scene_id = shown;
                     let took = started.elapsed();
                     if self.options.debug {
                         let how = if smooth { "smooth" } else { "nearest" };
@@ -7684,7 +7762,9 @@ impl App {
                     self.scene_key = Some(key);
                     self.repainted.set(true);
                 }
-                ui::copy_into(pixels, &self.scene);
+                if !direct {
+                    ui::copy_into(pixels, &self.scene);
+                }
                 self.scene_live = true;
             }
             None => {
@@ -8461,10 +8541,17 @@ impl App {
             return *known;
         }
         let path = &self.files[id];
-        let found = files::is_jpeg(path) && {
-            use std::io::Read;
-            let mut head = Vec::new();
-            std::fs::File::open(path).and_then(|file| file.take(256 << 10).read_to_end(&mut head)).is_ok() && ultrahdr::is_ultra_hdr(&head)
+        // The thread that decoded the file looked, and reading the file
+        // here would hold up the frame; only a file not decoded yet is read.
+        let found = match self.loader.sniffed(id) {
+            Some((_, ultra_hdr)) => ultra_hdr,
+            None => {
+                files::is_jpeg(path) && {
+                    use std::io::Read;
+                    let mut head = Vec::new();
+                    std::fs::File::open(path).and_then(|file| file.take(256 << 10).read_to_end(&mut head)).is_ok() && ultrahdr::is_ultra_hdr(&head)
+                }
+            }
         };
         self.ultra_hdr.borrow_mut().insert(id, found);
         found
@@ -8475,7 +8562,13 @@ impl App {
         if let Some(known) = self.formats.borrow().get(&id) {
             return known.clone();
         }
-        let found = files::format_name(&self.files[id]);
+        let path = &self.files[id];
+        // As the thread that decoded the file found it, when it has; a
+        // RAW file's name is from its ending, with nothing read.
+        let found = match self.loader.sniffed(id).filter(|_| !files::is_raw(path)) {
+            Some((format, _)) => format.map(str::to_string),
+            None => files::format_name(path),
+        };
         self.formats.borrow_mut().insert(id, found.clone());
         found
     }
@@ -8704,6 +8797,27 @@ impl App {
         (0..self.list.len() as i64).contains(&pos).then_some(pos as usize)
     }
 
+    /// A thumbnail at the size a filmstrip cell takes it, made once and
+    /// kept; the thumbnail as it is when the cell is no smaller.
+    fn strip_thumb(&self, id: usize, thumb: &Arc<Frame>, (w, h): (u32, u32)) -> Arc<Frame> {
+        if w >= thumb.width && h >= thumb.height {
+            return thumb.clone();
+        }
+        let mut kept = self.strip_thumbs.borrow_mut();
+        // The one kept is for this very thumbnail, not one since redone.
+        if let Some((_, small)) = kept.get(&(id, w, h)).filter(|(from, _)| Arc::ptr_eq(from, thumb)) {
+            return small.clone();
+        }
+        // A couple of hundred cells' worth is some megabytes; past that it
+        // is started afresh rather than grown without end.
+        if kept.len() >= 200 {
+            kept.clear();
+        }
+        let small = Arc::new(crate::decode::shrink(thumb, (w, h)).unwrap_or_else(|_| Frame::still(thumb.width, thumb.height, thumb.native, thumb.pixels.clone())));
+        kept.insert((id, w, h), (thumb.clone(), small.clone()));
+        small
+    }
+
     fn draw_strip(&self, canvas: &mut Canvas, strip: Strip) {
         canvas.shade(0, strip.top, canvas.width, strip.height, 64);
         let reach = i64::from(canvas.width / 2 / strip.pitch() + 1);
@@ -8723,9 +8837,10 @@ impl App {
                 Some(thumb) => {
                     let bounds = (strip.cell_w as u32, strip.cell_h as u32);
                     let (w, h) = fit_size((thumb.width, thumb.height), bounds, false);
+                    let small = self.strip_thumb(self.list[pos], &thumb, (w, h));
                     let (w, h) = (w as i32, h as i32);
                     let place = [left + (strip.cell_w - w) / 2, top + (strip.cell_h - h) / 2, w, h];
-                    canvas.image_rounded(&thumb, place[0], place[1], w, h, round);
+                    canvas.image_rounded(&small, place[0], place[1], w, h, round);
                     place
                 }
                 None => {
@@ -9951,8 +10066,11 @@ impl ApplicationHandler<Event> for App {
                 self.start_snapshot(event_loop);
             }
             Event::Loaded(Job::Full(id)) if id == self.id() => self.redraw(),
+            // Thumbnails come in a burst, several in a frame's time: the
+            // page is drawn once for a few of them rather than for each.
             Event::Loaded(Job::Thumb(_)) if self.strip_visible() || self.grid.is_some() || self.palette.is_some() => {
-                self.redraw()
+                let due = Instant::now() + THUMBS_REDRAW;
+                self.grid_due = Some(self.grid_due.map_or(due, |at| at.min(due)));
             }
             Event::Loaded(_) => {}
             Event::Converted { created, failed, format } => self.converted(created, failed, format),
@@ -10172,7 +10290,11 @@ impl ApplicationHandler<Event> for App {
         let toast_until = self.toast.as_ref().map(|(_, until)| *until);
         // A little before that it starts on its way out, which wants drawing.
         let toast_leaves = toast_until.map(|until| until - EASE);
-        if self.options.animations && toast_leaves.is_some_and(|at| at <= now) {
+        // Once it is on its way, the frames are paced by the display,
+        // as any movement is; asked for here as well, with this run after
+        // every frame, they would follow one another as fast as they
+        // could be drawn.
+        if self.options.animations && toast_leaves.is_some_and(|at| at <= now) && self.anim_due.is_none() {
             self.redraw();
         }
         let toast_leaves = toast_leaves.filter(|at| *at > now);

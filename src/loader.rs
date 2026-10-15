@@ -63,6 +63,10 @@ pub struct Made {
     /// Time spent scaling and turning what was decoded.
     pub fit: Duration,
     pub at: Instant,
+    /// What the file's first bytes say it is, and whether it is an Ultra
+    /// HDR photo, as found while it was read; nothing for a thumbnail.
+    pub format: Option<&'static str>,
+    pub ultra_hdr: bool,
 }
 
 /// What the loader is holding, for the debug overlay.
@@ -262,6 +266,11 @@ struct Shared {
     wake: Condvar,
     /// Whether each job is reported on the terminal as it finishes.
     debug: AtomicBool,
+    /// The job for the image on view while its scaling is on the pool,
+    /// which it has to itself: the neighbours' scaling waits, on `calm`,
+    /// rather than take its turn in the way of what is being waited for.
+    urgent: Mutex<Option<Job>>,
+    calm: Condvar,
 }
 
 /// Decodes the current image and its neighbours on background threads so
@@ -282,7 +291,14 @@ impl Loader {
         on_loaded: impl Fn(Job) + Send + Sync + 'static,
     ) -> Self {
         let state = Mutex::new(State { files, ..State::default() });
-        let shared = Arc::new(Shared { background, state, wake: Condvar::new(), debug: AtomicBool::new(debug) });
+        let shared = Arc::new(Shared {
+            background,
+            state,
+            wake: Condvar::new(),
+            debug: AtomicBool::new(debug),
+            urgent: Mutex::new(None),
+            calm: Condvar::new(),
+        });
         let on_loaded = Arc::new(on_loaded);
         let workers = std::thread::available_parallelism().map_or(1, |n| n.get()).min(MAX_WORKERS);
 
@@ -389,6 +405,14 @@ impl Loader {
         slot.frame.as_ref().ok().filter(|_| slot.transform == state.transform(id)).cloned()
     }
 
+    /// What the file's first bytes said it was when its frame was made,
+    /// and whether it is an Ultra HDR photo; nothing until then.
+    pub fn sniffed(&self, id: usize) -> Option<(Option<&'static str>, bool)> {
+        let state = self.shared.state.lock().unwrap();
+        let slot = state.fitted.get(&id).filter(|slot| slot.frame.is_ok())?;
+        Some((slot.made.format, slot.made.ultra_hdr))
+    }
+
     pub fn stats(&self, id: usize) -> Stats {
         let state = self.shared.state.lock().unwrap();
         let kept = |cache: &HashMap<usize, Slot>| (cache.len(), cache.values().map(Slot::bytes).sum());
@@ -444,6 +468,9 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
             continue;
         };
         let (spec, work, keep) = state.plan(job, shared.background);
+        // The image on view, or its full-resolution version: what is
+        // being waited for.
+        let urgent = !matches!(job, Job::Thumb(_)) && state.request.wanted.first() == Some(&job.id());
         state.busy.insert(job);
         let path = state.files[job.id()].clone();
         drop(state);
@@ -454,9 +481,9 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
             Work::FromSource(_) => "from decoded",
             Work::FromFrame(_) => "from frame",
         };
-        let (result, source, read) = perform(work, spec, keep);
+        let (result, source, read, (format, ultra_hdr)) = perform(shared, (job, urgent), work, spec, keep);
         let took = started.elapsed();
-        let made = Made { how, read, fit: took.saturating_sub(read), at: Instant::now() };
+        let made = Made { how, read, fit: took.saturating_sub(read), at: Instant::now(), format, ultra_hdr };
         if shared.debug.load(Ordering::Relaxed) {
             let kind = match job {
                 Job::Fitted(_) => "fit",
@@ -492,27 +519,60 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
 /// Does a job. Returns the frame and, when asked to keep it and it is
 /// larger than the frame wanted, the decoded file; then how long reading
 /// and decoding the file took, which is no time when it was not read.
-fn perform(work: Work, spec: Spec, keep: bool) -> (decode::Result<Frame>, Option<Arc<Source>>, Duration) {
+type Performed = (decode::Result<Frame>, Option<Arc<Source>>, Duration, (Option<&'static str>, bool));
+
+fn perform(shared: &Shared, job: (Job, bool), work: Work, spec: Spec, keep: bool) -> Performed {
     match work {
         Work::Decode(path) => {
             let started = Instant::now();
             let source = match decode::read(&path, spec) {
                 Ok(source) => source,
-                Err(error) => return (Err(error), None, started.elapsed()),
+                Err(error) => return (Err(error), None, started.elapsed(), (None, false)),
             };
             let read = started.elapsed();
-            let frame = decode_pool().install(|| decode::finish(&source, spec));
+            let sniffed = (source.format, source.ultra_hdr);
+            let frame = on_pool(shared, job, || decode::finish(&source, spec));
             // The file is kept when the frame is not its pixels as they
             // are, and so zooming in would want them. An animation is
             // never wanted at full resolution, and would take much more
             // room than a still.
             let scaled = frame.as_ref().is_ok_and(|frame| !frame.is_native());
             let worth_keeping = keep && scaled && source.animation.is_none();
-            (frame, worth_keeping.then(|| Arc::new(source)), read)
+            (frame, worth_keeping.then(|| Arc::new(source)), read, sniffed)
         }
-        Work::FromSource(source) => (decode_pool().install(|| decode::finish(&source, spec)), None, Duration::ZERO),
+        Work::FromSource(source) => {
+            let sniffed = (source.format, source.ultra_hdr);
+            (on_pool(shared, job, || decode::finish(&source, spec)), None, Duration::ZERO, sniffed)
+        }
         Work::FromFrame(frame) => {
-            (decode_pool().install(|| decode::shrink(&frame, spec.target.unwrap_or_default())), None, Duration::ZERO)
+            (on_pool(shared, job, || decode::shrink(&frame, spec.target.unwrap_or_default())), None, Duration::ZERO, (None, false))
         }
     }
+}
+
+/// Runs the scaling of a job on the pool. The urgent job, the one for the
+/// image on view, has the pool to itself: the others wait for it to be
+/// done before they start, since on the pool they would all share the
+/// cores alike, and the one waited for would take as long as the lot.
+fn on_pool<R: Send>(shared: &Shared, (job, urgent): (Job, bool), work: impl FnOnce() -> R + Send) -> R {
+    let mut first = shared.urgent.lock().unwrap();
+    if urgent {
+        *first = Some(job);
+    } else {
+        while first.is_some() {
+            first = shared.calm.wait(first).unwrap();
+        }
+    }
+    drop(first);
+    let result = decode_pool().install(work);
+    if urgent {
+        let mut first = shared.urgent.lock().unwrap();
+        // Another may have taken over as the one on view meanwhile.
+        if *first == Some(job) {
+            *first = None;
+        }
+        drop(first);
+        shared.calm.notify_all();
+    }
+    result
 }

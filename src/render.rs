@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::sync::Mutex;
 
 use fast_image_resize as fir;
 use fir::IntoImageView;
@@ -165,8 +166,30 @@ fn resample(dst: &mut [u32], win_w: usize, frame: &Frame, pixels: &[u32], layout
         // The fourth byte is padding, not alpha.
         .use_alpha(false);
     let source = source.image_view::<fir::pixels::U8x4>().ok_or("pixel type")?;
-    fir::Resizer::new().resize_typed(&source, &mut target, &options)?;
+    with_resizer(|resizer| resizer.resize_typed(&source, &mut target, &options))?;
     Ok(())
+}
+
+/// Scalers kept to be used again. Each holds on to a working buffer the
+/// size of what it last scaled: a picture the size of the screen needs
+/// tens of megabytes, which a scaler made afresh for every picture has
+/// the system hand out and then writes through with zeros, several
+/// milliseconds of nothing before the scaling begins.
+static RESIZERS: Mutex<Vec<fir::Resizer>> = Mutex::new(Vec::new());
+/// Enough for the thread drawing the window and a decode thread at once,
+/// which is the usual case; a burst of decodes takes fresh scalers and
+/// lets them go, rather than keep a screenful of memory for each.
+const RESIZERS_KEPT: usize = 2;
+
+pub fn with_resizer<R>(scale: impl FnOnce(&mut fir::Resizer) -> R) -> R {
+    let taken = RESIZERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).pop();
+    let mut resizer = taken.unwrap_or_else(fir::Resizer::new);
+    let result = scale(&mut resizer);
+    let mut kept = RESIZERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if kept.len() < RESIZERS_KEPT {
+        kept.push(resizer);
+    }
+    result
 }
 
 #[cfg(test)]

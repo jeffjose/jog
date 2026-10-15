@@ -140,6 +140,10 @@ pub enum PlayerEvent {
     Ended,
     /// Playback ran into the end of the file, where it holds the last frame.
     AtEnd,
+    /// A watched property has a new value.
+    Changed,
+    /// The time along has moved on, which it does with every frame.
+    Moved,
 }
 
 type Wake = Box<dyn Fn(Signal) + Send + Sync>;
@@ -174,12 +178,15 @@ const WATCHED: &[(&str, c_int)] = &[
     ("volume", FORMAT_DOUBLE),
     ("track-list/count", FORMAT_DOUBLE),
     ("video-format", FORMAT_STRING),
+    ("video-params/gamma", FORMAT_STRING),
+    ("video-params/primaries", FORMAT_STRING),
+    ("container-fps", FORMAT_DOUBLE),
     ("frame-drop-count", FORMAT_DOUBLE),
     ("vo-drop-frame-count", FORMAT_DOUBLE),
 ];
 
 /// A property's value as last told of.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 enum Known {
     Flag(bool),
     Number(f64),
@@ -401,7 +408,9 @@ impl Player {
     }
 
     pub fn stop(&self) {
-        self.command(&[b"stop"]);
+        // Queued: waited for, it would take as long as whatever the core
+        // has in hand, a seek or the opening of a file.
+        self.command_later(&[b"stop"]);
     }
 
     /// Sets a property, without waiting for the player to get to it:
@@ -502,7 +511,13 @@ impl Player {
                     if WATCHED[index].0 == "eof-reached" && matches!(value, Some(Known::Flag(true))) {
                         events.push(PlayerEvent::AtEnd);
                     }
-                    self.known.lock().unwrap()[index] = value;
+                    let mut known = self.known.lock().unwrap();
+                    // Told of again with the same value, as it is on a
+                    // file being opened, nothing has changed.
+                    if known[index] != value {
+                        known[index] = value;
+                        events.push(if WATCHED[index].0 == "time-pos" { PlayerEvent::Moved } else { PlayerEvent::Changed });
+                    }
                 }
                 EVENT_START_FILE => events.push(PlayerEvent::Started),
                 EVENT_PLAYBACK_RESTART => events.push(PlayerEvent::Showing),
