@@ -20,6 +20,7 @@ mod scopes;
 mod screen;
 mod search;
 mod sessions;
+mod shellpaths;
 mod seen;
 mod story;
 mod trailer;

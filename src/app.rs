@@ -20,6 +20,7 @@ use winit::window::{Fullscreen, Window, WindowId};
 use crate::commands::{self, Applies, Command, MenuItem};
 use crate::convert::{self, Format};
 use crate::scopes;
+use crate::shellpaths;
 use crate::ultrahdr::{self, Hdr};
 use crate::hdrmeta;
 use crate::files::{self, Sort};
@@ -3240,6 +3241,7 @@ impl App {
             }
             CopyName => self.copy_text(false),
             CopyPath => self.copy_text(true),
+            CopyShell => self.copy_for_shell(),
             CopyTo => self.send(false, event_loop),
             MoveTo => self.send(true, event_loop),
             CopyToAsk => self.ask_folder(false),
@@ -3403,6 +3405,26 @@ impl App {
     }
 
     /// Copies file names, or full paths, to the clipboard and the terminal.
+    /// Copies the target files' paths on one line for a shell, each
+    /// folder's files folded together with braces: to be pasted after
+    /// `rm` or `ls`.
+    fn copy_for_shell(&mut self) {
+        let paths: Vec<PathBuf> = self.targets().into_iter().map(|id| self.files[id].clone()).collect();
+        let line = shellpaths::compress(&paths);
+        println!("[copy] {line}");
+        // Said as it is, and no more of it than fits a corner.
+        let shown = match line.chars().count() {
+            0..=70 => line.clone(),
+            _ => format!("{}…", line.chars().take(68).collect::<String>()),
+        };
+        // A scripted test run must not replace the user's clipboard.
+        if self.snapshot.is_some() || ops::set_clipboard(&line) {
+            self.toast(format!("Copied {shown}"));
+        } else {
+            self.toast("No clipboard tool found (xclip, xsel or wl-copy); printed to the terminal");
+        }
+    }
+
     fn copy_text(&mut self, full_path: bool) {
         let lines: Vec<String> = self
             .targets()
