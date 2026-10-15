@@ -63,6 +63,8 @@ const DEFAULT_SLIDE_DELAY: f64 = 3.0;
 const VIDEO_END_POLL: Duration = Duration::from_millis(200);
 /// Seconds that `<` and `>` move through a video.
 const SEEK_STEP: f64 = 5.0;
+/// How long a window must keep its size before a video is drawn at it.
+const RESIZE_SETTLE: Duration = Duration::from_millis(250);
 /// Videos shorter than this many seconds always start from the beginning.
 const RESUME_MIN_LENGTH: f64 = 60.0;
 /// A video left within this many seconds of either end starts over.
@@ -1108,6 +1110,11 @@ pub struct App {
     scene_over: Option<usize>,
     scenes: HashMap<usize, SceneList>,
     scene_finder: Option<scenes::Finder>,
+    /// The size the player last drew a video at, when the window last
+    /// changed size, and the frame drawn at the old size while it does.
+    video_render: Option<(u32, u32)>,
+    resized_at: Option<Instant>,
+    video_scratch: Vec<u32>,
     /// Whether subtitles show, kept from one video to the next, their size
     /// as a percentage, and how far off the bottom edge they sit.
     subtitles: bool,
@@ -1597,6 +1604,9 @@ impl App {
             scene_over: None,
             scenes: HashMap::new(),
             scene_finder: None,
+            video_render: None,
+            resized_at: None,
+            video_scratch: Vec::new(),
             subtitles: options.subtitles,
             subtitle_size: options.subtitle_size,
             subtitle_margin: SUBTITLE_MARGIN,
@@ -2311,7 +2321,9 @@ impl App {
         // discard it. The hidden window of a scripted run is drawn like
         // any other, and takes its frames the same way.
         if matches!(signal, Signal::Frame) && !video.showing {
-            let (width, height): (u32, u32) = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
+            // At the size it last drew at: another has it set itself up anew.
+            let window: (u32, u32) = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
+            let (width, height) = self.video_render.unwrap_or(window);
             ui::size_for(&mut self.scene, width as usize * height as usize);
             self.scene_key = None;
             player.render(&mut self.scene, width, height);
@@ -2897,10 +2909,16 @@ impl App {
                 let layout = self.layout_of(native);
                 // mpv's zoom is a power of two on top of filling the window.
                 let filling = fit_size(native, window, true);
+                // Less than a pixel either way is the layout's rounding, and
+                // not passed on: each change has the player's renderer set
+                // itself up again, which for a large video costs ten frames'
+                // time, and resizing the window would change it every time.
                 let zoom = (f64::from(layout.width) / f64::from(filling.0)).log2();
+                let zoom = if layout.width.abs_diff(filling.0) <= 1 { 0.0 } else { zoom };
                 // Its pan is the offset from centre as a share of the scaled size.
                 let pan = |origin: i32, size: u32, across: u32| {
-                    (f64::from(origin) + f64::from(size) / 2.0 - f64::from(across) / 2.0) / f64::from(size)
+                    let off = f64::from(origin) + f64::from(size) / 2.0 - f64::from(across) / 2.0;
+                    if off.abs() <= 1.0 { 0.0 } else { off / f64::from(size) }
                 };
                 (zoom, (pan(layout.x, layout.width, window.0), pan(layout.y, layout.height, window.1)))
             }
@@ -2933,6 +2951,15 @@ impl App {
             }
         }
         *sent = Some(values);
+    }
+
+    /// Where the video's picture lies in the window: fitted and centred,
+    /// as the player draws it. x, y, and its scale.
+    fn video_place(size: (u32, u32), window: (u32, u32)) -> (f64, f64, f64) {
+        let scale = (f64::from(window.0) / f64::from(size.0.max(1))).min(f64::from(window.1) / f64::from(size.1.max(1)));
+        let x = (f64::from(window.0) - f64::from(size.0) * scale) / 2.0;
+        let y = (f64::from(window.1) - f64::from(size.1) * scale) / 2.0;
+        (x, y, scale)
     }
 
     fn set_zoom(&mut self, zoom: Zoom) {
@@ -7671,6 +7698,13 @@ impl App {
         let player = self.player.as_ref().filter(|_| playing);
         let started = Instant::now();
         if let Some(player) = player {
+            // Asked to draw at a size it has not drawn at, the player sets
+            // itself up afresh, which for a large video is ten times as long
+            // as the frame: while the window is being resized, every frame. So
+            // it draws at the size it had, and the frame is scaled here, until
+            // the window has kept one size for a moment.
+            let resizing = self.resized_at.is_some_and(|at| at.elapsed() < RESIZE_SETTLE);
+            let size = self.video_render.filter(|size| resizing && *size != window && size.0 > 0 && size.1 > 0).unwrap_or(window);
             // The player draws a new frame straight into the window. A
             // frame drawn over again, for the pointer moving over the bar
             // or a word coming up, is copied from a copy kept of it: a
@@ -7681,11 +7715,26 @@ impl App {
             let len = window.0 as usize * window.1 as usize;
             let showing = self.video.as_ref().map(|video| video.id);
             let kept = self.video_kept.get() == Some((window, showing)) && self.video_copy.len() == len;
-            let drawn = if player.frame_waiting() {
+            let drawn = if size != window {
+                self.video_kept.set(None);
+                self.repainted.set(true);
+                ui::size_for(&mut self.video_scratch, size.0 as usize * size.1 as usize);
+                let drawn = player.render(&mut self.video_scratch, size.0, size.1);
+                if drawn {
+                    let (x, y, scale) = Self::video_place(size, window);
+                    let at = [x as i32, y as i32, (f64::from(size.0) * scale) as i32, (f64::from(size.1) * scale) as i32];
+                    ui::fill_all(pixels, 0);
+                    let whole = [0.0, 0.0, f64::from(size.0), f64::from(size.1)];
+                    let _ = render::draw_crop(pixels, window.0 as usize, &self.video_scratch, size, whole, at);
+                }
+                drawn
+            } else if player.frame_waiting() {
+                self.video_render = Some(window);
                 self.video_kept.set(None);
                 self.repainted.set(true);
                 player.render(pixels, window.0, window.1)
             } else if !kept {
+                self.video_render = Some(window);
                 ui::size_for(&mut self.video_copy, len);
                 let drawn = player.render(&mut self.video_copy, window.0, window.1);
                 self.video_kept.set(drawn.then_some((window, showing)));
@@ -10196,6 +10245,11 @@ impl ApplicationHandler<Event> for App {
                 self.menu = None;
                 self.request();
                 self.apply_video_view();
+                // A video is drawn at its old size until this one holds.
+                if self.video.is_some() {
+                    self.resized_at = Some(Instant::now());
+                    self.settle_at = Some(Instant::now() + RESIZE_SETTLE);
+                }
                 self.redraw();
             }
             // Coming back to the window, all of it is drawn afresh: a part

@@ -77,6 +77,32 @@ pub fn draw_image(dst: &mut [u32], window: (u32, u32), frame: &Frame, picture: u
     });
 }
 
+/// Scales the `crop` rectangle (x, y, width, height) of a `size` picture
+/// into the rectangle `at` (x, y, width, height) of a window `win_w`
+/// pixels wide, smoothly. `at` must lie inside the window.
+pub fn draw_crop(dst: &mut [u32], win_w: usize, pixels: &[u32], size: (u32, u32), crop: [f64; 4], at: [i32; 4]) -> Result<(), Box<dyn Error>> {
+    let source = fir::images::ImageRef::new(size.0, size.1, bytemuck::cast_slice(pixels), fir::PixelType::U8x4)?;
+    let mut target = Strided {
+        pixels: dst,
+        offset: at[1].max(0) as usize * win_w + at[0].max(0) as usize,
+        stride: win_w,
+        width: at[2].max(1) as u32,
+        height: at[3].max(1) as u32,
+    };
+    // Kept inside the picture: a crop worked out to its very edge can come
+    // past it by a rounding error, and is then refused.
+    let (sw, sh) = (f64::from(size.0), f64::from(size.1));
+    let (x, y) = (crop[0].clamp(0.0, sw - 1.0), crop[1].clamp(0.0, sh - 1.0));
+    let (w, h) = (crop[2].min(sw - x).max(1.0), crop[3].min(sh - y).max(1.0));
+    let options = fir::ResizeOptions::new()
+        .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom))
+        .crop(x, y, w, h)
+        .use_alpha(false);
+    let source = source.image_view::<fir::pixels::U8x4>().ok_or("pixel type")?;
+    with_resizer(|resizer| resizer.resize_typed(&source, &mut target, &options))?;
+    Ok(())
+}
+
 fn fill_all(dst: &mut [u32], background: u32) {
     dst.par_chunks_mut(1 << 16).for_each(|part| part.fill(background));
 }
