@@ -10,6 +10,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::cell::{Cell, RefCell};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -159,6 +160,10 @@ pub struct Player {
     known: Mutex<Vec<Option<Known>>>,
     /// Whether this player watches them: a preview player does not.
     watching: bool,
+    /// Whether the file open is HLG, and the filters the viewer has asked
+    /// for, to turn or mirror it: see `set_filter`.
+    hlg: Cell<bool>,
+    view_filter: RefCell<String>,
     /// Handed to mpv as callback context, so it must not move.
     _wake: Box<Wake>,
     /// Keeps the function pointers in `api` valid. Dropped last.
@@ -317,14 +322,15 @@ impl Player {
             // Asked for after the callbacks are in place: mpv queues an
             // event for each straight away, and only signals when its
             // queue was empty.
-            if matches!(role, Role::Playback { .. }) {
-                for (index, (name, format)) in WATCHED.iter().enumerate() {
+            // A preview watches only the curve its file is coded on.
+            for (index, (name, format)) in WATCHED.iter().enumerate() {
+                if matches!(role, Role::Playback { .. }) || *name == "video-params/gamma" {
                     (api.observe_property)(handle, index as u64 + 1, c_string(name).as_ptr(), *format);
                 }
             }
             let known = Mutex::new(vec![None; WATCHED.len()]);
             let watching = matches!(role, Role::Playback { .. });
-            Ok(Player { api, handle, render, known, watching, _wake: wake, _library: library })
+            Ok(Player { api, handle, render, known, watching, hlg: Cell::new(false), view_filter: RefCell::new(String::new()), _wake: wake, _library: library })
         }
     }
 
@@ -384,7 +390,8 @@ impl Player {
         self.pick_tracks();
         self.set("pause", "yes");
         // Whatever view the last video was given is not this one's.
-        for (name, value) in [("vf", ""), ("video-zoom", "0"), ("video-pan-x", "0"), ("video-pan-y", "0")] {
+        self.set_filter("");
+        for (name, value) in [("video-zoom", "0"), ("video-pan-x", "0"), ("video-pan-y", "0")] {
             self.set(name, value);
         }
         let start = from.map(|seconds| format!("start={seconds:.3}"));
@@ -418,6 +425,26 @@ impl Player {
     /// waiting takes as long as the core is busy, which when it is
     /// opening a file is hundreds of milliseconds. The settings reach
     /// it in the order they are made, along with the commands.
+    /// Sets the filters the viewer wants, as mpv's `vf` would take them.
+    /// They go after the one this player puts in by itself for HLG.
+    pub fn set_filter(&self, filter: &str) {
+        if *self.view_filter.borrow() != filter {
+            *self.view_filter.borrow_mut() = filter.to_string();
+            self.apply_filter();
+        }
+    }
+
+    /// An HLG video comes out of the software renderer white, with the
+    /// brightest parts gone magenta and cyan: mpv 0.34 converts HLG with no
+    /// tone mapping, and clips. HLG was made to look right on an SDR screen
+    /// as it is, so the player is told it is SDR and converts nothing.
+    fn apply_filter(&self) {
+        let view = self.view_filter.borrow();
+        let hlg = self.hlg.get().then_some("format=gamma=bt.1886");
+        let filters: Vec<&str> = hlg.into_iter().chain((!view.is_empty()).then_some(view.as_str())).collect();
+        self.set("vf", &filters.join(","));
+    }
+
     pub fn set(&self, property: &str, value: &str) {
         let value = c_string(value);
         let mut text: *const c_char = value.as_ptr();
@@ -511,6 +538,12 @@ impl Player {
                     };
                     if WATCHED[index].0 == "eof-reached" && matches!(value, Some(Known::Flag(true))) {
                         events.push(PlayerEvent::AtEnd);
+                    }
+                    if WATCHED[index].0 == "video-params/gamma" {
+                        let hlg = matches!(&value, Some(Known::Text(gamma)) if gamma == "hlg");
+                        if hlg != self.hlg.replace(hlg) {
+                            self.apply_filter();
+                        }
                     }
                     let mut known = self.known.lock().unwrap();
                     // Told of again with the same value, as it is on a

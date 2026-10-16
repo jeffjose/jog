@@ -2925,7 +2925,11 @@ impl App {
         let mut sent = self.video_view_sent.borrow_mut();
         for (index, name) in ["video-zoom", "video-pan-x", "video-pan-y", "vf"].into_iter().enumerate() {
             if sent.as_ref().is_none_or(|sent| sent[index] != values[index]) {
-                player.set(name, &values[index]);
+                // The player keeps its own HLG filter ahead of the view's.
+                match name {
+                    "vf" => player.set_filter(&values[index]),
+                    _ => player.set(name, &values[index]),
+                }
             }
         }
         *sent = Some(values);
