@@ -365,8 +365,9 @@ impl Player {
     }
 
     /// Starts playing a file, replacing whatever was playing, from the
-    /// beginning or from a number of seconds in.
-    pub fn play(&self, path: &Path, from: Option<f64>) {
+    /// beginning or from a number of seconds in; or, `paused`, opens it on
+    /// that frame and stays there.
+    pub fn play(&self, path: &Path, from: Option<f64>, paused: bool) {
         self.pick_tracks();
         let start = from.map(|seconds| format!("start={seconds:.3}"));
         let mut arguments: Vec<&[u8]> = vec![b"loadfile", path.as_os_str().as_bytes()];
@@ -374,7 +375,7 @@ impl Player {
             arguments.extend([b"replace".as_slice(), start.as_bytes()]);
         }
         self.command_later(&arguments);
-        self.set("pause", "no");
+        self.set("pause", if paused { "yes" } else { "no" });
     }
 
     /// Opens a file and stops on the frame it would start at, so that it

@@ -2126,6 +2126,11 @@ impl App {
         }
         // The video being left, if this replaces one.
         self.remember_position();
+        // Paused on the video being left, the next is opened paused too, so
+        // going back and forth across files to look does not set them
+        // playing. Stopped at its end is no pause asked for: the next plays.
+        let paused = self.video.is_some()
+            && self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true) && player.flag("eof-reached") != Some(true));
         // A seek carried over from the file beside this one says where to
         // begin; otherwise it is where the video was left.
         let carried = self.enter_at.take();
@@ -2154,11 +2159,11 @@ impl App {
                     *self.video_view_sent.borrow_mut() = None;
                     // What it said while waiting was said to no one.
                     player.events();
-                    player.set("pause", "no");
+                    player.set("pause", if paused { "yes" } else { "no" });
                     held = true;
                 }
                 None => {
-                    player.play(&self.files[id], from);
+                    player.play(&self.files[id], from, paused);
                     if self.options.debug {
                         eprintln!("jog: {:>7.1?} video asked for", started.elapsed());
                     }
