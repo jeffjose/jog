@@ -218,31 +218,6 @@ pub fn caption(session: &Session) -> String {
     format!("{}   {} of {}   {name}   {}", ago(session), session.pos + 1, session.total, session.id)
 }
 
-/// A session in two lines: its id, when and what was opened; and under
-/// them how far through it was, and the file it was on.
-pub fn describe(session: &Session) -> String {
-    // What is under the home folder is said from `~`, which is shorter.
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let short = |path: &PathBuf| match home.as_ref().and_then(|home| path.strip_prefix(home).ok()) {
-        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
-        Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
-    };
-    let opened: Vec<String> = session.paths.iter().map(short).collect();
-    let name = session.file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut second = format!("{} of {}   {name}", session.pos + 1, session.total);
-    if session.seconds >= 1.0 {
-        let whole = session.seconds as u64;
-        second.push_str(&format!(" at {}:{:02}", whole / 60, whole % 60));
-    }
-    if let Some(filter) = &session.filter {
-        second.push_str(&format!("   narrowed to \"{filter}\""));
-    }
-    // The id, when, and what was opened; and under them, set in as far as
-    // the id is wide, where it was left.
-    format!("{}  {}   {}\n{:width$}  {second}", session.id, ago(session), opened.join(" "), "", width = session.id.chars().count())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,11 +250,8 @@ mod tests {
     }
 
     #[test]
-    fn a_session_is_told_in_two_lines() {
-        let told = describe(&session("/home/me", now()));
-        let (first, second) = told.split_once('\n').unwrap();
-        assert!(first.starts_with("k3x9q2ab  just now   /clips"), "{told}");
-        assert!(second.starts_with("          23 of 300"), "{told}");
-        assert!(told.contains("23 of 300") && told.contains("a b.mp4 at 12:03") && told.contains("narrowed to \"pix #video\""), "{told}");
+    fn a_session_is_captioned_with_its_id() {
+        let told = caption(&session("/home/me", now()));
+        assert_eq!(told, "just now   23 of 300   a b.mp4   k3x9q2ab");
     }
 }

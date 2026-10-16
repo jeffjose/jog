@@ -56,10 +56,10 @@ fn main() -> ExitCode {
         }
     };
 
-    // The sessions of the folder jog is started in: to be listed, or one
-    // of them picked up in place of what was named to open.
+    // The sessions of the folder jog is started in: one of them picked up
+    // in place of what was named to open.
     let mut cwd = std::env::current_dir().unwrap_or_default();
-    if options.list_sessions || options.session {
+    if options.session {
         // One asked for by its id is that one, whichever folder it is of:
         // a single word after --resume that is no file or folder.
         let asked: Option<String> = match options.paths.as_slice() {
@@ -73,14 +73,6 @@ fn main() -> ExitCode {
         }
         let named = by_id.flatten();
         let found = named.clone().map_or_else(|| sessions::here(&cwd), |session| vec![session]);
-        if options.list_sessions {
-            match found.is_empty() {
-                true => println!("No sessions in {}", cwd.display()),
-                // Two lines each, with a line between: easier on the eye than one long one.
-                false => println!("{}", found.iter().map(sessions::describe).collect::<Vec<_>>().join("\n\n")),
-            }
-            return ExitCode::SUCCESS;
-        }
         let Some(latest) = found.first() else {
             eprintln!("jog: there is no session of this folder to resume");
             return ExitCode::FAILURE;

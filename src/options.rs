@@ -80,13 +80,11 @@ Slideshow and actions:
       --resume               pick up a session: what jog was showing when it was
                              last quit, of those started in this folder. With
                              several to choose from they are shown, to be
-                             picked with the arrows or a click
-      --latest               with --resume, the latest of them, unasked
+                             picked with the arrows or a click; each shows its id
+      --latest               pick up the latest session of this folder, unasked
       --resume ID            the session with that id, whichever folder it is
                              of; the start of an id will do when it is enough
                              to tell it by
-      --sessions             list this folder's sessions here, each with its id,
-                             and quit
 
       --precise-seeking      seek to the exact moment asked for. The usual is
                              the nearest keyframe, which is much quicker and
@@ -291,13 +289,11 @@ pub struct Options {
     pub workspace: Option<usize>,
     /// Whether videos pick up where they were left.
     pub resume: bool,
-    /// Whether to pick up a session of this folder, the latest of them
-    /// unasked, or only to list them; and, set by `main` once it has
-    /// looked, the ones there are to choose from and how far into its
-    /// video the one picked up was.
+    /// Whether to pick up a session of this folder, or the latest of them
+    /// unasked; and, set by `main` once it has looked, the ones there are
+    /// to choose from and how far into its video the one picked up was.
     pub session: bool,
     pub latest: bool,
-    pub list_sessions: bool,
     pub sessions: Vec<crate::sessions::Session>,
     pub begin_at: Option<f64>,
     /// The id of the session picked up, which it keeps when kept again.
@@ -483,7 +479,7 @@ fn is_switch(name: &str) -> bool {
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
-        "debug", "verbose", "watch", "positions", "no-positions", "resume", "latest", "sessions", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
+        "debug", "verbose", "watch", "positions", "no-positions", "resume", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
     switches.contains(&name)
 }
@@ -547,7 +543,6 @@ fn parse_with(
         resume: true,
         session: false,
         latest: false,
-        list_sessions: false,
         sessions: Vec::new(),
         begin_at: None,
         session_id: None,
@@ -735,8 +730,7 @@ fn apply(
         "positions" => options.resume = true,
         "no-positions" => options.resume = false,
         "resume" => options.session = true,
-        "latest" => options.latest = true,
-        "sessions" => options.list_sessions = true,
+        "latest" => (options.session, options.latest) = (true, true),
         "action" => options.actions[0] = Some(value()?),
         other => {
             let slot = other.strip_prefix("action").and_then(|n| n.parse::<usize>().ok());
@@ -1033,6 +1027,15 @@ mod tests {
     fn double_dash_ends_options() {
         let options = parse_args(&["--", "-odd-name.jpg"]).unwrap();
         assert_eq!(options.paths, [PathBuf::from("-odd-name.jpg")]);
+    }
+
+    #[test]
+    fn latest_picks_up_a_session_by_itself() {
+        let latest = parse_args(&["--latest"]).unwrap();
+        assert!(latest.session && latest.latest);
+        let resume = parse_args(&["--resume"]).unwrap();
+        assert!(resume.session && !resume.latest);
+        assert!(parse_args(&["--sessions"]).is_err());
     }
 
     #[test]
