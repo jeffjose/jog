@@ -176,8 +176,9 @@ Keys:
   x                          mark / unmark       c / C         copy file name / full path
   V / M                      copy / move marked files (or the current one) to -o DIR
   u                          undo copy, move, rename or convert
-  F2                         rename              r F5          refresh: look for
-                             new and deleted files, and read this one again
+  F2                         rename; a path such as /tmp/a.png or ../done/ moves it
+  r F5                       refresh: look for new and deleted files, and read
+                             this one again
   W                          watch: refresh by itself as files come and go
   S save a copy, or of a video the frame on view  L save file list (marked ones
   if any)  w size window to image

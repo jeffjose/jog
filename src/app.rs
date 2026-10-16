@@ -5121,23 +5121,38 @@ impl App {
         if name == old_name {
             return;
         }
-        if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+        // A path moves it as well: to another folder, made if it is not
+        // there, under the name at the end.
+        let Some(to) = ops::rename_target(&from, name).filter(|_| name != "." && name != "..") else {
             self.toast("Not a usable file name");
             return;
+        };
+        let here = from.parent().and_then(|dir| dir.canonicalize().ok());
+        let moved = to.parent() != here.as_deref();
+        if !moved && to.file_name() == from.file_name() {
+            return;
         }
-        let to = from.with_file_name(name);
+        let said = if moved { short_dir(&to) } else { to.file_name().unwrap_or_default().to_string_lossy().into_owned() };
         if self.dry(|_| vec![format!("rename: {} -> {}", from.display(), to.display())], "would rename") {
             return;
         }
+        if let Some(dir) = to.parent().filter(|_| moved) {
+            if let Err(error) = std::fs::create_dir_all(dir) {
+                return self.toast(format!("Cannot use {}: {error}", dir.display()));
+            }
+        }
         match ops::move_file(&from, &to) {
             Ok(()) => {
-                println!("[rename] {old_name} -> {name}");
+                match moved {
+                    true => println!("[rename] {} -> {}", from.display(), to.display()),
+                    false => println!("[rename] {old_name} -> {said}"),
+                }
                 self.set_path(prompt.id, to.clone());
                 self.undo.push(Undo::Renamed { id: prompt.id, from, to });
-                self.toast(format!("Renamed to {name}"));
+                self.toast(format!("{} {said}", if moved { "Moved to" } else { "Renamed to" }));
                 self.refresh();
             }
-            Err(error) => self.toast(format!("Cannot rename to {name}: {error}")),
+            Err(error) => self.toast(format!("Cannot rename to {said}: {error}")),
         }
     }
 
@@ -8170,7 +8185,7 @@ impl App {
             let count = self.targets().len();
             let files = if count == 1 { self.name_of(prompt.id) } else { format!("{count} files") };
             let (icon, title, hint) = match prompt.kind {
-                PromptKind::Rename => (commands::icons::PENCIL, "Rename".to_string(), "Enter to rename"),
+                PromptKind::Rename => (commands::icons::PENCIL, "Rename".to_string(), "Enter to rename, a path to move it"),
                 PromptKind::SaveWorkspace => (commands::icons::FOLDER_PLUS, "Save this folder as a workspace named".to_string(), "Enter to add it to the config file"),
                 PromptKind::SendTo { moving: true } => (commands::icons::FOLDER_INPUT, format!("Move {files} to"), "Enter to move, the folder is made if need be"),
                 PromptKind::SendTo { moving: false } => (commands::icons::FOLDER_PLUS, format!("Copy {files} to"), "Enter to copy, the folder is made if need be"),
