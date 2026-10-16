@@ -2672,6 +2672,9 @@ impl App {
 
     fn video_action(&mut self, action: VideoAction) {
         let (Some(player), Some(video)) = (&self.player, &mut self.video) else { return };
+        // What pausing or playing turns it into: the player's own word for
+        // it comes later, with its events.
+        let was_paused = player.flag("pause") == Some(true);
         match action {
             VideoAction::File(forward) => return self.step(forward),
             // Queued, not waited for: the player's core gets to a command
@@ -2714,7 +2717,7 @@ impl App {
         // Pausing says so for a moment, at the top right with the other
         // notes; playing again takes the word away.
         if action == VideoAction::Pause {
-            let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
+            let paused = !was_paused;
             match paused {
                 true => self.toast(format!("{}  Paused", commands::icons::PAUSE)),
                 false => self.toast = None,
