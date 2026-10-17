@@ -265,9 +265,17 @@
 #   webp  quality      0 to 100
 #         lossless     true or false
 #         method       0 (fastest) to 6 (smallest)
+#   video              by ffmpeg, whichever is on the PATH; written beside
+#                      the video as clip.av1.mkv
+#         h264-crf     quality, lower is better and larger: 20
+#         hevc-crf     22; 10-bit kept, and HDR with it
+#         av1-crf      30; always 10-bit. SVT-AV1 when the ffmpeg has it
+#         mp4-audio    "aac" (plays everywhere) or "opus"; MKV and WebM
+#                      always get Opus
 #
 # [convert]
 # jxl  = { quality = 90, effort = "medium", lossless = false, recompress-jpeg = true }
 # avif = { quality = 88, speed = 6, depth = 8 }
 # jpeg = { quality = 90, chroma = "444", progressive = true }
 # webp = { quality = 90, lossless = false, method = 4 }
+# video = { h264-crf = 20, hevc-crf = 22, av1-crf = 30, mp4-audio = "aac" }

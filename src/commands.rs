@@ -1,6 +1,7 @@
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 use crate::convert::Format;
+use crate::transcode::{Codec, Container, Target};
 use crate::files::Sort;
 
 /// Everything the viewer can be told to do, from a key, the mouse or the menu.
@@ -133,6 +134,8 @@ pub enum Command {
     /// Open the Convert panel: each format's settings, tried on the
     /// picture before it is converted.
     ConvertPanel,
+    /// Convert the target videos by ffmpeg.
+    ConvertVideo(Target),
     PlayPause,
     SeekForward,
     SeekBack,
@@ -512,7 +515,7 @@ pub fn command_icon(command: Command) -> &'static str {
         CopyTo | CopyToAsk => FOLDER_PLUS,
         MoveTo | MoveToAsk => FOLDER_INPUT,
         Rename => PENCIL,
-        Convert(_) | ConvertPanel => REPLACE,
+        Convert(_) | ConvertPanel | ConvertVideo(_) => REPLACE,
         Undo => UNDO,
         CopyName | SaveFilelist => COPY,
         CopyPath | CopyShell => CLIPBOARD,
@@ -688,6 +691,10 @@ const FILE: &[Option<MenuItem>] = &[
     image_item("Convert to PNG", "", Command::Convert(Format::Png)),
     image_item("Convert to WebP", "", Command::Convert(Format::WebP)),
     image_item("Convert with settings...", "K", Command::ConvertPanel),
+    video_item("Convert to MP4 (H.264)", "", Command::ConvertVideo(Target::new(Codec::H264, Container::Mp4))),
+    video_item("Convert to MP4 (HEVC)", "", Command::ConvertVideo(Target::new(Codec::Hevc, Container::Mp4))),
+    video_item("Convert to MKV (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::Mkv))),
+    video_item("Convert to WebM (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::WebM))),
     image_item("Save a copy", "S", Command::Save),
     video_item("Save this frame", "S", Command::Save),
     item("Save the file list", "L", Command::SaveFilelist),
@@ -837,6 +844,10 @@ pub const MARK_MENU: &[Option<MenuItem>] = &[
     image_item("Convert to PNG", "", Command::Convert(Format::Png)),
     image_item("Convert to WebP", "", Command::Convert(Format::WebP)),
     image_item("Convert with settings...", "K", Command::ConvertPanel),
+    video_item("Convert to MP4 (H.264)", "", Command::ConvertVideo(Target::new(Codec::H264, Container::Mp4))),
+    video_item("Convert to MP4 (HEVC)", "", Command::ConvertVideo(Target::new(Codec::Hevc, Container::Mp4))),
+    video_item("Convert to MKV (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::Mkv))),
+    video_item("Convert to WebM (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::WebM))),
     None,
     item("Move to trash", "Ctrl+Del", Command::Trash),
     item("Delete...", "D", Command::Delete),

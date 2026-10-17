@@ -190,10 +190,13 @@ const GRID_COLOR: u32 = 0x101010;
 pub struct Converted {
     created: Vec<PathBuf>,
     failed: usize,
-    format: Format,
+    /// What they were converted to, in a word or two.
+    what: String,
     before: u64,
     after: u64,
     how: Option<String>,
+    /// Why the last that could not be converted could not.
+    error: Option<String>,
 }
 
 /// What background threads send to the event loop.
@@ -204,6 +207,8 @@ pub enum Event {
     ConvertSource(usize, Result<Arc<PanelSource>, String>),
     ConvertTrial(u64, Format, Result<convert::Trial, String>),
     ConvertScore(u64, Option<f64>),
+    /// How far along converting videos is, in words.
+    VideoProgress(String),
     /// A signal from one of the two players that take turns playing: the
     /// number says which.
     Video(u8, Signal),
@@ -3347,6 +3352,7 @@ impl App {
             Delete => self.ask_delete(),
             Convert(format) => self.convert(format),
             ConvertPanel => self.open_convert_panel(),
+            ConvertVideo(target) => self.convert_videos(target),
             SpeedUp => self.change_speed(Some(true)),
             SpeedDown => self.change_speed(Some(false)),
             SpeedReset => self.change_speed(None),
@@ -3796,7 +3802,7 @@ impl App {
         self.toast(format!("Converting {} to {} ({})...", paths.len(), format.name(), settings.describe(format)));
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let mut done = Converted { created: Vec::new(), failed: 0, format, before: 0, after: 0, how: None };
+            let mut done = Converted { created: Vec::new(), failed: 0, what: format.name().to_string(), before: 0, after: 0, how: None, error: None };
             for path in paths {
                 match convert::convert(&path, format, &settings) {
                     Ok((to, how)) => {
@@ -3809,6 +3815,57 @@ impl App {
                     Err(error) => {
                         eprintln!("jog: cannot convert {}: {error}", path.display());
                         done.failed += 1;
+                        done.error = Some(short_error(&path, &error.to_string()));
+                    }
+                }
+            }
+            let _ = proxy.send_event(Event::Converted(done));
+        });
+    }
+
+    /// Converts the target videos by ffmpeg, one after another on another
+    /// thread, saying how far along each is as it goes.
+    fn convert_videos(&mut self, target: crate::transcode::Target) {
+        let settings = self.options.convert.video;
+        let paths: Vec<PathBuf> = self.targets().into_iter().map(|id| self.files[id].clone()).filter(|path| files::is_video(path)).collect();
+        if paths.is_empty() {
+            return self.toast("Nothing to convert: no videos among them");
+        }
+        if let Some(problem) = target.problem(&settings) {
+            return self.toast(problem);
+        }
+        let what = target.describe(&settings);
+        if self.dry(|_| paths.iter().map(|path| format!("convert to {what}: {}", path.display())).collect(), &format!("would convert {}", paths.len())) {
+            return;
+        }
+        self.toast(format!("Converting {} to {what}...", paths.len()));
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let total = paths.len();
+            let mut done = Converted { created: Vec::new(), failed: 0, what: what.clone(), before: 0, after: 0, how: None, error: None };
+            for (index, path) in paths.iter().enumerate() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let mut said = None;
+                let result = crate::transcode::transcode(path, &target, &settings, |share| {
+                    // A word only when the whole percentage moves on.
+                    let percent = (share * 100.0) as u32;
+                    if said != Some(percent) {
+                        said = Some(percent);
+                        let of = if total > 1 { format!(" ({} of {total})", index + 1) } else { String::new() };
+                        let _ = proxy.send_event(Event::VideoProgress(format!("Converting {name} to {what}{of}: {percent}%")));
+                    }
+                });
+                match result {
+                    Ok(to) => {
+                        println!("[convert] {} -> {}", path.display(), to.display());
+                        done.before += std::fs::metadata(path).map_or(0, |meta| meta.len());
+                        done.after += std::fs::metadata(&to).map_or(0, |meta| meta.len());
+                        done.created.push(to);
+                    }
+                    Err(error) => {
+                        eprintln!("jog: cannot convert {}: {error}", path.display());
+                        done.failed += 1;
+                        done.error = Some(short_error(path, &error));
                     }
                 }
             }
@@ -3817,9 +3874,14 @@ impl App {
     }
 
     fn converted(&mut self, done: Converted) {
+        // Nothing made: why, rather than a count of nothing.
+        if done.created.is_empty() {
+            let why = done.error.unwrap_or_else(|| "see the terminal".to_string());
+            return self.toast(format!("Not converted: {why}"));
+        }
         let mut summary = match done.created.as_slice() {
             [one] => format!("Converted to {}", one.file_name().unwrap_or_default().to_string_lossy()),
-            all => format!("Converted {} to {}", all.len(), done.format.name()),
+            all => format!("Converted {} to {}", all.len(), done.what),
         };
         if done.before > 0 {
             let change = (done.after as f64 / done.before as f64 - 1.0) * 100.0;
@@ -9530,6 +9592,15 @@ fn title_of(path: &Path) -> String {
 
 /// A folder as it is written in a menu: `~` for the home directory, and
 /// only its ends when it is a long one.
+/// An error about a file, short enough for a toast: the file's own folder
+/// left out of the paths in it.
+fn short_error(path: &Path, error: &str) -> String {
+    match path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        Some(dir) => error.replace(&format!("{}/", dir.display()), ""),
+        None => error.to_string(),
+    }
+}
+
 fn short_dir(path: &Path) -> String {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let shown = match home.as_ref().and_then(|home| path.strip_prefix(home).ok()) {
@@ -10213,6 +10284,7 @@ impl ApplicationHandler<Event> for App {
             Event::ConvertSource(id, source) => self.convert_source(id, source),
             Event::ConvertTrial(asked, format, trial) => self.convert_trial(asked, format, trial),
             Event::ConvertScore(asked, score) => self.convert_score(asked, score),
+            Event::VideoProgress(words) => self.toast(words),
             Event::Video(which, signal) if which == self.active => self.video_signal(signal),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {

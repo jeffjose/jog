@@ -24,6 +24,7 @@ mod shellpaths;
 mod seen;
 mod story;
 mod trailer;
+mod transcode;
 mod triage;
 mod ultrahdr;
 mod ui;
@@ -37,7 +38,7 @@ use winit::event_loop::{EventLoop, EventLoopProxy};
 
 use app::{App, Event};
 use loader::Loader;
-use options::Parsed;
+use options::{ConvertTo, Parsed};
 
 fn main() -> ExitCode {
     let mut options = match options::parse(std::env::args_os().skip(1)) {
@@ -108,17 +109,29 @@ fn main() -> ExitCode {
         }
         return ExitCode::FAILURE;
     }
-    if let Some(format) = options.convert_to {
-        let mut settings = options.convert;
-        if let Some(quality) = options.convert_quality {
-            settings.set_quality(format, quality);
+    match options.convert_to {
+        Some(ConvertTo::Picture(format)) => {
+            let mut settings = options.convert;
+            if let Some(quality) = options.convert_quality {
+                settings.set_quality(format, quality);
+            }
+            let pictures: Vec<_> = playlist.files.iter().filter(|path| !files::is_video(path)).cloned().collect();
+            if pictures.is_empty() {
+                eprintln!("jog: no pictures to convert");
+                return ExitCode::FAILURE;
+            }
+            return if convert::convert_all(&pictures, format, &settings) { ExitCode::SUCCESS } else { ExitCode::FAILURE };
         }
-        let pictures: Vec<_> = playlist.files.iter().filter(|path| !files::is_video(path)).cloned().collect();
-        if pictures.is_empty() {
-            eprintln!("jog: no pictures to convert");
-            return ExitCode::FAILURE;
+        Some(ConvertTo::Video(target)) => {
+            let target = transcode::Target { audio: options.convert_audio.or(target.audio), ..target };
+            let videos: Vec<_> = playlist.files.iter().filter(|path| files::is_video(path)).cloned().collect();
+            if videos.is_empty() {
+                eprintln!("jog: no videos to convert");
+                return ExitCode::FAILURE;
+            }
+            return if transcode::transcode_all(&videos, &target, &options.convert.video) { ExitCode::SUCCESS } else { ExitCode::FAILURE };
         }
-        return if convert::convert_all(&pictures, format, &settings) { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+        None => {}
     }
     if options.verbose {
         let videos = playlist.files.iter().filter(|path| files::is_video(path)).count();

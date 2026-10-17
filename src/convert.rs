@@ -164,6 +164,8 @@ pub struct Settings {
     pub avif: AvifSettings,
     pub jpeg: JpegSettings,
     pub webp: WebPSettings,
+    /// How videos are converted, by ffmpeg.
+    pub video: crate::transcode::VideoSettings,
 }
 
 impl Default for Settings {
@@ -173,6 +175,7 @@ impl Default for Settings {
             avif: AvifSettings { quality: 88.0, speed: 6, depth: 8 },
             jpeg: JpegSettings { quality: 90.0, full_chroma: true, progressive: true },
             webp: WebPSettings { quality: 90.0, lossless: false, method: 4 },
+            video: crate::transcode::VideoSettings::default(),
         }
     }
 }
@@ -190,6 +193,10 @@ impl Settings {
     pub fn apply(&mut self, table: &toml::Table) -> std::result::Result<(), String> {
         for (format, value) in table {
             let fields = value.as_table().ok_or_else(|| format!("convert.{format}: expected a table"))?;
+            if format == "video" {
+                self.video.apply(fields)?;
+                continue;
+            }
             for (key, value) in fields {
                 let wrong = || format!("convert.{format}.{key}: not a usable value");
                 let number = || value.as_float().or_else(|| value.as_integer().map(|n| n as f64)).ok_or_else(wrong);
@@ -456,11 +463,12 @@ impl Settings {
              jxl = {{ quality = {}, effort = \"{}\", lossless = {}, recompress-jpeg = {} }}\n\
              avif = {{ quality = {}, speed = {}, depth = {} }}\n\
              jpeg = {{ quality = {}, chroma = \"{}\", progressive = {} }}\n\
-             webp = {{ quality = {}, lossless = {}, method = {} }}\n",
+             webp = {{ quality = {}, lossless = {}, method = {} }}\n{}",
             jxl.quality, jxl.effort.name(), jxl.lossless, jxl.recompress_jpeg,
             avif.quality, avif.speed, avif.depth,
             jpeg.quality, if jpeg.full_chroma { "444" } else { "420" }, jpeg.progressive,
             webp.quality, webp.lossless, webp.method,
+            self.video.to_toml(),
         )
     }
 

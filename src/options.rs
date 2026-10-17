@@ -69,7 +69,12 @@ Slideshow and actions:
                              webp, next to it, with the settings Convert uses
                              (config: [convert]), and quit. Files there already
                              are left alone: jog DIR -r --convert jxl
+                             Or each video, by ffmpeg, as mp4, mkv or webm, the
+                             codec named first if not the usual: h264.mp4,
+                             hevc.mkv, av1.webm. Written as clip.av1.mkv
       --quality N            with --convert, this quality (0 to 100) instead
+      --audio CODEC          with --convert to a video: opus, aac or copy, in
+                             place of the usual (AAC in MP4, Opus elsewhere)
       --print-marked         print the marked files on exit
       --benchmark            step, zoom and page through the files by itself,
                              timing each, print the figures and quit
@@ -223,6 +228,14 @@ pub enum SubtitleStyle {
     Box,
 }
 
+/// What `--convert` makes of the files listed: pictures in a format, or
+/// videos as a codec in a container.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ConvertTo {
+    Picture(crate::convert::Format),
+    Video(crate::transcode::Target),
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum LastSlide {
     Resume,
@@ -298,8 +311,10 @@ pub struct Options {
     pub convert: crate::convert::Settings,
     /// Whether only to convert the pictures listed, to this format, and
     /// quit; and the quality to, in place of the settings'.
-    pub convert_to: Option<crate::convert::Format>,
+    pub convert_to: Option<ConvertTo>,
     pub convert_quality: Option<f32>,
+    /// The sound of the videos converted, in place of the container's usual.
+    pub convert_audio: Option<crate::transcode::Audio>,
     pub workspace: Option<usize>,
     /// Whether videos pick up where they were left.
     pub resume: bool,
@@ -483,7 +498,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
 fn takes_value(name: &str) -> bool {
     let valued = [
         "geometry", "image-bg", "accent", "zoom", "sort", "start-at", "start", "filelist", "filter", "slideshow-delay", "on-last-slide",
-        "output-dir", "subtitle-font", "subtitle-size", "subtitle-style", "frame-dir", "frame-format", "hdr", "convert", "quality",
+        "output-dir", "subtitle-font", "subtitle-size", "subtitle-style", "frame-dir", "frame-format", "hdr", "convert", "quality", "audio",
     ];
     valued.contains(&name) || name.starts_with("action")
 }
@@ -556,6 +571,7 @@ fn parse_with(
         convert: crate::convert::Settings::default(),
         convert_to: None,
         convert_quality: None,
+        convert_audio: None,
         workspace: None,
         resume: true,
         session: false,
@@ -741,8 +757,14 @@ fn apply(
         }
         "convert" => {
             let word = value()?;
-            let format = crate::convert::Format::parse(&word).ok_or_else(|| format!("invalid format '{word}', expected jxl, avif, jpeg, png or webp"))?;
-            options.convert_to = Some(format);
+            let picture = crate::convert::Format::parse(&word).map(ConvertTo::Picture);
+            let video = crate::transcode::Target::parse(&word).map(ConvertTo::Video);
+            let wanted = "jxl, avif, jpeg, png or webp for pictures; mp4, mkv, webm or a codec with one, as av1.mkv, for videos";
+            options.convert_to = Some(picture.or(video).ok_or_else(|| format!("invalid format '{word}', expected {wanted}"))?);
+        }
+        "audio" => {
+            let word = value()?;
+            options.convert_audio = Some(crate::transcode::Audio::parse(&word).ok_or_else(|| format!("invalid audio '{word}', expected opus, aac or copy"))?);
         }
         "quality" => {
             let word = value()?;

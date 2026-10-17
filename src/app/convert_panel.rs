@@ -231,7 +231,7 @@ impl App {
         let id = self.list[self.focus()];
         let path = self.files[id].clone();
         if files::is_video(&path) {
-            return self.toast("Convert is for pictures");
+            return self.toast("For videos: File > Convert to MP4, MKV or WebM");
         }
         let (jobs, inbox) = mpsc::channel::<(u64, Format, Settings)>();
         let proxy = self.proxy.clone();
