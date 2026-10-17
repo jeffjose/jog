@@ -374,6 +374,116 @@ pub fn convert(path: &Path, format: Format, settings: &Settings) -> Result<(Path
     Ok((target, encoded.how))
 }
 
+/// A picture encoded to see what the settings make of it, as the Convert
+/// panel shows: how large, how long it took, how it looks decoded again,
+/// and how near the original that is.
+pub struct Trial {
+    pub size: usize,
+    pub how: String,
+    pub took: std::time::Duration,
+    /// Decoded again over white, as `flat` is; `None` when jog has no
+    /// decoder for the format (AVIF without libheif).
+    pub decoded: Option<image::RgbImage>,
+    /// SSIMULACRA2: 90 and over is visually lossless, 70 good.
+    pub score: Option<f64>,
+}
+
+/// The original over white, as trials are compared with it.
+pub fn flat(image: &DynamicImage) -> image::RgbImage {
+    decode::flatten(image.clone(), JPEG_BACKGROUND)
+}
+
+/// Encodes `image` as `format`, decodes it again, and scores it against
+/// `flat`, the original over white.
+#[cfg(test)]
+pub fn trial(image: &DynamicImage, flat: &image::RgbImage, source: Option<&[u8]>, format: Format, settings: &Settings) -> Result<Trial> {
+    let mut trial = trial_unscored(image, source, format, settings)?;
+    trial.score = trial_score(flat, &trial);
+    Ok(trial)
+}
+
+/// A trial without its score, which on a large picture takes seconds of
+/// its own: the panel shows the size first and the score after.
+pub fn trial_unscored(image: &DynamicImage, source: Option<&[u8]>, format: Format, settings: &Settings) -> Result<Trial> {
+    let started = std::time::Instant::now();
+    let encoded = encode(image, source, format, settings)?;
+    let took = started.elapsed();
+    let decoded = decode_encoded(&encoded.bytes, format).map(|image| decode::flatten(image, JPEG_BACKGROUND));
+    Ok(Trial { size: encoded.bytes.len(), how: encoded.how, took, decoded, score: None })
+}
+
+/// How near a trial stays to the original. A JPEG repacked loses
+/// nothing, and has no score to work out.
+pub fn trial_score(flat: &image::RgbImage, trial: &Trial) -> Option<f64> {
+    if trial.how.contains("repacked") {
+        return None;
+    }
+    trial.decoded.as_ref().filter(|back| back.dimensions() == flat.dimensions()).and_then(|back| score(flat, back))
+}
+
+fn decode_encoded(bytes: &[u8], format: Format) -> Option<DynamicImage> {
+    match format {
+        Format::Jxl => {
+            let decoder = jxl_oxide::integration::JxlDecoder::new(Cursor::new(bytes)).ok()?;
+            DynamicImage::from_decoder(decoder).ok()
+        }
+        Format::Avif => crate::heif::decode(bytes).ok(),
+        _ => image::load_from_memory(bytes).ok(),
+    }
+}
+
+fn score(original: &image::RgbImage, distorted: &image::RgbImage) -> Option<f64> {
+    use ssimulacra2::{ColorPrimaries, Rgb, TransferCharacteristic};
+    let frame = |image: &image::RgbImage| {
+        let data = image.pixels().map(|p| [f32::from(p[0]) / 255.0, f32::from(p[1]) / 255.0, f32::from(p[2]) / 255.0]).collect();
+        Rgb::new(data, image.width() as usize, image.height() as usize, TransferCharacteristic::SRGB, ColorPrimaries::BT709).ok()
+    };
+    ssimulacra2::compute_frame_ssimulacra2(frame(original)?, frame(distorted)?).ok()
+}
+
+/// Where the settings saved from the Convert panel are kept. They are
+/// taken over the config file's, as the latest word.
+fn saved_path() -> Option<PathBuf> {
+    crate::positions::state_dir().map(|dir| dir.join("convert.toml"))
+}
+
+impl Settings {
+    /// The settings in the form of the config file's `[convert]` table.
+    pub fn to_toml(&self) -> String {
+        let (jxl, avif, jpeg, webp) = (&self.jxl, &self.avif, &self.jpeg, &self.webp);
+        format!(
+            "# Saved from the Convert panel; taken over the config file's [convert].\n\
+             jxl = {{ quality = {}, effort = \"{}\", lossless = {}, recompress-jpeg = {} }}\n\
+             avif = {{ quality = {}, speed = {}, depth = {} }}\n\
+             jpeg = {{ quality = {}, chroma = \"{}\", progressive = {} }}\n\
+             webp = {{ quality = {}, lossless = {}, method = {} }}\n",
+            jxl.quality, jxl.effort.name(), jxl.lossless, jxl.recompress_jpeg,
+            avif.quality, avif.speed, avif.depth,
+            jpeg.quality, if jpeg.full_chroma { "444" } else { "420" }, jpeg.progressive,
+            webp.quality, webp.lossless, webp.method,
+        )
+    }
+
+    /// Takes in the settings saved from the panel, if there are any.
+    pub fn load_saved(&mut self) {
+        let Some(text) = saved_path().and_then(|path| std::fs::read_to_string(path).ok()) else { return };
+        match text.parse::<toml::Table>().map_err(|error| error.to_string()).and_then(|table| self.apply(&table)) {
+            Ok(()) => {}
+            Err(error) => eprintln!("jog: the saved convert settings: {error}"),
+        }
+    }
+
+    /// Keeps these as the settings Convert uses from now on.
+    pub fn save(&self) -> std::io::Result<PathBuf> {
+        let path = saved_path().ok_or_else(|| std::io::Error::other("no folder to keep it in"))?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, self.to_toml())?;
+        Ok(path)
+    }
+}
+
 /// Converts each of `paths` to `format`, one after another, saying how it
 /// goes on stdout and stderr; for `jog --convert`. False if any failed.
 pub fn convert_all(paths: &[PathBuf], format: Format, settings: &Settings) -> bool {
@@ -545,6 +655,35 @@ mod tests {
         assert!(!dir.join("c.jxl").exists());
         assert!(dir.join("a.jxl").exists(), "the rest done all the same");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_trial_says_how_large_and_how_good() {
+        let image = DynamicImage::ImageRgb8(photo());
+        let flat = flat(&image);
+        let settings = Settings::default();
+        let jxl = trial(&image, &flat, None, Format::Jxl, &settings).unwrap();
+        assert!(jxl.size > 0 && jxl.decoded.is_some());
+        let good = jxl.score.unwrap();
+        let mut worse = settings;
+        worse.jxl.quality = 30.0;
+        let low = trial(&image, &flat, None, Format::Jxl, &worse).unwrap();
+        assert!(low.size < jxl.size && low.score.unwrap() < good, "{} < {good}", low.score.unwrap());
+        let png = trial(&image, &flat, None, Format::Png, &settings).unwrap();
+        assert!(png.score.unwrap() > 99.0, "lossless is perfect: {:?}", png.score);
+    }
+
+    #[test]
+    fn saved_settings_read_back_the_same() {
+        let mut settings = Settings::default();
+        settings.jxl.effort = Effort::Slow;
+        settings.avif.depth = 10;
+        settings.jpeg.full_chroma = false;
+        settings.webp.lossless = true;
+        let table: toml::Table = settings.to_toml().parse().unwrap();
+        let mut back = Settings::default();
+        back.apply(&table).unwrap();
+        assert_eq!(back, settings);
     }
 
     #[test]

@@ -42,6 +42,9 @@ use crate::search::{Facts, Query};
 use crate::story::{self, Found, Stories};
 use crate::trailer::{Note, Trailers};
 use crate::ui::{self, Canvas, Text};
+
+mod convert_panel;
+use convert_panel::{ConvertPanel, PanelSource};
 use crate::view::{Layout, View, Zoom};
 use crate::x11;
 
@@ -197,6 +200,10 @@ pub struct Converted {
 pub enum Event {
     Loaded(Job),
     Converted(Converted),
+    /// The Convert panel's picture, decoded, and a try of its settings.
+    ConvertSource(usize, Result<Arc<PanelSource>, String>),
+    ConvertTrial(u64, Format, Result<convert::Trial, String>),
+    ConvertScore(u64, Option<f64>),
     /// A signal from one of the two players that take turns playing: the
     /// number says which.
     Video(u8, Signal),
@@ -1108,6 +1115,8 @@ pub struct App {
     verdicts: RefCell<HashMap<usize, Option<Verdict>>>,
     /// Where the buttons of a triage were last drawn, for clicks on them.
     triage_buttons: RefCell<Vec<(Command, [i32; 4])>>,
+    /// The Convert panel, when it is up.
+    convert_panel: Option<ConvertPanel>,
     /// Which of them the pointer is over.
     triage_over: Option<usize>,
     list_search: Option<TextField>,
@@ -1607,6 +1616,7 @@ impl App {
             triage: RefCell::new(None),
             verdicts: RefCell::new(HashMap::new()),
             triage_buttons: RefCell::new(Vec::new()),
+            convert_panel: None,
             triage_over: None,
             list_search: None,
             list_cursor: None,
@@ -3336,6 +3346,7 @@ impl App {
             Rename => self.start_rename(),
             Delete => self.ask_delete(),
             Convert(format) => self.convert(format),
+            ConvertPanel => self.open_convert_panel(),
             SpeedUp => self.change_speed(Some(true)),
             SpeedDown => self.change_speed(Some(false)),
             SpeedReset => self.change_speed(None),
@@ -3775,12 +3786,15 @@ impl App {
     /// reports back.
     fn convert(&mut self, format: Format) {
         let paths: Vec<PathBuf> = self.targets().into_iter().map(|id| self.files[id].clone()).collect();
+        self.convert_paths(paths, format, self.options.convert);
+    }
+
+    fn convert_paths(&mut self, paths: Vec<PathBuf>, format: Format, settings: convert::Settings) {
         if self.dry(|_| paths.iter().map(|path| format!("convert to {}: {}", format.name(), path.display())).collect(), &format!("would convert {}", paths.len())) {
             return;
         }
-        self.toast(format!("Converting {} to {} ({})...", paths.len(), format.name(), self.options.convert.describe(format)));
+        self.toast(format!("Converting {} to {} ({})...", paths.len(), format.name(), settings.describe(format)));
         let proxy = self.proxy.clone();
-        let settings = self.options.convert;
         std::thread::spawn(move || {
             let mut done = Converted { created: Vec::new(), failed: 0, format, before: 0, after: 0, how: None };
             for path in paths {
@@ -6705,6 +6719,9 @@ impl App {
         if self.prompt.is_some() {
             return self.prompt_key(key, event_loop);
         }
+        if self.convert_panel.is_some() {
+            return self.panel_key(key, event_loop);
+        }
         if self.overview.is_some() && self.palette.is_none() && self.overview_key(key.clone()) {
             return;
         }
@@ -6784,6 +6801,11 @@ impl App {
         }
         if self.loupe.is_some() {
             self.redraw();
+        }
+        // Over the Convert panel the pointer moves the divider and lights
+        // up what it is on; nothing behind the panel sees it.
+        if self.convert_panel.is_some() {
+            return self.redraw();
         }
         // The scene under the pointer is picked out, and plays.
         let over = self.scene_at(x, y);
@@ -6968,6 +6990,12 @@ impl App {
                     None => {}
                 }
                 self.redraw();
+            }
+            return;
+        }
+        if self.convert_panel.is_some() {
+            if button == MouseButton::Left && pressed {
+                self.panel_click(x, y);
             }
             return;
         }
@@ -7206,6 +7234,9 @@ impl App {
         }
         if lines == 0.0 || self.menu.is_some() {
             return;
+        }
+        if self.convert_panel.is_some() {
+            return self.panel_wheel(lines);
         }
         // In the find box it scrolls the list of matches, and what then
         // lies under the pointer is the one picked out. It does not step
@@ -8138,7 +8169,7 @@ impl App {
         let blocks = [&exif, &actions, &toast, &error, &footer, &time];
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty() && top_left.is_empty() && debug.is_empty();
         let panel = if viewing { self.list_panel() } else { None };
-        let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some();
+        let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some();
         // The filmstrip has words of its own: the lengths of its videos.
         let boxes = boxes || self.palette.is_some() || strip.is_some() || scene_strip.is_some() || self.overview.is_some() || self.triage_on;
         if nothing_to_write && !boxes && !self.help {
@@ -8253,7 +8284,7 @@ impl App {
         // A menu or a box comes up over a moment: what was there is kept
         // and laid back over it, less and less. It is well on its way from
         // the first frame, so that nothing seems to wait.
-        let boxed = self.menu.is_some() || self.prompt.is_some() || self.palette.is_some() || self.confirm.is_some() || self.help;
+        let boxed = self.menu.is_some() || self.prompt.is_some() || self.palette.is_some() || self.confirm.is_some() || self.help || self.convert_panel.is_some();
         let box_level = self.glide(&self.box_fade, if boxed { 1.0 } else { 0.0 }, EASE);
         let mut behind = std::mem::take(&mut self.fade_buf);
         let fading = boxed && box_level < 0.99;
@@ -8273,6 +8304,9 @@ impl App {
                 PromptKind::SendTo { moving: false } => (commands::icons::FOLDER_PLUS, format!("Copy {files} to"), "Enter to copy, the folder is made if need be"),
             };
             draw_prompt(canvas, &mut text, icon, &title, &prompt.field, hint, px);
+        }
+        if self.convert_panel.is_some() {
+            self.draw_convert_panel(canvas, &mut text, px);
         }
         if let Some(layout) = self.palette_layout() {
             for id in self.palette_shown() {
@@ -10176,6 +10210,9 @@ impl ApplicationHandler<Event> for App {
             }
             Event::Loaded(_) => {}
             Event::Converted(done) => self.converted(done),
+            Event::ConvertSource(id, source) => self.convert_source(id, source),
+            Event::ConvertTrial(asked, format, trial) => self.convert_trial(asked, format, trial),
+            Event::ConvertScore(asked, score) => self.convert_score(asked, score),
             Event::Video(which, signal) if which == self.active => self.video_signal(signal),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {

@@ -55,6 +55,8 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // What was saved from the Convert panel is the latest word on it.
+    options.convert.load_saved();
 
     // The sessions of the folder jog is started in: one of them picked up
     // in place of what was named to open.

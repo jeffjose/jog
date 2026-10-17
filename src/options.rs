@@ -182,6 +182,8 @@ Keys:
   V / M                      copy / move marked files (or the current one) to -o DIR
   u                          undo copy, move, rename or convert
   F2                         rename; a path such as /tmp/a.png or ../done/ moves it
+  K                          convert, with each format's settings tried on the
+                             picture first (File > Convert to ... in one click)
   r F5                       refresh: look for new and deleted files, and read
                              this one again
   W                          watch: refresh by itself as files come and go
