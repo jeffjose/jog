@@ -65,6 +65,11 @@ Slideshow and actions:
       --frame-format KIND    png (the usual), jpg or webp
       --hdr KIND             how an Ultra HDR photo is shown: sdr (the usual),
                              hdr, or gainmap; H steps through them
+      --convert FORMAT       write each picture listed as jxl, avif, jpeg, png or
+                             webp, next to it, with the settings Convert uses
+                             (config: [convert]), and quit. Files there already
+                             are left alone: jog DIR -r --convert jxl
+      --quality N            with --convert, this quality (0 to 100) instead
       --print-marked         print the marked files on exit
       --benchmark            step, zoom and page through the files by itself,
                              timing each, print the figures and quit
@@ -289,6 +294,10 @@ pub struct Options {
     pub workspaces: Vec<Workspace>,
     /// How Convert writes each format, from the config file's `[convert]`.
     pub convert: crate::convert::Settings,
+    /// Whether only to convert the pictures listed, to this format, and
+    /// quit; and the quality to, in place of the settings'.
+    pub convert_to: Option<crate::convert::Format>,
+    pub convert_quality: Option<f32>,
     pub workspace: Option<usize>,
     /// Whether videos pick up where they were left.
     pub resume: bool,
@@ -472,7 +481,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
 fn takes_value(name: &str) -> bool {
     let valued = [
         "geometry", "image-bg", "accent", "zoom", "sort", "start-at", "start", "filelist", "filter", "slideshow-delay", "on-last-slide",
-        "output-dir", "subtitle-font", "subtitle-size", "subtitle-style", "frame-dir", "frame-format", "hdr",
+        "output-dir", "subtitle-font", "subtitle-size", "subtitle-style", "frame-dir", "frame-format", "hdr", "convert", "quality",
     ];
     valued.contains(&name) || name.starts_with("action")
 }
@@ -543,6 +552,8 @@ fn parse_with(
         start: None,
         workspaces: Vec::new(),
         convert: crate::convert::Settings::default(),
+        convert_to: None,
+        convert_quality: None,
         workspace: None,
         resume: true,
         session: false,
@@ -725,6 +736,16 @@ fn apply(
                 "webp" => "webp".to_string(),
                 other => return Err(format!("invalid frame format '{other}', expected png, jpg or webp")),
             }
+        }
+        "convert" => {
+            let word = value()?;
+            let format = crate::convert::Format::parse(&word).ok_or_else(|| format!("invalid format '{word}', expected jxl, avif, jpeg, png or webp"))?;
+            options.convert_to = Some(format);
+        }
+        "quality" => {
+            let word = value()?;
+            let quality: f32 = word.parse().ok().filter(|q| (0.0..=100.0).contains(q)).ok_or_else(|| format!("invalid quality '{word}', expected 0 to 100"))?;
+            options.convert_quality = Some(quality);
         }
         "print-marked" => options.print_marked = true,
         "benchmark" => options.benchmark = true,

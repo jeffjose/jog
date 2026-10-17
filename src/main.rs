@@ -106,6 +106,18 @@ fn main() -> ExitCode {
         }
         return ExitCode::FAILURE;
     }
+    if let Some(format) = options.convert_to {
+        let mut settings = options.convert;
+        if let Some(quality) = options.convert_quality {
+            settings.set_quality(format, quality);
+        }
+        let pictures: Vec<_> = playlist.files.iter().filter(|path| !files::is_video(path)).cloned().collect();
+        if pictures.is_empty() {
+            eprintln!("jog: no pictures to convert");
+            return ExitCode::FAILURE;
+        }
+        return if convert::convert_all(&pictures, format, &settings) { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    }
     if options.verbose {
         let videos = playlist.files.iter().filter(|path| files::is_video(path)).count();
         eprintln!("jog: {} files, {videos} of them videos, listed in {:.1?}", playlist.files.len(), started.elapsed());

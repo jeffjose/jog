@@ -223,6 +223,17 @@ impl Settings {
         Ok(())
     }
 
+    /// Sets the quality a format is written at; lossless formats have none.
+    pub fn set_quality(&mut self, format: Format, quality: f32) {
+        match format {
+            Format::Jxl => self.jxl.quality = quality,
+            Format::Avif => self.avif.quality = quality,
+            Format::Jpeg => self.jpeg.quality = quality,
+            Format::WebP => self.webp.quality = quality,
+            Format::Png => {}
+        }
+    }
+
     /// The settings a format is written with, in a few words.
     pub fn describe(&self, format: Format) -> String {
         match format {
@@ -363,6 +374,62 @@ pub fn convert(path: &Path, format: Format, settings: &Settings) -> Result<(Path
     Ok((target, encoded.how))
 }
 
+/// Converts each of `paths` to `format`, one after another, saying how it
+/// goes on stdout and stderr; for `jog --convert`. False if any failed.
+pub fn convert_all(paths: &[PathBuf], format: Format, settings: &Settings) -> bool {
+    // Pictures in the format already are not what is meant, and those
+    // converted before are done: run again over a folder, only what is
+    // new is converted.
+    let paths: Vec<&PathBuf> = paths.iter().filter(|path| Format::of(path) != Some(format)).collect();
+    let (todo, done): (Vec<&PathBuf>, Vec<&PathBuf>) = paths.into_iter().partition(|path| !path.with_extension(format.extension()).exists());
+    // Two pictures that would make the same file, photo.jpg and photo.png
+    // both photo.jxl: which is the original cannot be told, and taking the
+    // wrong one makes a copy of a copy. Neither is converted.
+    let mut targets: std::collections::HashMap<PathBuf, Vec<&PathBuf>> = std::collections::HashMap::new();
+    for path in &todo {
+        targets.entry(path.with_extension(format.extension())).or_default().push(path);
+    }
+    let mut clashes: Vec<_> = targets.into_iter().filter(|(_, sources)| sources.len() > 1).collect();
+    clashes.sort();
+    for (target, sources) in &clashes {
+        let names: Vec<String> = sources.iter().map(|path| path.display().to_string()).collect();
+        let all = if names.len() == 2 { "both" } else { "all" };
+        eprintln!("jog: {} would {all} become {}: left alone", names.join(" and "), target.display());
+    }
+    let clashing: Vec<&PathBuf> = clashes.iter().flat_map(|(_, sources)| sources.iter().copied()).collect();
+    let todo: Vec<&PathBuf> = todo.into_iter().filter(|path| !clashing.contains(path)).collect();
+    let (total, mut failed, mut before, mut after) = (todo.len(), clashing.len(), 0, 0);
+    let started = std::time::Instant::now();
+    let skipped = if done.is_empty() { String::new() } else { format!(", {} done before", done.len()) };
+    eprintln!("jog: converting {total} to {} ({}){skipped}", format.name(), settings.describe(format));
+    for (index, path) in todo.iter().enumerate() {
+        let count = format!("[{}/{total}]", index + 1);
+        match convert(path, format, settings) {
+            Ok((to, how)) => {
+                let (from_size, to_size) = (size(path), size(&to));
+                (before, after) = (before + from_size, after + to_size);
+                let change = (to_size as f64 / from_size.max(1) as f64 - 1.0) * 100.0;
+                println!("{count} {} -> {}  {change:+.0}%  ({how})", path.display(), to.display());
+            }
+            Err(error) => {
+                eprintln!("{count} {}: {error}", path.display());
+                failed += 1;
+            }
+        }
+    }
+    let change = if before > 0 { format!(", {:+.0}%", (after as f64 / before as f64 - 1.0) * 100.0) } else { String::new() };
+    let converted = total + clashing.len() - failed;
+    match failed {
+        0 => eprintln!("jog: {converted} converted in {:.0?}{change}", started.elapsed()),
+        _ => eprintln!("jog: {converted} converted, {failed} not, in {:.0?}{change}", started.elapsed()),
+    }
+    failed == 0
+}
+
+fn size(path: &Path) -> u64 {
+    std::fs::metadata(path).map_or(0, |meta| meta.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,6 +515,35 @@ mod tests {
         std::fs::write(dir.join("picture.jpg"), b"mine").unwrap();
         assert!(convert(&source, Format::Jpeg, &settings).is_err());
         assert_eq!(std::fs::read(dir.join("picture.jpg")).unwrap(), b"mine");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_folder_converted_again_converts_only_what_is_new() {
+        let dir = scratch("again");
+        photo().save(dir.join("a.png")).unwrap();
+        let settings = Settings::default();
+        let list = |dir: &Path| -> Vec<PathBuf> {
+            let mut all: Vec<PathBuf> = std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().path()).collect();
+            all.sort();
+            all
+        };
+        assert!(convert_all(&list(&dir), Format::WebP, &settings));
+        let first = std::fs::metadata(dir.join("a.webp")).unwrap().modified().unwrap();
+        photo().save(dir.join("b.png")).unwrap();
+        assert!(convert_all(&list(&dir), Format::WebP, &settings), "nothing failed");
+        assert!(dir.join("b.webp").exists());
+        assert_eq!(std::fs::metadata(dir.join("a.webp")).unwrap().modified().unwrap(), first, "a.webp left alone");
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // Two pictures of one name: which is the original is not guessed.
+        let dir = scratch("clash");
+        photo().save(dir.join("a.png")).unwrap();
+        photo().save(dir.join("c.png")).unwrap();
+        photo().save(dir.join("c.jpg")).unwrap();
+        assert!(!convert_all(&list(&dir), Format::Jxl, &settings), "said so");
+        assert!(!dir.join("c.jxl").exists());
+        assert!(dir.join("a.jxl").exists(), "the rest done all the same");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
