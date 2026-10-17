@@ -245,3 +245,29 @@
 # incoming = { path = "~/Downloads", sort = "newest", key = 9 }
 # clips = { path = "~/Videos/clips", recursive = true, start = "random" }
 # series = { path = "~/Videos/series", start = "resume" }
+
+# ---- Convert ------------------------------------------------------------
+#
+# How File > Convert writes each format. Left out, each aims at the same
+# quality, very good to the eye, at the size its encoder needs for it.
+#
+#   jxl   quality      0 to 100; 90 is "visually lossless"
+#         effort       "fastest" "fast" "medium" "slow" "extraslow"
+#         lossless     every pixel kept, at a much larger size
+#         recompress-jpeg   a JPEG repacked as it is: nothing lost, about
+#                      a fifth smaller, and the JPEG recoverable
+#   avif  quality      0 to 100
+#         speed        1 (slowest, smallest) to 10
+#         depth        8 or 10
+#   jpeg  quality      0 to 100
+#         chroma       "444" (colour at full size) or "420"
+#         progressive  true or false
+#   webp  quality      0 to 100
+#         lossless     true or false
+#         method       0 (fastest) to 6 (smallest)
+#
+# [convert]
+# jxl  = { quality = 90, effort = "medium", lossless = false, recompress-jpeg = true }
+# avif = { quality = 88, speed = 6, depth = 8 }
+# jpeg = { quality = 90, chroma = "444", progressive = true }
+# webp = { quality = 90, lossless = false, method = 4 }

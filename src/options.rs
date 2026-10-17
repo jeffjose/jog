@@ -287,6 +287,8 @@ pub struct Options {
     /// The named folders of the config file, in its order, and which of
     /// them, if any, was asked for by name to start in.
     pub workspaces: Vec<Workspace>,
+    /// How Convert writes each format, from the config file's `[convert]`.
+    pub convert: crate::convert::Settings,
     pub workspace: Option<usize>,
     /// Whether videos pick up where they were left.
     pub resume: bool,
@@ -540,6 +542,7 @@ fn parse_with(
         filter: None,
         start: None,
         workspaces: Vec::new(),
+        convert: crate::convert::Settings::default(),
         workspace: None,
         resume: true,
         session: false,
@@ -787,9 +790,15 @@ const STARTER_CONFIG: &str = include_str!("../assets/config.toml");
 fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>) -> Result<(), String> {
     let table: toml::Table = text.parse().map_err(|error: toml::de::Error| error.to_string())?;
     for (key, value) in &table {
-        // The one table: named folders to switch between.
+        // The tables: named folders to switch between, and how Convert
+        // writes each format.
         if key == "workspaces" {
             options.workspaces = parse_workspaces(value)?;
+            continue;
+        }
+        if key == "convert" {
+            let table = value.as_table().ok_or("convert: expected a table")?;
+            options.convert.apply(table)?;
             continue;
         }
         let key = key.replace('_', "-");

@@ -182,10 +182,21 @@ const MARK_COLOR: u32 = 0xFFB020;
 const KEPT_COLOR: u32 = 0x3DD68C;
 const GRID_COLOR: u32 = 0x101010;
 
+/// Files converted on another thread: those made, how many could not be,
+/// the sizes before and after, and how the last was written.
+pub struct Converted {
+    created: Vec<PathBuf>,
+    failed: usize,
+    format: Format,
+    before: u64,
+    after: u64,
+    how: Option<String>,
+}
+
 /// What background threads send to the event loop.
 pub enum Event {
     Loaded(Job),
-    Converted { created: Vec<PathBuf>, failed: usize, format: Format },
+    Converted(Converted),
     /// A signal from one of the two players that take turns playing: the
     /// number says which.
     Video(u8, Signal),
@@ -3767,34 +3778,49 @@ impl App {
         if self.dry(|_| paths.iter().map(|path| format!("convert to {}: {}", format.name(), path.display())).collect(), &format!("would convert {}", paths.len())) {
             return;
         }
-        self.toast(format!("Converting {} to {}...", paths.len(), format.name()));
+        self.toast(format!("Converting {} to {} ({})...", paths.len(), format.name(), self.options.convert.describe(format)));
         let proxy = self.proxy.clone();
+        let settings = self.options.convert;
         std::thread::spawn(move || {
-            let (mut created, mut failed) = (Vec::new(), 0);
+            let mut done = Converted { created: Vec::new(), failed: 0, format, before: 0, after: 0, how: None };
             for path in paths {
-                match convert::convert(&path, format) {
-                    Ok(to) => {
-                        println!("[convert] {} -> {}", path.display(), to.display());
-                        created.push(to);
+                match convert::convert(&path, format, &settings) {
+                    Ok((to, how)) => {
+                        println!("[convert] {} -> {} ({how})", path.display(), to.display());
+                        done.before += std::fs::metadata(&path).map_or(0, |meta| meta.len());
+                        done.after += std::fs::metadata(&to).map_or(0, |meta| meta.len());
+                        done.created.push(to);
+                        done.how = Some(how);
                     }
                     Err(error) => {
                         eprintln!("jog: cannot convert {}: {error}", path.display());
-                        failed += 1;
+                        done.failed += 1;
                     }
                 }
             }
-            let _ = proxy.send_event(Event::Converted { created, failed, format });
+            let _ = proxy.send_event(Event::Converted(done));
         });
     }
 
-    fn converted(&mut self, created: Vec<PathBuf>, failed: usize, format: Format) {
-        let mut summary = format!("Converted {} to {}", created.len(), format.name());
-        if failed > 0 {
-            summary.push_str(&format!(", {failed} failed (see the terminal)"));
+    fn converted(&mut self, done: Converted) {
+        let mut summary = match done.created.as_slice() {
+            [one] => format!("Converted to {}", one.file_name().unwrap_or_default().to_string_lossy()),
+            all => format!("Converted {} to {}", all.len(), done.format.name()),
+        };
+        if done.before > 0 {
+            let change = (done.after as f64 / done.before as f64 - 1.0) * 100.0;
+            summary.push_str(&format!("  {} → {} ({change:+.0}%)", meta::human_size(done.before), meta::human_size(done.after)));
+        }
+        // A JPEG repacked rather than encoded says so.
+        if let Some(how) = done.how.filter(|how| how.contains("repacked")) {
+            summary.push_str(&format!(", {how}"));
+        }
+        if done.failed > 0 {
+            summary.push_str(&format!(", {} failed (see the terminal)", done.failed));
         }
         self.toast(summary);
-        if !created.is_empty() {
-            self.undo.push(Undo::Created(created));
+        if !done.created.is_empty() {
+            self.undo.push(Undo::Created(done.created));
         }
     }
 
@@ -10149,7 +10175,7 @@ impl ApplicationHandler<Event> for App {
                 self.grid_due = Some(self.grid_due.map_or(due, |at| at.min(due)));
             }
             Event::Loaded(_) => {}
-            Event::Converted { created, failed, format } => self.converted(created, failed, format),
+            Event::Converted(done) => self.converted(done),
             Event::Video(which, signal) if which == self.active => self.video_signal(signal),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {

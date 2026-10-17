@@ -19,6 +19,14 @@ libloading = "0.9"
 libc = "0.2"
 rayon = "1"
 jxl-oxide = { version = "0.12.6", features = ["image"] }
+# Encoders for Convert, all built from source with no tools beyond a C
+# compiler: rav1e's and mozjpeg's assembly would need NASM, so they go
+# without it.
+jixel = "0.4.2"
+ravif = { version = "0.13", default-features = false, features = ["threading"] }
+rgb = "0.8"
+mozjpeg = { version = "0.10", default-features = false, features = ["parallel"] }
+webp = { version = "0.3.1", default-features = false }
 
 [profile.release]
 opt-level = 3
