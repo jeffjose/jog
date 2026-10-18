@@ -167,7 +167,9 @@ Keys:
                              has been kept (Esc later, too).
                              ^foo starts with, !foo without; also is:video
                              is:image is:gif is:marked is:seen is:new, and sizes such as
-                             >10mb or <1gb (b, kb, mb, gb)
+                             >10mb or <1gb (b, kb, mb, gb). > first runs a
+                             command; opened with nothing typed, it offers
+                             the commands run from it lately, latest first
   Ctrl+arrows, Alt+arrows    scroll, by a page   Z  small images: fit screen / actual size
   s                          sort: name, newest, size, shuffle, reverse
   ( / )                      rotate              _ |           flip, mirror

@@ -1139,6 +1139,9 @@ pub struct App {
     chapters: HashMap<usize, Vec<(f64, String)>>,
     entry_frames: HashMap<usize, EntryFrames>,
     section_finder: Option<scenes::Finder>,
+    /// The names of the commands run from the find box lately, the latest
+    /// first: offered first the next time.
+    palette_recent: Option<Vec<String>>,
     /// Which of them the pointer is over.
     triage_over: Option<usize>,
     list_search: Option<TextField>,
@@ -1647,6 +1650,7 @@ impl App {
             chapters: HashMap::new(),
             entry_frames: HashMap::new(),
             section_finder: None,
+            palette_recent: None,
             triage_over: None,
             list_search: None,
             list_cursor: None,
@@ -6341,7 +6345,11 @@ impl App {
     fn palette_changed(&mut self) {
         let Some(palette) = &self.palette else { return };
         let typed = palette.field.string();
+        let recent = typed.is_empty().then(|| self.recent_commands()).filter(|recent| !recent.is_empty());
         let (matches, narrowed, commands) = match typed.chars().next() {
+            // Nothing typed yet: the commands run from here lately, the
+            // latest first, to run again at once. A letter finds files.
+            None if recent.is_some() => (Vec::new(), false, recent.unwrap_or_default()),
             // `>` and then a number is a size to find files by.
             Some('>') if !typed[1..].starts_with(|c: char| c.is_ascii_digit()) => (Vec::new(), false, self.commands_matching(&typed[1..])),
             Some(':') => self.place_named(&typed[1..]),
@@ -6387,6 +6395,10 @@ impl App {
             }
         }
         all.sort_by(|a, b| a.0.cmp(&b.0));
+        // Those run lately come first, the latest first.
+        let recent = self.recent_labels().to_vec();
+        let lately = |label: &str| recent.iter().position(|had| had == label).unwrap_or(usize::MAX);
+        all.sort_by_key(|entry| lately(&entry.0));
         let query = Query::parse(typed);
         if query.is_empty() {
             return all;
@@ -6399,8 +6411,45 @@ impl App {
         if scored.is_empty() {
             scored = pass(true);
         }
-        scored.sort_by_key(|(score, _)| -score);
+        // Those run lately that match come first, the latest first; then
+        // the rest, the closest match first.
+        scored.sort_by_key(|(score, entry)| (lately(&entry.0), -score));
         scored.into_iter().map(|(_, entry)| entry).collect()
+    }
+
+    /// The names of the commands run from the box lately, the latest
+    /// first, read from the state folder the first time.
+    fn recent_labels(&mut self) -> &[String] {
+        self.palette_recent.get_or_insert_with(|| {
+            let path = crate::positions::state_dir().map(|dir| dir.join("palette-recent"));
+            let text = path.and_then(|path| std::fs::read_to_string(path).ok()).unwrap_or_default();
+            text.lines().filter(|line| !line.is_empty()).map(str::to_string).collect()
+        })
+    }
+
+    /// The commands run lately that still apply here, as the box lists
+    /// commands, the latest first.
+    fn recent_commands(&mut self) -> Vec<(String, &'static str, Command)> {
+        let recent = self.recent_labels().to_vec();
+        if recent.is_empty() {
+            return Vec::new();
+        }
+        let all = self.commands_matching("");
+        recent.iter().filter_map(|label| all.iter().find(|entry| entry.0 == *label).cloned()).collect()
+    }
+
+    /// Puts a command first among those run lately, and keeps the list.
+    fn remember_command(&mut self, label: &str) {
+        const KEPT: usize = 12;
+        self.recent_labels();
+        let recent = self.palette_recent.get_or_insert_with(Vec::new);
+        recent.retain(|had| had != label);
+        recent.insert(0, label.to_string());
+        recent.truncate(KEPT);
+        if let Some(dir) = crate::positions::state_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("palette-recent"), recent.join("\n") + "\n");
+        }
     }
 
     /// What follows a `:` in the box names a place: `42` is the 42nd file
@@ -6514,10 +6563,15 @@ impl App {
         let Some(palette) = self.palette.take() else { return };
         // A command is left for whoever closed the box to run, with what
         // running one needs.
-        if let (PaletteEnd::Go, Some((_, _, command))) = (end, palette.commands.get(palette.selected)) {
+        if let (PaletteEnd::Go, Some((label, _, command))) = (end, palette.commands.get(palette.selected)) {
             // What was typed is kept for it, the `!` aside.
             if *command == Command::RunTyped {
                 self.shell_typed = Some(palette.field.string().chars().skip(1).collect());
+            }
+            // A command from the menu's, remembered to be offered first
+            // next time.
+            if matches!(palette.field.text.first(), None | Some('>')) {
+                self.remember_command(label);
             }
             self.run_next = Some(*command);
             return self.redraw();
@@ -6637,6 +6691,7 @@ impl App {
         }
 
         let label = match palette.field.text.first() {
+            None if !palette.commands.is_empty() => "Recent:   ",
             _ if !palette.commands.is_empty() && palette.field.text.first() == Some(&':') => "Go to:   ",
             Some('>') if palette.matches.is_empty() => "Run:   ",
             Some(':') => "Go to:   ",
