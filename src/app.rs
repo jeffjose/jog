@@ -1202,6 +1202,8 @@ pub struct App {
     /// The section marked in each video, by file: still there when the
     /// video is come back to.
     sections: HashMap<usize, Section>,
+    /// The sections marked when jog was last quit, by video, read once.
+    marked_sections: Option<HashMap<PathBuf, (f64, f64)>>,
     /// The strip's tab; the sections kept, by video, read the first time
     /// they are wanted; each video's own chapters, read from the player;
     /// and the frames for the Sections tab's cells.
@@ -1737,6 +1739,7 @@ impl App {
             triage_buttons: RefCell::new(Vec::new()),
             convert_panel: None,
             sections: HashMap::new(),
+            marked_sections: None,
             strip_tab: StripTab::Scenes,
             kept_sections: None,
             entry_first: 0,
@@ -2399,6 +2402,8 @@ impl App {
         if self.player.is_none() {
             return;
         }
+        // The section it had when jog was last quit, marked again.
+        self.restore_section(id);
         // The video being left, if this replaces one; and its frames kept.
         self.remember_position();
         self.drop_back();
@@ -4975,6 +4980,7 @@ impl App {
     /// in, to be picked up with `--resume`.
     pub fn save_session(&mut self) {
         self.save_recent();
+        self.save_marked_sections();
         if self.list.is_empty() || self.cwd.as_os_str().is_empty() {
             return;
         }

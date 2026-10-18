@@ -119,7 +119,53 @@ fn grip(bar: &SeekBar) -> f64 {
     f64::from(bar.unit)
 }
 
+/// Where the sections marked when jog was last quit are kept, a video's
+/// as start, end and path by tabs: marked again when it is opened.
+fn marked_path() -> Option<PathBuf> {
+    crate::positions::state_dir().map(|dir| dir.join("marked-sections"))
+}
+
+fn read_marked() -> HashMap<PathBuf, (f64, f64)> {
+    let text = marked_path().and_then(|path| std::fs::read_to_string(path).ok()).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, '\t');
+            let (a, b, path) = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?, parts.next()?);
+            Some((PathBuf::from(path), (a, b)))
+        })
+        .collect()
+}
+
 impl App {
+    /// A video opened: the section it had marked when jog was last quit,
+    /// unless one is marked now.
+    pub(super) fn restore_section(&mut self, id: usize) {
+        if self.sections.contains_key(&id) {
+            return;
+        }
+        let path = std::path::absolute(&self.files[id]).unwrap_or_else(|_| self.files[id].clone());
+        if let Some(&(a, b)) = self.marked_sections.get_or_insert_with(read_marked).get(&path) {
+            self.sections.insert(id, Section { a: Some(a), b: Some(b) });
+        }
+    }
+
+    /// Keeps the sections marked, for the next run.
+    pub(super) fn save_marked_sections(&mut self) {
+        let mut marked = self.marked_sections.take().unwrap_or_else(read_marked);
+        for (&id, section) in &self.sections {
+            let path = std::path::absolute(&self.files[id]).unwrap_or_else(|_| self.files[id].clone());
+            match section.span() {
+                Some(span) => marked.insert(path, span),
+                None => marked.remove(&path),
+            };
+        }
+        let Some(file) = marked_path() else { return };
+        let mut lines: Vec<String> = marked.iter().map(|(path, (a, b))| format!("{a:.3}\t{b:.3}\t{}", path.display())).collect();
+        lines.sort();
+        let _ = file.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&file, lines.join("\n") + "\n"));
+        self.marked_sections = Some(marked);
+    }
+
     /// The section of the video on view, if one is marked.
     pub(super) fn section(&self) -> Option<Section> {
         let video = self.video.as_ref()?;
@@ -157,8 +203,12 @@ impl App {
     /// Unmarks the section of the video on view. Whether there was one.
     pub(super) fn clear_section(&mut self) -> bool {
         let Some(video) = &self.video else { return false };
+        let path = std::path::absolute(&self.files[video.id]).unwrap_or_else(|_| self.files[video.id].clone());
         if self.sections.remove(&video.id).is_none() {
             return false;
+        }
+        if let Some(marked) = &mut self.marked_sections {
+            marked.remove(&path);
         }
         self.apply_loop();
         self.toast("Section cleared");
