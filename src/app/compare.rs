@@ -53,10 +53,16 @@ impl Delta {
     }
 }
 
+/// How long each of the two stays up when they flicker.
+const FLICKER: Duration = Duration::from_millis(600);
+
 pub struct Compare {
     ticket: u64,
     /// Showing where the two differ, rather than one beside the other.
     showing_delta: bool,
+    /// Flickering between the two in place: the one shown, and when the
+    /// other takes its turn.
+    pub flicker: Option<(usize, Instant)>,
     delta: Option<Delta>,
     /// The two, the first on the left of the divider.
     ids: [usize; 2],
@@ -114,7 +120,7 @@ impl App {
                 let _ = proxy.send_event(Event::CompareScore(ticket, score));
             }
         });
-        self.compare = Some(Compare { ticket, showing_delta: false, delta: None, ids, images: None, failed: None, score: None, original, zoom: 0, center: (0.5, 0.5), place: [0; 4] });
+        self.compare = Some(Compare { ticket, showing_delta: false, flicker: None, delta: None, ids, images: None, failed: None, score: None, original, zoom: 0, center: (0.5, 0.5), place: [0; 4] });
         self.menu = None;
         self.redraw();
     }
@@ -146,9 +152,18 @@ impl App {
         let Some(compare) = &mut self.compare else { return };
         match key {
             Key::Named(NamedKey::Escape) | Key::Character("q") => self.compare = None,
+            // One in place of the other and back, over and over: the eye
+            // catches what changes.
+            Key::Character("b") => {
+                compare.flicker = match compare.flicker {
+                    Some(_) => None,
+                    None => Some((0, Instant::now() + FLICKER)),
+                };
+                compare.showing_delta = false;
+            }
             // Where they differ, and back.
             Key::Character("d") => match compare.delta.is_some() {
-                true => compare.showing_delta = !compare.showing_delta,
+                true => (compare.showing_delta, compare.flicker) = (!compare.showing_delta, None),
                 false if compare.images.as_ref().is_some_and(|[a, b]| a.dimensions() != b.dimensions()) => return self.toast("Different sizes · no difference"),
                 false => return self.toast("Still working…"),
             },
@@ -212,7 +227,17 @@ impl App {
         // The two, the second from the divider on.
         let mut dims = [None, None];
         let delta = compare.delta.as_ref().filter(|_| compare.showing_delta);
-        if let (Some(images), Some(delta)) = (&compare.images, delta) {
+        let flicker = compare.flicker.map(|(side, _)| side);
+        if let (Some(images), Some(side)) = (&compare.images, flicker) {
+            // The one whose turn it is, alone and whole, in the first's terms.
+            dims = [Some(images[0].dimensions()), Some(images[1].dimensions())];
+            let size = (f64::from(images[0].width()), f64::from(images[0].height()));
+            let (shown, dest) = shown_region(size, place, compare.zoom, compare.center);
+            let (kx, ky) = (f64::from(images[side].width()) / size.0, f64::from(images[side].height()) / size.1);
+            if let Some(frame) = cut(&images[side], [shown[0] * kx, shown[1] * ky, shown[2] * kx, shown[3] * ky]) {
+                draw_region(canvas, &frame, dest, compare.zoom.max(u32::from(kx != 1.0)));
+            }
+        } else if let (Some(images), Some(delta)) = (&compare.images, delta) {
             // Where they differ, bright on black, over the whole.
             dims = [Some(images[0].dimensions()), Some(images[1].dimensions())];
             let size = (f64::from(delta.image.width()), f64::from(delta.image.height()));
@@ -248,9 +273,11 @@ impl App {
             format!("{}   {dims}{}", names[which], meta::human_size(sizes[which]))
         };
         let (left_words, right_words) = (about(0), about(1));
-        text.draw(canvas, pad, pad, px, TEXT_COLOR, &left_words);
+        // Flickering, the one not up is dimmed.
+        let color = |which: usize| if flicker.is_some_and(|side| side != which) { DIM_TEXT_COLOR } else { TEXT_COLOR };
+        text.draw(canvas, pad, pad, px, color(0), &left_words);
         let right_w = text.width(&right_words, px);
-        text.draw(canvas, canvas.width - pad - right_w, pad, px, TEXT_COLOR, &right_words);
+        text.draw(canvas, canvas.width - pad - right_w, pad, px, color(1), &right_words);
 
         // How near, and the keys.
         let y = place[1] + place[3] + pad;
@@ -272,10 +299,26 @@ impl App {
             z => format!("{}%", z * 100),
         };
         let difference = if compare.showing_delta { "d side by side" } else { "d difference" };
-        let keys = format!("{zoom_words}  ·  click to look closer  ·  z zoom  ·  {difference}  ·  Tab swap  ·  Esc close");
+        let flicking = if compare.flicker.is_some() { "b stop" } else { "b flicker" };
+        let keys = format!("{zoom_words}  ·  click to look closer  ·  z zoom  ·  {difference}  ·  {flicking}  ·  Tab swap  ·  Esc close");
         text.draw(canvas, pad, y + line, small, DIM_TEXT_COLOR, &keys);
         if let Some(compare) = &mut self.compare {
             compare.place = place;
         }
+    }
+}
+
+impl App {
+    /// The other of the two takes its turn, when flickering. When the
+    /// next turn is, for the event loop to wake for.
+    pub(super) fn tend_flicker(&mut self, now: Instant) -> Option<Instant> {
+        let compare = self.compare.as_mut()?;
+        let (side, due) = compare.flicker.as_mut()?;
+        if *due <= now {
+            *side = 1 - *side;
+            *due = now + FLICKER;
+            self.redraw();
+        }
+        self.compare.as_ref()?.flicker.map(|(_, due)| due)
     }
 }
