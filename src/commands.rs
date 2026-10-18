@@ -156,6 +156,9 @@ pub enum Command {
     Redo,
     /// What the toasts said lately: the find box, set to them.
     Messages,
+    /// Back to where the last jump was made from, and on again.
+    TravelBack,
+    TravelForward,
     /// Copy one of those.
     CopyMessage(usize),
     Rename,
@@ -298,6 +301,8 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "f" => ToggleFullscreen,
             "t" => ToggleFilmstrip,
             "D" => Delete,
+            "o" if modifiers.control_key() => TravelBack,
+            "i" if modifiers.control_key() => TravelForward,
             "i" => ToggleInfo,
             "I" => ToggleDebug,
             "e" => ToggleExif,
@@ -565,6 +570,8 @@ pub fn command_icon(command: Command) -> &'static str {
         Undo => UNDO,
         Redo => ROTATE_CW,
         Messages | CopyMessage(_) => CLOCK,
+        TravelBack => ARROW_LEFT,
+        TravelForward => ARROW_RIGHT,
         CopyName | CopyViewedName | CopyViewedPath | CopyViewedSize | SaveFilelist => COPY,
         CopyPath | CopyShell => CLIPBOARD,
         Reload => REFRESH,
@@ -663,6 +670,8 @@ const GO: &[Option<MenuItem>] = &[
     item("Last file", "End", Command::Last),
     item("Forward 5% of the files", "", Command::JumpForward),
     item("Back 5% of the files", "", Command::JumpBack),
+    item("Back from the jump", "Ctrl+O", Command::TravelBack),
+    item("Forward again", "Ctrl+I", Command::TravelForward),
     item("Next folder", "}", Command::NextDir),
     item("Previous folder", "{", Command::PreviousDir),
     None,

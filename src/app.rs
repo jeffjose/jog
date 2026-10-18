@@ -896,6 +896,11 @@ pub struct App {
     redo: Vec<Redo>,
     /// What the toasts have said, the latest last, for the find box.
     messages: Vec<(Instant, String)>,
+    /// The files jumps were made from, for Ctrl+O, and those gone back
+    /// from, for Ctrl+I; and whether one of those is being made now.
+    jumps_back: Vec<usize>,
+    jumps_forward: Vec<usize>,
+    travelling: bool,
     /// The folder last typed to copy or move files into.
     last_folder: Option<String>,
     /// The workspaces: those of the config file, in its order, and after
@@ -1573,6 +1578,9 @@ impl App {
             undo: Vec::new(),
             redo: Vec::new(),
             messages: Vec::new(),
+            jumps_back: Vec::new(),
+            jumps_forward: Vec::new(),
+            travelling: false,
             last_folder: None,
             prompt: None,
             palette: None,
@@ -2136,6 +2144,17 @@ impl App {
         if pos == self.pos {
             return;
         }
+        // A jump, not a step, is one to come back from with Ctrl+O.
+        if pos.abs_diff(self.pos) > 1 && !self.travelling {
+            if let Some(&id) = self.list.get(self.pos) {
+                self.jumps_back.retain(|had| *had != id);
+                self.jumps_back.push(id);
+                if self.jumps_back.len() > 100 {
+                    self.jumps_back.remove(0);
+                }
+                self.jumps_forward.clear();
+            }
+        }
         self.pos = pos;
         // The filmstrip comes back to the file on view, and has moved
         // under the pointer.
@@ -2149,6 +2168,27 @@ impl App {
         }
         self.request();
         self.refresh();
+    }
+
+    /// Ctrl+O and Ctrl+I: back to where the last jump was from, and on
+    /// again, as a browser's Back and Forward. Files no longer listed are
+    /// passed over.
+    fn travel(&mut self, back: bool) {
+        let current = self.list.get(self.pos).copied();
+        loop {
+            let popped = if back { self.jumps_back.pop() } else { self.jumps_forward.pop() };
+            let Some(id) = popped else {
+                return self.toast(if back { "No jump to go back to" } else { "Nothing ahead" });
+            };
+            let Some(pos) = self.list.iter().position(|&other| other == id) else { continue };
+            if let Some(current) = current {
+                if back { self.jumps_forward.push(current) } else { self.jumps_back.push(current) }
+            }
+            self.travelling = true;
+            self.go_to(pos, !back);
+            self.travelling = false;
+            return;
+        }
     }
 
     // ---- Video ---------------------------------------------------------
@@ -3597,6 +3637,8 @@ impl App {
             MoveToAsk => self.ask_folder(true),
             Undo => self.undo(event_loop),
             Redo => self.redo(event_loop),
+            TravelBack => self.travel(true),
+            TravelForward => self.travel(false),
             Rename => self.start_rename(),
             Delete => self.ask_delete(),
             Convert(format) => self.convert(format),
@@ -7705,6 +7747,11 @@ impl App {
                 self.open_menu(commands::SECTION_MENU, None);
                 return self.redraw();
             }
+        }
+        // The mouse's own Back and Forward, as in a browser.
+        let quiet = self.menu.is_none() && self.prompt.is_none() && self.confirm.is_none() && self.palette.is_none();
+        if pressed && quiet && matches!(button, MouseButton::Back | MouseButton::Forward) {
+            return self.travel(button == MouseButton::Back);
         }
         if self.help {
             self.help = !pressed;
