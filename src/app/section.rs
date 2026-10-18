@@ -501,7 +501,7 @@ impl App {
         ((window_width - strip.pad * 24 + strip.pad) / strip.pitch()).max(1) as usize
     }
 
-    /// Where the cell of an entry stands: the row centred as the scenes'
+    /// Where the cell of an entry stands: the row centered as the scenes'
     /// when it fits, else from the first one scrolled to.
     fn entry_left(&self, strip: &Strip, index: usize, count: usize, window_width: i32) -> i32 {
         if count <= Self::entries_across(strip, window_width) {

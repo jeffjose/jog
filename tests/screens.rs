@@ -24,7 +24,7 @@ fn golden_dir() -> PathBuf {
 }
 
 /// A picture to look at that is the same on every machine: a gradient with
-/// blocks of colour, and, as `changed`, a patch of it painted over.
+/// blocks of color, and, as `changed`, a patch of it painted over.
 fn fixture(changed: bool) -> RgbImage {
     let (w, h) = (960, 600);
     let mut image = RgbImage::from_fn(w, h, |x, y| Rgb([(x * 255 / w) as u8, (y * 255 / h) as u8, 160]));

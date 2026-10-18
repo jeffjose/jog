@@ -30,7 +30,7 @@ here exists in the code.
 ## Reviewing
 
 - Jump to next / previous marked
-- Star ratings or colour labels, with filtering
+- Star ratings or color labels, with filtering
 - Remember marks per directory between runs
 - Name clashes in the output folder: skip identical files, number
   different ones; `{date}` in the folder path

@@ -28,7 +28,7 @@ pub struct Layout {
 pub struct View {
     pub zoom: Zoom,
     /// Image point shown at the middle of the window, in native pixels.
-    /// `None` centres the image.
+    /// `None` centers the image.
     pub center: Option<(f64, f64)>,
     /// Whether `Zoom::Fit` scales small images up to the window.
     pub enlarge: bool,
@@ -89,7 +89,7 @@ impl View {
         self.center = Some(self.clamped_center(native, window, new));
     }
 
-    /// The centre, kept where it would not expose space beyond the image.
+    /// The center, kept where it would not expose space beyond the image.
     fn clamped_center(&self, native: (u32, u32), window: (u32, u32), scale: f64) -> (f64, f64) {
         let axis = |center: Option<f64>, img: u32, win: u32| {
             let (img, half) = (f64::from(img), f64::from(win) / 2.0 / scale);
@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn fit_centres_the_image() {
+    fn fit_centers_the_image() {
         let layout = view(Zoom::Fit).layout(NATIVE, WINDOW);
         assert_eq!(layout, Layout { width: 3240, height: 2160, x: 300, y: 0 });
         let small = view(Zoom::Fit).layout((640, 480), WINDOW);

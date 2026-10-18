@@ -81,7 +81,7 @@ fn api() -> Option<&'static Api> {
     API.get_or_init(|| {
         let chosen = std::env::var("JOG_LIBHEIF").ok();
         let names = chosen.iter().map(String::as_str).chain(LIBRARY_NAMES.iter().copied());
-        // SAFETY: loading libheif runs only its ordinary library initialisers.
+        // SAFETY: loading libheif runs only its ordinary library initializers.
         names.filter_map(|name| unsafe { Library::new(name) }.ok()).find_map(|library| Api::load(library).ok())
     })
     .as_ref()

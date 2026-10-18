@@ -115,7 +115,7 @@ impl<'a> Canvas<'a> {
     /// the brightness kept at the top to `keep`/256 of it. The change is
     /// spread by a fine pattern, so that it shows no steps.
     pub fn fade_down(&mut self, x: i32, y: i32, w: i32, h: i32, keep: u32) {
-        // An ordered dither: which of two neighbouring levels a pixel
+        // An ordered dither: which of two neighboring levels a pixel
         // takes depends on where it is in a 4 x 4 tile.
         const TILE: [[u32; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
         let top = y.clamp(0, self.height);
@@ -432,7 +432,7 @@ pub fn copy_into(into: &mut [u32], from: &[u32]) {
     into.par_chunks_mut(SHARE).zip(from.par_chunks(SHARE)).for_each(|(into, from)| into.copy_from_slice(from));
 }
 
-/// Fills a whole picture with one colour, on every core.
+/// Fills a whole picture with one color, on every core.
 pub fn fill_all(pixels: &mut [u32], color: u32) {
     pixels.par_chunks_mut(SHARE).for_each(|part| part.fill(color));
 }

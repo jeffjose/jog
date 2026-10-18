@@ -113,7 +113,7 @@ fn label(knob: Knob) -> &'static str {
         Knob::Effort => "Effort",
         Knob::Speed => "Speed",
         Knob::Depth => "Bit depth",
-        Knob::Chroma => "Colour",
+        Knob::Chroma => "Color",
         Knob::Progressive => "Progressive",
         Knob::Method => "Effort",
     }
@@ -192,7 +192,7 @@ fn note(knob: Knob, format: Format, settings: &Settings) -> &'static str {
         (Knob::Speed, _) if settings.avif.speed == usual.avif.speed => "recommended",
         (Knob::Speed, _) if settings.avif.speed < 4 => "much slower",
         (Knob::Speed, _) if settings.avif.speed > 7 => "larger",
-        (Knob::Chroma, _) if !settings.jpeg.full_chroma => "smaller, colour edges soften",
+        (Knob::Chroma, _) if !settings.jpeg.full_chroma => "smaller, color edges soften",
         (Knob::Method, _) if settings.webp.method == usual.webp.method => "recommended",
         _ => "",
     }

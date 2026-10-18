@@ -87,7 +87,7 @@ impl Finder {
 }
 
 /// A frame to stand for the part starting at `start`: the keyframe there,
-/// or the frame a few seconds in when that is a single colour, as the
+/// or the frame a few seconds in when that is a single color, as the
 /// first frame of a video and of a fade often is.
 fn frame_at(player: &Player, inbox: &Receiver<Signal>, start: f64) -> Option<Frame> {
     let go = |seconds: f64, how: &[u8]| {

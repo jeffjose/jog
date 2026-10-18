@@ -405,17 +405,17 @@ impl Drop for Unfinished {
 
 /// Goes up by one each time what is being encoded is called off: a job
 /// that sees it move on from what it was when the job began stops.
-static CANCELLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CANCELED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// How many times encoding has been called off; for a job to compare with.
 pub fn generation() -> u64 {
-    CANCELLED.load(std::sync::atomic::Ordering::SeqCst)
+    CANCELED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Calls off what ffmpeg is encoding, and whatever was to follow it.
 /// Whether anything was.
 pub fn cancel() -> bool {
-    CANCELLED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    CANCELED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let running = UNFINISHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     for (_, group) in running.iter() {
         // SAFETY: kill takes plain numbers and touches no memory.
@@ -447,7 +447,7 @@ impl Drop for Batch {
 }
 
 /// What a job called off says, rather than how ffmpeg failed.
-pub const CANCELLED_WORD: &str = "cancelled";
+pub const CANCELED_WORD: &str = "canceled";
 
 /// Stops what ffmpeg is in the middle of, and removes what it was
 /// writing, as jog quits.
@@ -516,7 +516,7 @@ fn run(input: &Path, before: &[String], args: &[String], muxer: &str, output: &P
     if !status.success() {
         let _ = std::fs::remove_file(&partial);
         if generation() != began {
-            return Err(CANCELLED_WORD.to_string());
+            return Err(CANCELED_WORD.to_string());
         }
         let last = said.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("ffmpeg failed");
         return Err(last.to_string());
@@ -582,7 +582,7 @@ pub fn clip_output(path: &Path, a: f64, b: f64, clip: &Clip) -> PathBuf {
 }
 
 /// Takes HDR down to SDR, for an 8-bit animation: without it an HLG or PQ
-/// video comes out grey and washed out. Nothing for SDR, or an ffmpeg
+/// video comes out gray and washed out. Nothing for SDR, or an ffmpeg
 /// without zscale.
 fn tone_map(probe: &Probe) -> &'static str {
     let has_zscale = || {
@@ -641,7 +641,7 @@ pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, t
         }
         Clip::Gif => {
             // A palette made for these frames, and dithered to it: GIF has
-            // 256 colours.
+            // 256 colors.
             // Made small first, then tone mapped: four times quicker than
             // mapping every pixel of a 4K frame and throwing most away.
             let filter = format!(

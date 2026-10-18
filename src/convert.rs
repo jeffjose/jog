@@ -5,7 +5,7 @@
 //! SSIMULACRA2 score of about 85, very good to the eye, at the size each
 //! encoder needs for it. They were measured on a 4K photo and a 1024px
 //! illustration, and follow Jake Archibald's comparison of JPEG XL and
-//! AVIF (2026): AVIF in full colour (4:4:4) at a middling speed, jixel's
+//! AVIF (2026): AVIF in full color (4:4:4) at a middling speed, jixel's
 //! Medium effort, and a JPEG turned into JPEG XL losslessly rather than
 //! encoded again.
 
@@ -19,7 +19,7 @@ use image::DynamicImage;
 use crate::decode::{self, Result};
 use crate::frame::Transform;
 
-/// JPEG has no transparency, so transparent areas become this colour.
+/// JPEG has no transparency, so transparent areas become this color.
 const JPEG_BACKGROUND: u32 = 0xFFFFFF;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -144,7 +144,7 @@ pub struct AvifSettings {
 pub struct JpegSettings {
     /// 0 to 100.
     pub quality: f32,
-    /// Colour at full resolution (4:4:4) rather than halved (4:2:0).
+    /// Color at full resolution (4:4:4) rather than halved (4:2:0).
     pub full_chroma: bool,
     pub progressive: bool,
 }
@@ -738,7 +738,7 @@ mod tests {
         assert_eq!((settings.jxl.quality, settings.jxl.effort), (80.0, Effort::Slow));
         assert_eq!((settings.avif.speed, settings.avif.depth), (4, 10));
         assert!(!settings.jpeg.full_chroma && settings.webp.lossless);
-        let bad: toml::Table = "jxl = { colour = 3 }".parse().unwrap();
+        let bad: toml::Table = "jxl = { color = 3 }".parse().unwrap();
         assert!(settings.apply(&bad).is_err());
     }
 }

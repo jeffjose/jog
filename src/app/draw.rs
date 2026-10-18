@@ -365,7 +365,7 @@ impl App {
         self.tend_trailer();
         // The grid replaces the image and everything describing it.
         let viewing = self.grid.is_none() && self.overview.is_none();
-        // The graphs of the picture's colours are counted from it as it is
+        // The graphs of the picture's colors are counted from it as it is
         // on the screen, before anything is drawn over it: only the part of
         // it in view, which zoomed in is the part looked at.
         let graphing = viewing && self.show_debug && self.scopes.contains(&true);
@@ -411,7 +411,7 @@ impl App {
             // A bar along the top edge flags a marked image.
             canvas.fill(0, 0, width, (px as i32 / 3).max(4), MARK_COLOR);
         }
-        // The lines at the top left, each a run of words in their colours:
+        // The lines at the top left, each a run of words in their colors:
         // what matters bright, what describes it muted.
         let (soft, dim) = (accent_soft(), DIM_TEXT_COLOR);
         let mut top_left: Vec<Vec<(String, u32)>> = Vec::new();
@@ -507,7 +507,7 @@ impl App {
         // window and for a moment after a seek, a frame step or a pause.
         let mut time = Vec::new();
         let mut time_bottom = bottom;
-        // Text placed by an anchor: ending at it, centred on it, or starting at it.
+        // Text placed by an anchor: ending at it, centered on it, or starting at it.
         let mut labels: Vec<(i32, i32, Ordering, String)> = Vec::new();
         // The buttons at the right of the bar: where, which icon, how bright.
         let mut buttons: Vec<(i32, i32, &str, u32)> = Vec::new();
@@ -766,10 +766,10 @@ impl App {
             _ => text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w + (toast_away * f64::from(w + margin)) as i32, margin)),
         }
         self.draw_triage(canvas, &mut text, px);
-        // Twice the usual size, centred just above the seek bar.
+        // Twice the usual size, centered just above the seek bar.
         text_block(canvas, &mut text, &time, px, |w, h| ((width - w) / 2, time_bottom - h));
-        for (centre, top, icon, color) in buttons {
-            let left = centre - text.width(icon, px) / 2;
+        for (center, top, icon, color) in buttons {
+            let left = center - text.width(icon, px) / 2;
             text.draw(canvas, left, top, px, color, icon);
         }
         if subtitle_margin != self.subtitle_margin {
@@ -1311,7 +1311,7 @@ impl App {
                 decode.push(("total", format!("{} ({})", ms(made.fit), made.how)));
             }
             decode.push(("size", format!("{megapixels:.1} MP")));
-            // Decoded ahead as a neighbour, or only once it was gone to.
+            // Decoded ahead as a neighbor, or only once it was gone to.
             decode.push(("when", if made.at <= perf.arrived { "prefetched" } else { "on demand" }.to_string()));
             if let Some(full) = stats.full {
                 let how = if full.how.is_empty() { String::new() } else { format!(" ({})", full.how) };
@@ -1428,7 +1428,7 @@ impl App {
     /// its left edge. The file on view sits in the middle.
     /// The list position in the middle of the filmstrip: the file on view,
     /// unless the wheel has moved the strip along to look further afield.
-    pub(super) fn strip_centre(&self) -> i64 {
+    pub(super) fn strip_center(&self) -> i64 {
         (self.pos as i64 + self.strip_scroll).clamp(0, self.list.len() as i64 - 1)
     }
 
@@ -1448,8 +1448,8 @@ impl App {
     pub(super) fn strip_left(&self, strip: &Strip, pos: usize, window_width: i32) -> i32 {
         let middle = window_width / 2 - strip.cell_w / 2;
         // The strip slides along to a new middle rather than jumping to it.
-        let centre = self.glide(&self.strip_slide, self.strip_centre() as f64, EASE);
-        middle + ((pos as f64 - centre) * f64::from(strip.pitch())).round() as i32
+        let center = self.glide(&self.strip_slide, self.strip_center() as f64, EASE);
+        middle + ((pos as f64 - center) * f64::from(strip.pitch())).round() as i32
     }
 
     /// The list position of the filmstrip cell at a window position.
@@ -1460,7 +1460,7 @@ impl App {
             return None;
         }
         let first_cell = f64::from(width as i32 / 2 - strip.cell_w / 2 - strip.pad / 2);
-        let pos = self.strip_centre() + ((x - first_cell) / f64::from(strip.pitch())).floor() as i64;
+        let pos = self.strip_center() + ((x - first_cell) / f64::from(strip.pitch())).floor() as i64;
         (0..self.list.len() as i64).contains(&pos).then_some(pos as usize)
     }
 
@@ -1493,7 +1493,7 @@ impl App {
         let edge = (strip.pad / 4).max(2);
 
         for offset in -reach..=reach {
-            let pos = self.strip_centre() + offset;
+            let pos = self.strip_center() + offset;
             if !(0..self.list.len() as i64).contains(&pos) {
                 continue;
             }
@@ -1545,7 +1545,7 @@ impl App {
         let reach = i64::from(canvas.width / 2 / strip.pitch() + 1);
         let (top, pad) = (strip.top + strip.pad, (small as i32 / 4).max(2));
         for offset in -reach..=reach {
-            let pos = self.strip_centre() + offset;
+            let pos = self.strip_center() + offset;
             if !(0..self.list.len() as i64).contains(&pos) {
                 continue;
             }
@@ -1598,8 +1598,8 @@ impl App {
         let pad = px as i32 / 2;
         let tip = clipped(text, &tip, canvas.width - 4 * pad, px);
         let (width, height) = (text.width(&tip, px) + 2 * pad, Text::line_height(px) + pad);
-        let centre = self.strip_left(strip, pos, canvas.width) + strip.cell_w / 2;
-        let left = (centre - width / 2).clamp(pad, (canvas.width - width - pad).max(pad));
+        let center = self.strip_left(strip, pos, canvas.width) + strip.cell_w / 2;
+        let left = (center - width / 2).clamp(pad, (canvas.width - width - pad).max(pad));
         let top = strip.top - height - pad / 2;
         panel(canvas, left, top, width, height, pad);
         text.draw(canvas, left + pad, top + pad / 2, px, TEXT_COLOR, &tip);
@@ -2018,7 +2018,7 @@ pub(super) fn panel(canvas: &mut Canvas, x: i32, y: i32, width: i32, height: i32
 }
 
 /// Begins a run of words that is drawn as a badge: small, on a rounded
-/// ground of the run's colour.
+/// ground of the run's color.
 pub(super) const BADGE: char = '\u{1}';
 
 /// Begin a run that is a choice to be clicked, drawn as the buttons of
@@ -2029,7 +2029,7 @@ pub(super) const CHOSEN: char = '\u{3}';
 /// in the info overlay, which copies it.
 pub(super) const LINK: char = '\u{4}';
 
-/// The colour of a badge for what a picture or video is.
+/// The color of a badge for what a picture or video is.
 pub(super) fn badge_color(name: &str) -> u32 {
     match name {
         "HDR10+" => 0x8E5BD6,
@@ -2096,7 +2096,7 @@ pub(super) fn draw_run(canvas: &mut Canvas, text: &mut Text, x: i32, y: i32, px:
 
 /// Draws lines of a function each on a small graph: a dark square with a
 /// faint grid every `tick`, the axes running from 0 to `max`. A line is a
-/// function from x to y, its colour, and whether it is dashed.
+/// function from x to y, its color, and whether it is dashed.
 #[allow(clippy::type_complexity)]
 pub(super) fn plot(canvas: &mut Canvas, [x, y, w, h]: [i32; 4], max: (f64, f64), tick: f64, lines: &[(Box<dyn Fn(f64) -> f64 + '_>, u32, bool)]) {
     canvas.fill(x, y, w, h, 0x0B0B0B);
@@ -2134,7 +2134,7 @@ pub(super) fn plot(canvas: &mut Canvas, [x, y, w, h]: [i32; 4], max: (f64, f64),
     }
 }
 
-/// Draws lines made of runs of words, each run in its own colour, on a
+/// Draws lines made of runs of words, each run in its own color, on a
 /// darkened panel with its top-left corner at `at`. Returns where the
 /// next thing down should start, and where each choice in it went, by
 /// its name.
@@ -2299,7 +2299,7 @@ pub(super) fn draw_confirm(canvas: &mut Canvas, text: &mut Text, confirm: &Confi
     drawn
 }
 
-/// Draws the rename box, centred with its bottom edge at `bottom`.
+/// Draws the rename box, centered with its bottom edge at `bottom`.
 /// `label` names what is being typed and `note`, at the right, says
 /// something about it, such as how many files match.
 /// Shades the selected stretch of a text field whose text starts at

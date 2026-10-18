@@ -600,7 +600,7 @@ mod mp4 {
             b"av01" | b"hvc1" | b"hev1" | b"avc1" | b"avc3" | b"vp09" => {
                 // A visual sample entry's own boxes start after 78 bytes.
                 for (name, body) in inner(entry.1.get(78..).unwrap_or_default()) {
-                    colour(&name, body, info);
+                    color(&name, body, info);
                 }
                 match &entry.0 {
                     b"av01" => Kind::Av1,
@@ -660,9 +660,9 @@ mod mp4 {
         Some(())
     }
 
-    /// The colour boxes of a visual sample entry: how its values are coded,
+    /// The color boxes of a visual sample entry: how its values are coded,
     /// and the static HDR10 figures.
-    fn colour(name: &[u8; 4], body: &[u8], info: &mut Info) {
+    fn color(name: &[u8; 4], body: &[u8], info: &mut Info) {
         match name {
             b"colr" if body.starts_with(b"nclx") => {
                 info.bt2020 |= u16_at(body, 4) == Some(9);
@@ -844,7 +844,7 @@ mod mp4 {
     }
 }
 
-/// WebM: the colour of the video track, and BlockAdditional T.35 data.
+/// WebM: the color of the video track, and BlockAdditional T.35 data.
 mod webm {
     use super::*;
 
@@ -904,7 +904,7 @@ mod webm {
     const TRACKS: u64 = 0x1654_AE6B;
     const TRACK_ENTRY: u64 = 0xAE;
     const VIDEO: u64 = 0xE0;
-    const COLOUR: u64 = 0x55B0;
+    const COLOR: u64 = 0x55B0;
     const CLUSTER: u64 = 0x1F43_B675;
     const TIMECODE: u64 = 0xE7;
     const BLOCK_GROUP: u64 = 0xA0;
@@ -937,7 +937,7 @@ mod webm {
                     }
                     walk_inner(file, stop, info, scale, &mut cluster_time, &mut block_time)?;
                 }
-                COLOUR => colour(file, stop, info),
+                COLOR => color(file, stop, info),
                 _ => {}
             }
             file.seek(SeekFrom::Start(stop)).ok()?;
@@ -964,7 +964,7 @@ mod webm {
                     let data = read_bytes(file, size)?;
                     take_t35(info, &data, block_time.unwrap_or(0.0), "WebM BlockAdditional");
                 }
-                COLOUR => colour(file, stop, info),
+                COLOR => color(file, stop, info),
                 INFO | TRACKS | TRACK_ENTRY | VIDEO | CLUSTER | BLOCK_GROUP | BLOCK_ADDITIONS | BLOCK_MORE => {
                     if id == BLOCK_GROUP {
                         *block_time = None;
@@ -978,9 +978,9 @@ mod webm {
         Some(())
     }
 
-    /// A video track's Colour element: how its values are coded, and the
+    /// A video track's Color element: how its values are coded, and the
     /// static HDR10 figures.
-    fn colour(file: &mut File, end: u64, info: &mut Info) {
+    fn color(file: &mut File, end: u64, info: &mut Info) {
         let (mut cll, mut fall, mut peak, mut floor) = (None, None, None, None);
         while file.stream_position().map_or(false, |at| at < end) {
             let Some((id, start, size)) = element(file) else { break };

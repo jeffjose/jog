@@ -481,7 +481,7 @@ impl App {
             if at == palette.selected {
                 canvas.round_fill(layout.left + pad / 3, top, layout.width - 2 * (pad / 3), layout.row_height, pad / 2, accent(), 256);
             }
-            // Words on the row picked out are in colours that read on it.
+            // Words on the row picked out are in colors that read on it.
             let (main, dim) = row_text(at == palette.selected);
             // A command: what it is called, a mark if it is on, and its key.
             if let Some((name, keys, command)) = palette.commands.get(at) {

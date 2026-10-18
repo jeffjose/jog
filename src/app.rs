@@ -157,7 +157,7 @@ const TEXT_COLOR: u32 = 0xEEEEEE;
 const DIM_TEXT_COLOR: u32 = 0x9A9A9A;
 const MENU_COLOR: u32 = 0x1E1E1E;
 const MENU_EDGE_COLOR: u32 = 0x555555;
-/// The colour of what is picked out, as `--accent` set it. It is read all
+/// The color of what is picked out, as `--accent` set it. It is read all
 /// over the drawing code, which has no other tie to the options.
 static ACCENT: AtomicU32 = AtomicU32::new(0x3E63DD);
 
@@ -165,7 +165,7 @@ fn accent() -> u32 {
     ACCENT.load(atomic::Ordering::Relaxed)
 }
 
-/// The colour for words on the accent: white, or near black on an accent
+/// The color for words on the accent: white, or near black on an accent
 /// light enough that white would be lost on it.
 fn on_accent() -> u32 {
     let channel = |shift: u32| f64::from(accent() >> shift & 0xFF);
@@ -173,9 +173,9 @@ fn on_accent() -> u32 {
     if brightness > 160.0 { 0x161616 } else { 0xFFFFFF }
 }
 
-/// The colours for the main and the lesser words of a row: on one that is
+/// The colors for the main and the lesser words of a row: on one that is
 /// picked out, ones that read on the accent, the lesser a little towards
-/// it; elsewhere the usual white and grey. Grey on the accent is mud.
+/// it; elsewhere the usual white and gray. Gray on the accent is mud.
 fn row_text(selected: bool) -> (u32, u32) {
     if !selected {
         return (TEXT_COLOR, DIM_TEXT_COLOR);
@@ -198,7 +198,7 @@ const DANGER_COLOR: u32 = 0xD64545;
 const PLACEHOLDER_COLOR: u32 = 0x2A2A2A;
 const MARK_COLOR: u32 = 0xFFB020;
 /// What a triage has kept is marked in this; what it has rejected, in
-/// the colour of danger.
+/// the color of danger.
 const KEPT_COLOR: u32 = 0x3DD68C;
 const GRID_COLOR: u32 = 0x101010;
 
@@ -498,7 +498,7 @@ fn ms(duration: Duration) -> String {
     }
 }
 
-/// The seek bar's track: its left end, length and vertical centre. `unit`
+/// The seek bar's track: its left end, length and vertical center. `unit`
 /// is the interface text size, which everything about the bar scales with.
 #[derive(Clone, Copy)]
 struct SeekBar {
@@ -925,7 +925,7 @@ pub struct App {
     /// little: every minute while jog runs.
     session_due: Instant,
     jumps_forward: Vec<usize>,
-    travelling: bool,
+    traveling: bool,
     /// The folder last typed to copy or move files into.
     last_folder: Option<String>,
     /// The workspaces: those of the config file, in its order, and after
@@ -1103,7 +1103,7 @@ pub struct App {
     /// Whether the grid names each file under its picture.
     grid_titles: bool,
     show_debug: bool,
-    /// Which graphs of the picture's colours stand under the debug
+    /// Which graphs of the picture's colors stand under the debug
     /// overlay, by `scopes::KINDS`; whether they count by logarithm; what
     /// they last counted, and how long counting and drawing them took.
     scopes: [bool; 5],
@@ -1611,7 +1611,7 @@ impl App {
             mark_anchor: None,
             session_due: Instant::now() + SESSION_EVERY,
             jumps_forward: Vec::new(),
-            travelling: false,
+            traveling: false,
             last_folder: None,
             prompt: None,
             palette: None,
@@ -1976,7 +1976,7 @@ impl App {
     // ---- Loading -------------------------------------------------------
 
     /// The images to have decoded around a position in a list: that one,
-    /// then its neighbours, favouring the way `forward` says we are
+    /// then its neighbors, favoring the way `forward` says we are
     /// going. Stepping quickly, several are on their way at once, and a
     /// large file takes a few steps' worth of time to decode; but only
     /// as many ahead as there are threads to decode them, or the next
@@ -2034,8 +2034,8 @@ impl App {
             }
         } else if self.strip_used {
             for distance in 0..=THUMB_RADIUS {
-                let centre = self.strip_centre();
-                for at in [centre + distance, centre - distance] {
+                let center = self.strip_center();
+                for at in [center + distance, center - distance] {
                     if (0..len).contains(&at) && !thumbs.contains(&self.list[at as usize]) {
                         thumbs.push(self.list[at as usize]);
                     }
@@ -2178,7 +2178,7 @@ impl App {
             return;
         }
         // A jump, not a step, is one to come back from with Ctrl+O.
-        if pos.abs_diff(self.pos) > 1 && !self.travelling {
+        if pos.abs_diff(self.pos) > 1 && !self.traveling {
             if let Some(&id) = self.list.get(self.pos) {
                 self.jumps_back.retain(|had| *had != id);
                 self.jumps_back.push(id);
@@ -2217,9 +2217,9 @@ impl App {
             if let Some(current) = current {
                 if back { self.jumps_forward.push(current) } else { self.jumps_back.push(current) }
             }
-            self.travelling = true;
+            self.traveling = true;
             self.go_to(pos, !back);
-            self.travelling = false;
+            self.traveling = false;
             return;
         }
     }
@@ -2273,7 +2273,7 @@ impl App {
                 // time, and resizing the window would change it every time.
                 let zoom = (f64::from(layout.width) / f64::from(filling.0)).log2();
                 let zoom = if layout.width.abs_diff(filling.0) <= 1 { 0.0 } else { zoom };
-                // Its pan is the offset from centre as a share of the scaled size.
+                // Its pan is the offset from center as a share of the scaled size.
                 let pan = |origin: i32, size: u32, across: u32| {
                     let off = f64::from(origin) + f64::from(size) / 2.0 - f64::from(across) / 2.0;
                     if off.abs() <= 1.0 { 0.0 } else { off / f64::from(size) }
@@ -2311,7 +2311,7 @@ impl App {
         *sent = Some(values);
     }
 
-    /// Where the video's picture lies in the window: fitted and centred,
+    /// Where the video's picture lies in the window: fitted and centered,
     /// as the player draws it. x, y, and its scale.
     fn video_place(size: (u32, u32), window: (u32, u32)) -> (f64, f64, f64) {
         let scale = (f64::from(window.0) / f64::from(size.0.max(1))).min(f64::from(window.1) / f64::from(size.1.max(1)));

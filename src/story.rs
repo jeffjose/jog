@@ -17,7 +17,7 @@ pub enum Found {
     /// How long the video is, in seconds.
     Length(usize, Option<f64>),
     /// The frames of one of the `SEGMENTS` stretches. None, if the video
-    /// shows nothing there but a flat colour.
+    /// shows nothing there but a flat color.
     Segment(usize, usize, Vec<Frame>),
     /// The video has been gone through, or dropped for another.
     Done(usize),
@@ -77,7 +77,7 @@ pub fn length(path: &Path) -> Option<f64> {
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
-/// Whether a picture is all but one colour: the black, white or tinted
+/// Whether a picture is all but one color: the black, white or tinted
 /// frame a video fades in from, which says nothing about what is in it.
 /// A scattering of its pixels is enough to tell.
 pub fn is_flat(pixels: &[u32]) -> bool {
@@ -92,7 +92,7 @@ pub fn is_flat(pixels: &[u32]) -> bool {
     })
 }
 
-/// How little the levels of a colour may vary, on a scale of 256, for a
+/// How little the levels of a color may vary, on a scale of 256, for a
 /// picture to count as flat.
 const FLAT_SPREAD: f64 = 8.0;
 
@@ -137,7 +137,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn one_colour_is_flat_and_a_picture_is_not() {
+    fn one_color_is_flat_and_a_picture_is_not() {
         assert!(is_flat(&vec![0x000000; 10_000]));
         assert!(is_flat(&vec![0xFFFFFF; 10_000]));
         // A red with a little noise in it, as a compressed fade has.

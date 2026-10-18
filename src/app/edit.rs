@@ -455,7 +455,7 @@ impl App {
             for (index, (path, transform)) in paths.into_iter().enumerate() {
                 // Called off: the rest are not begun.
                 if crate::transcode::generation() != began {
-                    done.error = Some(crate::transcode::CANCELLED_WORD.to_string());
+                    done.error = Some(crate::transcode::CANCELED_WORD.to_string());
                     break;
                 }
                 // Of several, how far along, as a video's encode says.
@@ -512,7 +512,7 @@ impl App {
             for (index, (path, transform)) in paths.iter().enumerate() {
                 // Called off: the rest are not begun.
                 if crate::transcode::generation() != began {
-                    done.error = Some(crate::transcode::CANCELLED_WORD.to_string());
+                    done.error = Some(crate::transcode::CANCELED_WORD.to_string());
                     break;
                 }
                 let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -535,7 +535,7 @@ impl App {
                         done.created.push(to);
                     }
                     Err(error) => {
-                        if error == crate::transcode::CANCELLED_WORD {
+                        if error == crate::transcode::CANCELED_WORD {
                             done.error = Some(error);
                             continue;
                         }
@@ -550,9 +550,9 @@ impl App {
     }
 
     pub(super) fn converted(&mut self, done: Converted) {
-        let cancelled = done.error.as_deref() == Some(crate::transcode::CANCELLED_WORD);
-        if cancelled && done.created.is_empty() {
-            return self.toast("Cancelled");
+        let canceled = done.error.as_deref() == Some(crate::transcode::CANCELED_WORD);
+        if canceled && done.created.is_empty() {
+            return self.toast("Canceled");
         }
         // Nothing made: why, rather than a count of nothing.
         if done.created.is_empty() {
@@ -586,8 +586,8 @@ impl App {
         if done.failed > 0 {
             summary.push_str(&format!("  ·  {} failed", done.failed));
         }
-        if cancelled {
-            summary.push_str("  ·  the rest cancelled");
+        if canceled {
+            summary.push_str("  ·  the rest canceled");
         }
         self.toast_with(summary, links);
         self.did(Undo::Created(done.created));

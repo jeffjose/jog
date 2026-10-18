@@ -68,7 +68,7 @@ impl App {
 
     /// What a triage has at the top of the picture, in a box as the find
     /// box and the menus have. At its ends a button to reject and one to
-    /// keep, each with its key, and edged in its colour when it is what
+    /// keep, each with its key, and edged in its color when it is what
     /// was decided about the file on view. Between them how many are
     /// rejected, beside the one, and kept, beside the other, with a bar
     /// that fills from each end and how many are still to go written over
@@ -115,7 +115,7 @@ impl App {
             let (chosen, hovered) = (decided == Some(verdict), over == Some(buttons.len()));
             let width = widths[which];
             // As the buttons of the find box are: filled in under the
-            // pointer, and edged in its own colour once it is chosen.
+            // pointer, and edged in its own color once it is chosen.
             let round = pad / 2;
             canvas.round_fill(at, top, width, side, round, if hovered { accent() } else { PLACEHOLDER_COLOR }, 256);
             let (edge, edge_color) = if chosen { (2, color) } else if hovered { (1, accent()) } else { (1, MENU_EDGE_COLOR) };
@@ -172,7 +172,7 @@ impl App {
         *self.triage_buttons.borrow_mut() = buttons;
     }
 
-    /// The graphs of the picture's colours, on a panel under the debug
+    /// The graphs of the picture's colors, on a panel under the debug
     /// overlay: a row of buttons to choose them and how they count, then
     /// each one chosen under its name, then how much of the picture is
     /// at pure black and at pure white. Gives back where the buttons went.
@@ -240,7 +240,7 @@ impl App {
                 _ => scopes::vector(&mut place, &self.scope_counts),
             }
         }
-        // How much has lost its detail at either end: a warning colour
+        // How much has lost its detail at either end: a warning color
         // past a fiftieth of the picture.
         let (black, white) = self.scope_counts.clipped();
         let mut words_left = x + pad;
@@ -255,7 +255,7 @@ impl App {
     /// and how its metadata is carried, the figures of the frame on view,
     /// and its curves. The 2094-50 ones as hdr-explorer draws them: input
     /// and output as multiples of the reference white, the stored curves
-    /// in grey, and in green the curve for the headroom chosen with the
+    /// in gray, and in green the curve for the headroom chosen with the
     /// buttons, a dashed line at its peak. Beside them the HDR10+ curve,
     /// as fractions of the scene's brightest and of the screen's peak.
     pub(super) fn draw_hdr(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32, at: (i32, i32), pointer: (i32, i32)) -> Vec<Button> {

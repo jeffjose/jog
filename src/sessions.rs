@@ -168,7 +168,7 @@ const LETTERS: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 /// How many of them an id has.
 const ID_LENGTH: usize = 8;
 
-/// An id spelt out from a number, the same for the same number.
+/// An id spelled out from a number, the same for the same number.
 fn id_from(mut number: u64) -> String {
     let mut id = String::new();
     for _ in 0..ID_LENGTH {

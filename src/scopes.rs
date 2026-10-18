@@ -1,17 +1,17 @@
-//! Graphs of the colours of the picture on view, for the debug overlay:
+//! Graphs of the colors of the picture on view, for the debug overlay:
 //! how much of it is at each level of red, green and blue, where along it
-//! the light and the dark are, and which way its colours lean. They are
+//! the light and the dark are, and which way its colors lean. They are
 //! counted from what is on the screen, a sample of it, each time it is
 //! drawn; and only while they are asked for.
 
 /// The graphs there are, in the order they are offered and drawn: the
 /// name on a button, and what it shows.
 pub const KINDS: [(&str, &str); 5] = [
-    ("Histogram", "How many pixels at each level, the three colours over each other"),
-    ("Rows", "The same, a row to each colour"),
+    ("Histogram", "How many pixels at each level, the three colors over each other"),
+    ("Rows", "The same, a row to each color"),
     ("Waveform", "How light, by where across the picture"),
-    ("Parade", "The same, for each colour beside the others"),
-    ("Vector", "Which way the colours lean, and how far"),
+    ("Parade", "The same, for each color beside the others"),
+    ("Vector", "Which way the colors lean, and how far"),
 ];
 pub const OVERLAID: usize = 0;
 pub const ROWS: usize = 1;
@@ -23,12 +23,12 @@ pub const VECTOR: usize = 4;
 /// graphs of a tenth of a million are those of them all, to the eye.
 const SAMPLES: usize = 100_000;
 /// How many columns the waveform has, each panel of the parade, and each
-/// side of the square the colours are plotted on.
+/// side of the square the colors are plotted on.
 const WAVE: usize = 256;
 const PANEL: usize = 96;
 const SIDE: usize = 128;
 
-/// The colour each channel is drawn in: enough of the other two in it to
+/// The color each channel is drawn in: enough of the other two in it to
 /// be read on black, and the three together near white.
 const CHANNEL: [[u32; 3]; 3] = [[224, 56, 56], [48, 188, 84], [64, 104, 236]];
 const GROUND: u32 = 0x0B0B0B;
@@ -43,7 +43,7 @@ pub struct Measured {
     wave: Vec<u32>,
     /// The same for each channel, its narrower columns side by side.
     parade: Vec<u32>,
-    /// How many had each colour, on a square of blue-yellow across and
+    /// How many had each color, on a square of blue-yellow across and
     /// red-cyan up.
     vector: Vec<u32>,
     /// How many were looked at.
@@ -209,7 +209,7 @@ pub fn histogram(place: &mut Place, measured: &Measured, log: bool, rows: bool) 
             std::array::from_fn(|channel| rise(measured.levels[channel][level], most, band - if rows { 2 } else { 0 }, log))
         })
         .collect();
-    // The colour of each mix of the three, by which of them reach a row.
+    // The color of each mix of the three, by which of them reach a row.
     let mixes: [u32; 8] = std::array::from_fn(|mask| {
         let sum = (0..3).filter(|channel| mask >> channel & 1 == 1).fold([0; 3], |sum, channel| std::array::from_fn(|part| sum[part] + CHANNEL[channel][part]));
         rgb(sum[0], sum[1], sum[2])
@@ -230,7 +230,7 @@ pub fn histogram(place: &mut Place, measured: &Measured, log: bool, rows: bool) 
 }
 
 /// One panel of a waveform: `columns` of counts by level, the first at
-/// `first` in rows of `per_level`, drawn `w` wide from `left` in a colour.
+/// `first` in rows of `per_level`, drawn `w` wide from `left` in a color.
 fn panel(place: &mut Place, counts: &[u32], per_level: usize, first: usize, columns: usize, left: i32, w: i32, color: [u32; 3], per_column: f64) {
     let h = place.h;
     let skip = (-place.x).max(0);
@@ -293,7 +293,7 @@ pub fn parade(place: &mut Place, measured: &Measured) {
     }
 }
 
-/// The colour that belongs at a spot on the square of colours, at a
+/// The color that belongs at a spot on the square of colors, at a
 /// middling lightness: what a pixel plotted there was near.
 fn hue(blue: i32, red: i32, lit: u32) -> u32 {
     let light = 150;
@@ -301,8 +301,8 @@ fn hue(blue: i32, red: i32, lit: u32) -> u32 {
     rgb(part(light + red * 403 / 256), part(light - blue * 48 / 256 - red * 120 / 256), part(light + blue * 475 / 256))
 }
 
-/// Which way the colours of the picture lean, and how far: grey at the
-/// middle, the stronger the colour the further out, the hue by the way.
+/// Which way the colors of the picture lean, and how far: gray at the
+/// middle, the stronger the color the further out, the hue by the way.
 pub fn vector(place: &mut Place, measured: &Measured) {
     place.ground(false);
     // No quarter lines here: the ground is drawn plain over them.
@@ -313,7 +313,7 @@ pub fn vector(place: &mut Place, measured: &Measured) {
     let (left, top) = ((place.w - side) / 2, (place.h - side) / 2);
     let (middle, reach) = (side / 2, side * 15 / 32);
     if !measured.vector.is_empty() {
-        // Each cell's colour once, then laid over the pixels it covers.
+        // Each cell's color once, then laid over the pixels it covers.
         let most = f64::from(measured.samples.max(1)) / 400.0;
         let cells: Vec<u32> = (0..SIDE * SIDE)
             .map(|cell| {
@@ -350,7 +350,7 @@ pub fn vector(place: &mut Place, measured: &Measured) {
         place.set(left + middle + along, top + middle, 0x4A4A4A);
         place.set(left + middle, top + middle + along, 0x4A4A4A);
     }
-    // A small box where each pure colour would fall at three quarters
+    // A small box where each pure color would fall at three quarters
     // strength: red, yellow, green, cyan, blue, magenta.
     for [r, g, b] in [[255, 0, 0], [255, 255, 0], [0, 255, 0], [0, 255, 255], [0, 0, 255], [255, 0, 255]] {
         let blue = (-29 * r - 99 * g + 128 * b) * 3 / 4 >> 8;
@@ -385,7 +385,7 @@ mod tests {
         let wave_at = |level: usize, column: usize| measured.wave[level * WAVE + column];
         assert!(wave_at(53, 0) > 0 && wave_at(255, 0) == 0);
         assert!(wave_at(255, WAVE - 2) > 0);
-        // White is at the middle of the square of colours; red is up from it.
+        // White is at the middle of the square of colors; red is up from it.
         assert!(measured.vector[SIDE / 2 * SIDE + SIDE / 2] > 0);
         assert!(measured.vector[..SIDE * SIDE / 4].iter().sum::<u32>() > 0);
         let (black, white) = measured.clipped();

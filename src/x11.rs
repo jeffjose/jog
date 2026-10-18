@@ -33,7 +33,7 @@ fn xlib(window: &Window) -> Option<(Display, c_ulong)> {
 /// windowing system, or where libX11 cannot be loaded.
 pub fn mark_fullscreen(window: &Window) {
     let Some((display, window)) = xlib(window) else { return };
-    // SAFETY: loading libX11 runs only its ordinary library initialisers,
+    // SAFETY: loading libX11 runs only its ordinary library initializers,
     // and each symbol is given the signature its C header declares.
     unsafe {
         let Ok(library) = Library::new("libX11.so.6") else { return };

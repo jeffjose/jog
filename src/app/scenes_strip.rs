@@ -35,7 +35,7 @@ impl App {
     }
 
     /// Badges for what a video is: from the file, and from the player for
-    /// what the file does not say, as an HEVC one keeps its colour inside
+    /// what the file does not say, as an HEVC one keeps its color inside
     /// the stream.
     pub(super) fn hdr_badges(&mut self) -> Vec<String> {
         let info = self.hdr_info();

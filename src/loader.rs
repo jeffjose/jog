@@ -168,7 +168,7 @@ impl State {
         let full = request.full.map(Job::Full);
         let thumbs = request.thumbs.iter().filter(|_| thumbs_allowed).map(|&id| Job::Thumb(id));
         // The on-screen image first, then its full-resolution version, then
-        // the neighbours, then thumbnails.
+        // the neighbors, then thumbnails.
         let mut jobs = fitted.clone().take(1).chain(full).chain(fitted.skip(1)).chain(thumbs);
         jobs.find(|&job| self.needs(job))
     }
@@ -267,13 +267,13 @@ struct Shared {
     /// Whether each job is reported on the terminal as it finishes.
     debug: AtomicBool,
     /// The job for the image on view while its scaling is on the pool,
-    /// which it has to itself: the neighbours' scaling waits, on `calm`,
+    /// which it has to itself: the neighbors' scaling waits, on `calm`,
     /// rather than take its turn in the way of what is being waited for.
     urgent: Mutex<Option<Job>>,
     calm: Condvar,
 }
 
-/// Decodes the current image and its neighbours on background threads so
+/// Decodes the current image and its neighbors on background threads so
 /// that stepping through a directory never waits on a decode.
 pub struct Loader {
     shared: Arc<Shared>,

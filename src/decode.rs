@@ -28,7 +28,7 @@ pub struct Spec {
     pub enlarge: bool,
     /// Rotation or mirroring the user asked for, on top of the EXIF one.
     pub transform: Transform,
-    /// Colour shown through transparent pixels, as `0RGB`.
+    /// Color shown through transparent pixels, as `0RGB`.
     pub background: u32,
     /// Whether this is for a thumbnail, which for a video should be a
     /// telling frame rather than the one playback opens on.
@@ -252,7 +252,7 @@ fn video_still(path: &Path, thumbnail: bool) -> Result<Vec<u8>> {
     Err("ffmpeg could not read a frame from this video".into())
 }
 
-/// The first frame that is not one flat colour among those a twentieth, a
+/// The first frame that is not one flat color among those a twentieth, a
 /// sixth, a third and half of the way through a video.
 fn later_still(path: &Path) -> Option<Vec<u8>> {
     let length = story::length(path)?;
@@ -270,7 +270,7 @@ fn later_still(path: &Path) -> Option<Vec<u8>> {
 }
 
 /// Whether an uncompressed BMP, as ffmpeg writes it, is all but one
-/// colour. Reads a scattering of pixels straight out of the file.
+/// color. Reads a scattering of pixels straight out of the file.
 fn flat_bmp(bytes: &[u8]) -> bool {
     let field = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
     let (Some(start), Some(depth)) = (field(10), field(28).map(|depth| (depth & 0xFFFF) / 8)) else { return false };
@@ -283,7 +283,7 @@ fn flat_bmp(bytes: &[u8]) -> bool {
 }
 
 /// An image in a format ffmpeg decodes and the built-in decoders do not,
-/// as a BMP. Vector images are rasterised at their own size.
+/// as a BMP. Vector images are rasterized at their own size.
 fn ffmpeg_image(path: &Path) -> Result<Vec<u8>> {
     let output = Command::new("ffmpeg")
         .args(["-v", "error", "-threads", "1", "-i"])
@@ -477,7 +477,7 @@ pub fn shrink(frame: &Frame, bounds: (u32, u32)) -> Result<Frame> {
     Ok(Frame::still(width, height, frame.native, pixels))
 }
 
-/// One RGBA pixel composited over an opaque colour.
+/// One RGBA pixel composited over an opaque color.
 fn blend_over(px: &[u8], bg: [u8; 3]) -> [u8; 3] {
     let alpha = u32::from(px[3]);
     let mix = |c: u8, back: u8| {

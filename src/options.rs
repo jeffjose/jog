@@ -24,8 +24,8 @@ pub const TOPICS: &[(&str, &str, &str)] = &[
   -g, --geometry WxH         start in a window of this size
   -x, --borderless           no window decorations
   -B, --image-bg COLOR       background: black, white or RRGGBB
-      --accent COLOR         colour of selections and highlights: RRGGBB, or one of
-                             the Radix colours such as indigo (the default),
+      --accent COLOR         color of selections and highlights: RRGGBB, or one of
+                             the Radix colors such as indigo (the default),
                              blue, violet, crimson, orange, grass or teal
   -Y, --hide-pointer         hide the mouse pointer
       --no-animations        nothing slides, fades or glides: it is simply there
@@ -307,7 +307,7 @@ pub struct Options {
     pub geometry: Option<(u32, u32)>,
     pub borderless: bool,
     pub background: u32,
-    /// The colour of what is picked out: selections, the grid's cursor.
+    /// The color of what is picked out: selections, the grid's cursor.
     pub accent: u32,
     pub hide_pointer: bool,
     pub zoom: Zoom,
@@ -437,7 +437,7 @@ fn parse_workspaces(value: &toml::Value) -> Result<Vec<Workspace>, String> {
         let workspace = match entry {
             toml::Value::String(path) => plain(path),
             toml::Value::Table(details) => {
-                // A misspelt setting is better refused than left unheeded.
+                // A misspelled setting is better refused than left unheeded.
                 if let Some(unknown) = details.keys().find(|key| !["path", "recursive", "sort", "reverse", "start", "key"].contains(&key.as_str())) {
                     return Err(format!("workspace {name}: unknown setting {unknown} (there are path, recursive, sort, reverse, start and key)"));
                 }
@@ -978,13 +978,13 @@ fn parse_color(text: &str) -> Result<u32, String> {
         _ => {
             let hex = text.trim_start_matches('#');
             let color = u32::from_str_radix(hex, 16).ok().filter(|_| hex.len() == 6);
-            color.ok_or_else(|| format!("invalid colour '{text}', expected black, white or RRGGBB"))
+            color.ok_or_else(|| format!("invalid color '{text}', expected black, white or RRGGBB"))
         }
     }
 }
 
-/// An accent colour: one of the Radix colours by name, at the step meant
-/// for solid backgrounds, or any colour as `RRGGBB`.
+/// An accent color: one of the Radix colors by name, at the step meant
+/// for solid backgrounds, or any color as `RRGGBB`.
 fn parse_accent(text: &str) -> Result<u32, String> {
     let named = match text.to_lowercase().as_str() {
         "tomato" => 0xE54D2E,
@@ -1007,7 +1007,7 @@ fn parse_accent(text: &str) -> Result<u32, String> {
         "brown" => 0xAD7F58,
         "bronze" => 0xA18072,
         "gold" => 0x978365,
-        _ => return parse_color(text).map_err(|_| format!("invalid accent '{text}', expected a Radix colour name such as indigo, or RRGGBB")),
+        _ => return parse_color(text).map_err(|_| format!("invalid accent '{text}', expected a Radix color name such as indigo, or RRGGBB")),
     };
     Ok(named)
 }

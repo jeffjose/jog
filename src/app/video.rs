@@ -98,7 +98,7 @@ impl App {
     pub(super) fn preview_signal(&mut self, signal: Signal) {
         let Some(preview) = &self.preview else { return };
         if let Signal::Events = signal {
-            // Only to empty the queue, so that mpv keeps signalling.
+            // Only to empty the queue, so that mpv keeps signaling.
             preview.events();
             return;
         }
@@ -521,7 +521,7 @@ impl App {
     /// Tells both players how subtitles are to look and whether they show.
     /// Those a file styles for itself keep their own look.
     pub(super) fn apply_subtitles(&self) {
-        // mpv's sizes are in pixels of a picture 720 high, and its colours
+        // mpv's sizes are in pixels of a picture 720 high, and its colors
         // are written `#AARRGGBB`.
         let size = (SUBTITLE_SIZE * f64::from(self.subtitle_size) / 100.0).to_string();
         let margin = self.subtitle_margin.to_string();

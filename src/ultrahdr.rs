@@ -21,7 +21,7 @@ pub enum Hdr {
     Sdr,
     /// The HDR rendition, made with the gain map.
     Full,
-    /// The gain map itself, as grey: the lighter, the more boost.
+    /// The gain map itself, as gray: the lighter, the more boost.
     GainMap,
 }
 

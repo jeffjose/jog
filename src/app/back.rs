@@ -3,7 +3,7 @@
 //! seconds a step. So once a video has been paused a moment, a player of
 //! its own, on a thread of its own, opens the same file a little earlier
 //! and steps forward to where it is paused, drawing each frame as the main
-//! player would draw it: the same size, view and colour. Shift+Left then
+//! player would draw it: the same size, view and color. Shift+Left then
 //! shows those, at once.
 //!
 //! Leaving them, by playing, seeking or anything but stepping, puts the

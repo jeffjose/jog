@@ -516,10 +516,10 @@ impl App {
                         // The list and the strip stay as they are: the one
                         // clicked is not brought to the middle.
                         let first = self.list_panel().map(|panel| panel.first);
-                        let centre = self.strip_centre();
+                        let center = self.strip_center();
                         self.go_to(pos, pos > self.pos);
                         self.list_scroll = first.map(|first| (self.pos, self.list.len(), first));
-                        self.strip_scroll = centre - self.pos as i64;
+                        self.strip_scroll = center - self.pos as i64;
                     }
                 } else if self.strip_close().is_some_and(|place| (place.x..place.x + place.width).contains(&(x as i32)) && (place.y..place.y + place.height).contains(&(y as i32))) {
                     (self.strip_pinned, self.strip_hover, self.strip_over) = (false, false, None);
@@ -539,10 +539,10 @@ impl App {
                         // The list and the strip stay as they are: the one
                         // clicked is not brought to the middle.
                         let first = self.list_panel().map(|panel| panel.first);
-                        let centre = self.strip_centre();
+                        let center = self.strip_center();
                         self.go_to(pos, pos > self.pos);
                         self.list_scroll = first.map(|first| (self.pos, self.list.len(), first));
-                        self.strip_scroll = centre - self.pos as i64;
+                        self.strip_scroll = center - self.pos as i64;
                     }
                 } else {
                     // A second click in the same spot does what `f` does.
@@ -634,8 +634,8 @@ impl App {
         // further off without leaving the file on view. A click goes there.
         if self.strip_cell_at(self.mouse.0, self.mouse.1).is_some() {
             let last = self.list.len() as i64 - 1;
-            let centre = (self.strip_centre() - (lines * 2.0).round() as i64).clamp(0, last);
-            self.strip_scroll = centre - self.pos as i64;
+            let center = (self.strip_center() - (lines * 2.0).round() as i64).clamp(0, last);
+            self.strip_scroll = center - self.pos as i64;
             self.strip_over = self.strip_cell_at(self.mouse.0, self.mouse.1);
             self.request();
             return self.redraw();

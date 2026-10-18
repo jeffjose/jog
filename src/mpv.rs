@@ -237,7 +237,7 @@ fn c_string(text: impl AsRef<[u8]>) -> CString {
 fn open_library() -> Option<Library> {
     let chosen = std::env::var("JOG_LIBMPV").ok();
     let names = chosen.iter().map(String::as_str).chain(LIBRARY_NAMES.iter().copied());
-    // SAFETY: loading libmpv runs only its ordinary library initialisers.
+    // SAFETY: loading libmpv runs only its ordinary library initializers.
     names.filter_map(|name| unsafe { Library::new(name) }.ok()).next()
 }
 

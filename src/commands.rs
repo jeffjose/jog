@@ -80,7 +80,7 @@ pub enum Command {
     /// Put the debug overlay's figures on the clipboard, plainly or as JSON.
     CopyDebug,
     CopyDebugJson,
-    /// Show one of the graphs of the picture'"'"'s colours under the debug
+    /// Show one of the graphs of the picture'"'"'s colors under the debug
     /// overlay, or stop; and draw their counts by logarithm or plainly.
     Scope(usize),
     ScopeLog,
@@ -1051,7 +1051,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("t", "Filmstrip"),
                 ("p", "File list down the side; / searches it, its buttons pin and move it"),
                 ("i", "Info: name, size, zoom"),
-                ("I", "Timings, what a video is made of, graphs of the colours, and a video's HDR: HDR10+ and 2094-50 curves"),
+                ("I", "Timings, what a video is made of, graphs of the colors, and a video's HDR: HDR10+ and 2094-50 curves"),
                 ("e", "EXIF data"),
                 ("a", "List of the actions there are"),
                 ("w  o", "Size the window to the picture / hide the pointer"),

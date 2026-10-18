@@ -9,7 +9,7 @@ use crate::frame::Frame;
 use crate::view::Layout;
 
 /// Paints `frame` into a `window`-sized buffer at `layout`, clearing the
-/// rest. Scaling is nearest-neighbour unless `smooth` asks for filtering,
+/// rest. Scaling is nearest-neighbor unless `smooth` asks for filtering,
 /// which looks better but costs more.
 ///
 /// `picture` picks the frame of an animation; 0 is the first or only one.
@@ -58,7 +58,7 @@ pub fn draw_image(dst: &mut [u32], window: (u32, u32), frame: &Frame, picture: u
         }
     }
 
-    // Sample at destination pixel centres.
+    // Sample at destination pixel centers.
     let nearest = |at: i32, shown: u32, source: usize| {
         ((at as u64 * 2 + 1) * source as u64 / (u64::from(shown) * 2)).min(source as u64 - 1) as usize
     };
@@ -228,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_size_is_copied_and_centred() {
+    fn exact_size_is_copied_and_centered() {
         let mut buffer = [9; 12];
         let layout = Layout { width: 2, height: 1, x: 1, y: 1 };
         draw_image(&mut buffer, (4, 3), &frame(2, 1), 0, layout, false, 7);
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn smooth_drawing_stays_inside_the_layout() {
         // A flat picture drawn smoothly into the middle of a larger
-        // window: the margins are background, the picture its colour, and
+        // window: the margins are background, the picture its color, and
         // when panned partly off the window only the part on it is drawn.
         let source = Frame::still(8, 8, (8, 8), vec![0x404040; 64]);
         let mut buffer = [9; 6 * 5];

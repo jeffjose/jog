@@ -82,8 +82,8 @@ impl App {
         }
         let menu_height = top + pad;
 
-        let centred = ((width as i32 - menu_width) / 2, (height as i32 - menu_height) / 2);
-        let (x, y) = if title.is_some() { centred } else { at };
+        let centered = ((width as i32 - menu_width) / 2, (height as i32 - menu_height) / 2);
+        let (x, y) = if title.is_some() { centered } else { at };
         Menu {
             x: x.clamp(0, (width as i32 - menu_width).max(0)),
             y: y.clamp(0, (height as i32 - menu_height).max(0)),
