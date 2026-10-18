@@ -1179,6 +1179,8 @@ pub struct App {
     shell_history: Option<Vec<String>>,
     /// The files viewed in this run, the latest first, for the find box.
     visited: RefCell<Vec<usize>>,
+    /// The recent files the find box lists now, which OpenRecent indexes.
+    recent_shown: Vec<PathBuf>,
     shell_typed: Option<String>,
     /// Whether the file list stands at the right of the window, and whether
     /// it is pinned there: the picture then has what is left beside it,
@@ -1722,6 +1724,7 @@ impl App {
             precise: options.precise_seeking,
             shell_history: None,
             visited: RefCell::new(Vec::new()),
+            recent_shown: Vec::new(),
             shell_typed: None,
             list_right: options.list_right,
             list_pinned: options.list_pinned,
@@ -3706,9 +3709,21 @@ impl App {
                     self.run_shell(&typed);
                 }
             }
-            OpenRecent(id) => {
-                let path = self.files[id].clone();
-                self.show_path(&path);
+            OpenRecent(at) => {
+                let Some(path) = self.recent_shown.get(at).cloned() else { return };
+                // One from another folder, or from a run before, joins the
+                // list to be gone to.
+                let listed = self.files.iter().position(|file| std::path::absolute(file).ok().as_ref() == Some(&path));
+                match listed {
+                    Some(id) => {
+                        let path = self.files[id].clone();
+                        self.show_path(&path);
+                    }
+                    None => {
+                        self.adopt_created(std::slice::from_ref(&path));
+                        self.show_path(&path);
+                    }
+                }
             }
             RunShell(at) => {
                 if let Some(command) = self.shell_history.get_or_insert_with(history::load).get(at).cloned() {
@@ -4933,6 +4948,7 @@ impl App {
     /// Keeps what is on view as a session of the folder jog was started
     /// in, to be picked up with `--resume`.
     pub fn save_session(&mut self) {
+        self.save_recent();
         if self.list.is_empty() || self.cwd.as_os_str().is_empty() {
             return;
         }
@@ -7019,11 +7035,46 @@ impl App {
 
     /// The files viewed lately, the one on view aside, as the box lists
     /// commands: a few, the latest first.
-    fn recent_files(&self) -> Vec<(String, &'static str, Command)> {
-        let current = self.list.get(self.pos).copied();
-        let visited = self.visited.borrow();
-        let others = visited.iter().filter(|id| Some(**id) != current && self.files[**id].exists());
-        others.take(5).map(|&id| (self.name_of(id), "", Command::OpenRecent(id))).collect()
+    fn recent_files(&mut self) -> Vec<(String, &'static str, Command)> {
+        let current = self.list.get(self.pos).map(|&id| self.full_path(id));
+        let paths = self.recent_paths();
+        let others = paths.into_iter().filter(|path| Some(path) != current.as_ref() && path.exists());
+        self.recent_shown = others.take(6).collect();
+        // Named by the file, and by its folder too when it is another's.
+        let here = current.as_ref().and_then(|path| path.parent().map(Path::to_path_buf));
+        let said = |path: &PathBuf| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            match path.parent().filter(|dir| Some(dir.to_path_buf()) != here) {
+                Some(dir) => format!("{name}  ·  {}", short_dir(dir)),
+                None => name,
+            }
+        };
+        self.recent_shown.iter().enumerate().map(|(at, path)| (said(path), "", Command::OpenRecent(at))).collect()
+    }
+
+    fn full_path(&self, id: usize) -> PathBuf {
+        std::path::absolute(&self.files[id]).unwrap_or_else(|_| self.files[id].clone())
+    }
+
+    /// The files viewed lately, the latest first: in this run, then those
+    /// kept from runs before, whatever folder they are in.
+    fn recent_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.visited.borrow().iter().map(|&id| self.full_path(id)).collect();
+        let kept = crate::positions::state_dir().and_then(|dir| std::fs::read_to_string(dir.join("recent-files")).ok()).unwrap_or_default();
+        for line in kept.lines().filter(|line| !line.is_empty()) {
+            let path = PathBuf::from(line);
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        paths
+    }
+
+    /// Keeps the files viewed lately for the next run.
+    fn save_recent(&self) {
+        let Some(dir) = crate::positions::state_dir() else { return };
+        let text: String = self.recent_paths().iter().take(30).map(|path| format!("{}\n", path.display())).collect();
+        let _ = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join("recent-files"), text));
     }
 
     /// Puts a command first among those run lately, and keeps the list.
