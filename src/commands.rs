@@ -131,6 +131,10 @@ pub enum Command {
     /// Copy the name of the file on view alone, marks or none: a click on
     /// it in the info overlay.
     CopyViewedName,
+    /// The whole path of the file on view: a click on its folder there.
+    CopyViewedPath,
+    /// Its dimensions, as 1920x1080: a click on them there.
+    CopyViewedSize,
     CopyPath,
     /// Copy the paths on one line for a shell, each folder's files folded
     /// together with braces.
@@ -539,7 +543,7 @@ pub fn command_icon(command: Command) -> &'static str {
         Convert(_) | ConvertPanel | ConvertVideo(_) => REPLACE,
         Compare => EYE,
         Undo => UNDO,
-        CopyName | CopyViewedName | SaveFilelist => COPY,
+        CopyName | CopyViewedName | CopyViewedPath | CopyViewedSize | SaveFilelist => COPY,
         CopyPath | CopyShell => CLIPBOARD,
         Reload => REFRESH,
         Remove => MINUS,

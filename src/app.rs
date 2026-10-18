@@ -258,6 +258,24 @@ enum Undo {
     Renamed { id: usize, from: PathBuf, to: PathBuf },
 }
 
+/// What a toast offers to be clicked: to undo what it tells of, or to go
+/// to the file it made.
+#[derive(Clone, PartialEq, Debug)]
+enum ToastLink {
+    Undo,
+    Show(PathBuf),
+}
+
+/// Why the list is being brought up to date: the folders watched, a
+/// refresh asked for, or files jog itself just made, which join quietly
+/// and are not gone to.
+#[derive(Clone, Copy, PartialEq)]
+enum Taking {
+    Watching,
+    Refreshing,
+    Adopting,
+}
+
 /// A file moved out of the list: where it sat and where it went.
 struct Moved {
     id: usize,
@@ -1182,6 +1200,9 @@ pub struct App {
     subtitle_size: u32,
     subtitle_margin: i32,
     toast: Option<(String, Instant)>,
+    /// What the toast offers to be clicked, and where that was drawn.
+    toast_links: Vec<(String, ToastLink)>,
+    toast_buttons: Vec<(ToastLink, [i32; 4])>,
     /// While set, the video's time and a larger progress bar are shown.
     time_until: Option<Instant>,
     meta: Option<(usize, Meta)>,
@@ -1688,6 +1709,8 @@ impl App {
             subtitle_size: options.subtitle_size,
             subtitle_margin: SUBTITLE_MARGIN,
             toast: None,
+            toast_links: Vec::new(),
+            toast_buttons: Vec::new(),
             time_until: None,
             meta: None,
             meta_asked: None,
@@ -1796,7 +1819,45 @@ impl App {
             self.toast_slide.set(Glide { from: 0.0, to: 1.0, since: Instant::now() });
         }
         self.toast = Some((message.into(), Instant::now() + TOAST));
+        self.toast_links.clear();
         self.redraw();
+    }
+
+    /// A toast with something to click: Undo, or Show for a file made. It
+    /// stays up longer, to give time to reach it.
+    fn toast_with(&mut self, message: impl Into<String>, links: Vec<(String, ToastLink)>) {
+        self.toast(message);
+        if let Some((_, until)) = &mut self.toast {
+            *until += TOAST;
+        }
+        self.toast_links = links;
+    }
+
+    /// A click on a toast's link: what it offers is done. Whether it was on
+    /// one.
+    fn toast_click(&mut self, x: f64, y: f64, event_loop: &ActiveEventLoop) -> bool {
+        let on = |[left, top, w, h]: [i32; 4]| (left..left + w).contains(&(x as i32)) && (top..top + h).contains(&(y as i32));
+        let Some((link, _)) = self.toast_buttons.iter().find(|(_, place)| on(*place)).cloned() else { return false };
+        self.toast_buttons.clear();
+        match link {
+            ToastLink::Undo => self.execute(Command::Undo, event_loop),
+            ToastLink::Show(path) => self.show_path(&path),
+        }
+        true
+    }
+
+    /// Goes to a file, by its path: one just made, say.
+    fn show_path(&mut self, path: &Path) {
+        let Some(id) = self.files.iter().position(|file| file == path) else {
+            return self.toast(format!("{} is not in the list", path.display()));
+        };
+        // A kept search that leaves it out gives way.
+        if !self.list.contains(&id) && self.filter.is_some() {
+            self.clear_filter(true);
+        }
+        if let Some(pos) = self.list.iter().position(|other| *other == id) {
+            self.go_to(pos, pos > self.pos);
+        }
     }
 
     fn strip_visible(&self) -> bool {
@@ -3423,8 +3484,15 @@ impl App {
                 self.toast(format!("Cleared {count} marks"));
             }
             CopyName => self.copy_text(false),
-            CopyViewedName => {
-                let name = self.name();
+            CopyViewedName | CopyViewedPath | CopyViewedSize => {
+                let name = match command {
+                    CopyViewedPath => {
+                        let path = &self.files[self.id()];
+                        std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()).display().to_string()
+                    }
+                    CopyViewedSize => self.native().map(|(w, h)| format!("{w}x{h}")).unwrap_or_default(),
+                    _ => self.name(),
+                };
                 println!("[copy] {name}");
                 if self.snapshot.is_some() || ops::set_clipboard(&name) {
                     self.toast(format!("Copied {name}"));
@@ -3438,7 +3506,7 @@ impl App {
             MoveTo => self.send(true, event_loop),
             CopyToAsk => self.ask_folder(false),
             MoveToAsk => self.ask_folder(true),
-            Undo => self.undo(),
+            Undo => self.undo(event_loop),
             Rename => self.start_rename(),
             Delete => self.ask_delete(),
             Convert(format) => self.convert(format),
@@ -3692,10 +3760,10 @@ impl App {
         if failed > 0 {
             summary.push_str(&format!(", {failed} failed"));
         }
-        self.toast(summary);
         if sent.is_empty() {
-            return;
+            return self.toast(summary);
         }
+        self.toast_with(summary, vec![("Undo".into(), ToastLink::Undo)]);
         if moving {
             let removed: Vec<(usize, usize)> = sent.iter().map(|moved| (moved.id, moved.pos)).collect();
             self.drop_from_list(&removed, event_loop);
@@ -3819,7 +3887,7 @@ impl App {
         }
     }
 
-    fn undo(&mut self) {
+    fn undo(&mut self, event_loop: &ActiveEventLoop) {
         if !self.undo.is_empty() && self.dry(|_| vec!["undo the last copy, move, rename or convert".to_string()], "would undo") {
             return;
         }
@@ -3831,6 +3899,14 @@ impl App {
                     println!("[undo] removed {}", path.display());
                 }
                 self.toast(format!("Undone: removed {removed} new files"));
+                // Those the list had taken in leave it.
+                let listed: Vec<(usize, usize)> = (self.list.iter().enumerate())
+                    .filter(|(_, id)| paths.contains(&self.files[**id]))
+                    .map(|(pos, id)| (*id, pos))
+                    .collect();
+                if !listed.is_empty() {
+                    self.drop_from_list(&listed, event_loop);
+                }
             }
             Some(Undo::Moved(moved)) => {
                 let viewing = self.id();
@@ -3973,11 +4049,15 @@ impl App {
             let why = done.error.unwrap_or_else(|| "see the terminal".to_string());
             return self.toast(format!("{}: {why}", if done.saving { "Not saved" } else { "Not converted" }));
         }
+        // What was made joins the list beside what it was made from, and
+        // the toast goes to it on a click.
+        self.adopt_created(&done.created);
+        let links = vec![("Show".into(), ToastLink::Show(done.created[0].clone())), ("Undo".into(), ToastLink::Undo)];
         // A section saved: what and how large.
         if done.saving {
             let made = &done.created[0];
             let size = std::fs::metadata(made).map_or(0, |meta| meta.len());
-            self.toast(format!("Saved {}  {}", made.file_name().unwrap_or_default().to_string_lossy(), meta::human_size(size)));
+            self.toast_with(format!("Saved {}  {}", made.file_name().unwrap_or_default().to_string_lossy(), meta::human_size(size)), links);
             self.undo.push(Undo::Created(done.created));
             return;
         }
@@ -3996,10 +4076,28 @@ impl App {
         if done.failed > 0 {
             summary.push_str(&format!(", {} failed (see the terminal)", done.failed));
         }
-        self.toast(summary);
-        if !done.created.is_empty() {
-            self.undo.push(Undo::Created(done.created));
+        self.toast_with(summary, links);
+        self.undo.push(Undo::Created(done.created));
+    }
+
+    /// Files just made, by a convert or a saved section, put in the list
+    /// right after the file each was made from: the one in the same folder
+    /// whose name starts its name.
+    fn adopt_created(&mut self, created: &[PathBuf]) {
+        let total = self.filter.as_ref().map_or(&self.list, |(_, all)| all);
+        let mut listed: Vec<PathBuf> = total.iter().map(|id| self.files[*id].clone()).collect();
+        for made in created {
+            if listed.contains(made) || !made.exists() {
+                continue;
+            }
+            let stem = made.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            let source = listed.iter().rposition(|path| {
+                path.parent() == made.parent() && path.file_stem().is_some_and(|own| stem.starts_with(&*own.to_string_lossy()))
+            });
+            let at = source.map_or(listed.len(), |at| at + 1);
+            listed.insert(at, made.clone());
         }
+        self.take_listing_as(listed, Taking::Adopting);
     }
 
     // ---- Rename --------------------------------------------------------
@@ -5407,7 +5505,7 @@ impl App {
                 }
                 self.set_path(prompt.id, to.clone());
                 self.undo.push(Undo::Renamed { id: prompt.id, from, to });
-                self.toast(format!("{} {said}", if moved { "Moved to" } else { "Renamed to" }));
+                self.toast_with(format!("{} {said}", if moved { "Moved to" } else { "Renamed to" }), vec![("Undo".into(), ToastLink::Undo)]);
                 self.refresh();
             }
             Err(error) => self.toast(format!("Cannot rename to {said}: {error}")),
@@ -6266,6 +6364,11 @@ impl App {
     /// list and a kept search all stay. When watching, a file arriving
     /// just past the end being viewed is gone to.
     fn take_listing(&mut self, listed: Vec<PathBuf>, watching: bool) {
+        self.take_listing_as(listed, if watching { Taking::Watching } else { Taking::Refreshing });
+    }
+
+    fn take_listing_as(&mut self, listed: Vec<PathBuf>, taking: Taking) {
+        let watching = taking != Taking::Refreshing;
         // Not under an open search box, whose own lists would go stale.
         if self.palette.is_some() {
             return;
@@ -6342,7 +6445,7 @@ impl App {
         let last = self.list.len() - 1;
         let (mut pos, cursor) = (at(viewed, self.pos.min(last)), at(focus, self.focus().min(last)));
         let is_new = |pos: usize| self.list[pos] >= first_new;
-        if watching && self.grid.is_none() {
+        if taking == Taking::Watching && self.grid.is_none() {
             if was_last && is_new(last) {
                 pos = last;
             } else if was_first && is_new(0) && sort == Some(Sort::Newest) && !reversed {
@@ -6370,7 +6473,9 @@ impl App {
             fresh.iter().for_each(|path| eprintln!("jog: new file {}", path.display()));
             eprintln!("jog: refreshed: {}, {} files now", parts.join(", "), self.total());
         }
-        self.toast(format!("{}: {}", if watching { "Watch" } else { "Refreshed" }, parts.join(", ")));
+        if taking != Taking::Adopting {
+            self.toast(format!("{}: {}", if watching { "Watch" } else { "Refreshed" }, parts.join(", ")));
+        }
         self.request();
         self.refresh();
         self.redraw();
@@ -7218,6 +7323,9 @@ impl App {
         }
         if self.help {
             self.help = !pressed;
+            return self.redraw();
+        }
+        if button == MouseButton::Left && pressed && self.confirm.is_none() && self.toast_click(x, y, event_loop) {
             return self.redraw();
         }
         if self.confirm.is_some() {
@@ -8257,8 +8365,13 @@ impl App {
             top_left.push(line);
         }
         if viewing && self.show_info {
-            // The name is there to be clicked, which copies it.
+            // The name is there to be clicked, which copies it; the folder
+            // before it, dimmer, copies the whole path.
+            let folder = self.files[self.id()].parent().filter(|dir| !dir.as_os_str().is_empty()).map(short_dir);
             let mut line = vec![(format!("{LINK}{}", self.name()), TEXT_COLOR), (format!("   {} / {}", self.pos + 1, self.list.len()), soft)];
+            if let Some(folder) = folder {
+                line.insert(0, (format!("{LINK}{}/", folder.trim_end_matches('/')), dim));
+            }
             // A video not watched yet says so, until it has been.
             if self.is_new(self.id()) {
                 line.push(("   new".to_string(), accent_soft()));
@@ -8284,12 +8397,18 @@ impl App {
                     }
                 }
             }
+            let before_badges = line.len();
             for name in &badges {
-                line.push((if line.len() > 2 { "" } else { " " }.to_string(), dim));
+                line.push((if line.len() > before_badges { "" } else { " " }.to_string(), dim));
                 line.push(badge(name));
             }
             top_left.push(line);
-            let mut details = vec![(self.info_line(), dim)];
+            // The dimensions, to be clicked, which copies them.
+            let (dims, rest) = self.info_line();
+            let mut details = vec![(rest, dim)];
+            if let Some(dims) = dims {
+                details.insert(0, (format!("{LINK}{dims}"), dim));
+            }
             if ultra {
                 // The three renditions, to be clicked: the one on view filled.
                 details.push(("   ".to_string(), soft));
@@ -8502,6 +8621,14 @@ impl App {
                 if name == self.name() {
                     return Some(Button { x, y, width, height, command: Command::CopyViewedName });
                 }
+                // The folder before it, which copies the whole path, and
+                // the dimensions.
+                if name.ends_with('/') {
+                    return Some(Button { x, y, width, height, command: Command::CopyViewedPath });
+                }
+                if name.contains(" x ") && name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    return Some(Button { x, y, width, height, command: Command::CopyViewedSize });
+                }
                 let mode = [Hdr::Sdr, Hdr::Full, Hdr::GainMap].into_iter().find(|mode| mode.name() == name)?;
                 Some(Button { x, y, width, height, command: Command::SetHdr(mode) })
             })
@@ -8537,7 +8664,32 @@ impl App {
             false => 0.0,
         };
         let toast_away = (1.0 - toast_in) + toast_out;
-        text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w + (toast_away * f64::from(w + margin)) as i32, margin));
+        self.toast_buttons.clear();
+        match (&self.toast, self.toast_links.is_empty()) {
+            (Some((message, _)), false) => {
+                // One line: the words, the file's name in them there to be
+                // clicked when it offers Show, then its links as buttons.
+                let shows = self.toast_links.iter().any(|(_, link)| matches!(link, ToastLink::Show(_)));
+                let mut line: Vec<(String, u32)> = vec![(if shows { format!("{LINK}{message}") } else { message.clone() }, TEXT_COLOR), ("  ".to_string(), TEXT_COLOR)];
+                line.extend(self.toast_links.iter().map(|(label, _)| (format!("{CHOICE}{label}"), TEXT_COLOR)));
+                let pad = px as i32 / 2;
+                let w = line.iter().map(|(run, _)| run_width(&mut text, run, px)).sum::<i32>() + 3 * pad;
+                let x = width - margin - w + (toast_away * f64::from(w + margin)) as i32;
+                let (_, choices) = rich_block(canvas, &mut text, &[line], px, (x, margin));
+                for (name, place) in choices {
+                    let link = match self.toast_links.iter().find(|(label, _)| *label == name) {
+                        Some((_, link)) => link.clone(),
+                        // The words themselves: Show.
+                        None => match self.toast_links.iter().find(|(_, link)| matches!(link, ToastLink::Show(_))) {
+                            Some((_, link)) => link.clone(),
+                            None => continue,
+                        },
+                    };
+                    self.toast_buttons.push((link, place));
+                }
+            }
+            _ => text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w + (toast_away * f64::from(w + margin)) as i32, margin)),
+        }
         self.draw_triage(canvas, &mut text, px);
         // Twice the usual size, centred just above the seek bar.
         text_block(canvas, &mut text, &time, px, |w, h| ((width - w) / 2, time_bottom - h));
@@ -9020,15 +9172,17 @@ impl App {
         })
     }
 
-    fn info_line(&mut self) -> String {
+    /// The info overlay's second line: the dimensions, apart so that they
+    /// can be clicked, then the zoom and the size on disk.
+    fn info_line(&mut self) -> (Option<String>, String) {
         let size = self.current_meta().and_then(|meta| meta.size).map(meta::human_size);
-        let Some(native) = self.native() else { return size.unwrap_or_default() };
+        let Some(native) = self.native() else { return (None, size.unwrap_or_default()) };
         let percent = self.view.scale(native, self.stage().1) * 100.0;
-        let mut line = format!("{} x {}   {percent:.0}%", native.0, native.1);
+        let mut line = format!("   {percent:.0}%");
         if let Some(size) = size {
             line.push_str(&format!("   {size}"));
         }
-        line
+        (Some(format!("{} x {}", native.0, native.1)), line)
     }
 
     /// The debug overlay, as groups of figures each with a name: what the
