@@ -9082,8 +9082,15 @@ impl App {
                     canvas.image_rounded(frame, left, picture_top, w, h, round);
                     canvas.round_outline(left - 2, picture_top - 2, w + 4, h + 4, round + 2, 2, MENU_EDGE_COLOR);
                 }
-            } else if self.time_until.is_some() {
+            } else if self.time_until.is_some() && !paused {
                 time.push(format!("{} / {}", clock(position), clock(length)));
+            }
+            // Paused, to the frame: the time in hundredths and the frame's
+            // number, for stepping one at a time.
+            if paused {
+                let fps = self.player.as_ref().and_then(|player| player.number("container-fps")).filter(|fps| *fps > 1.0);
+                let frame = fps.map_or(String::new(), |fps| format!("  ·  frame {}", (position * fps).round() as u64));
+                time.push(format!("{}.{:02}{frame}", clock(position), ((position.fract() * 100.0) as u64).min(99)));
             }
         }
         let exif = if viewing && self.show_exif {
