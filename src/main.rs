@@ -43,10 +43,17 @@ use options::{ConvertTo, Parsed};
 fn main() -> ExitCode {
     let mut options = match options::parse(std::env::args_os().skip(1)) {
         Ok(Parsed::Run(options)) => *options,
-        Ok(Parsed::Help) => {
-            println!("{}", options::USAGE);
-            return ExitCode::SUCCESS;
-        }
+        Ok(Parsed::Help(topic)) => match options::help(topic.as_deref()) {
+            Some(text) => {
+                println!("{text}");
+                return ExitCode::SUCCESS;
+            }
+            None => {
+                let names: Vec<&str> = options::TOPICS.iter().map(|(name, ..)| *name).collect();
+                eprintln!("jog: no help on {}; there is: {}", topic.unwrap_or_default(), names.join(", "));
+                return ExitCode::FAILURE;
+            }
+        },
         Ok(Parsed::Version) => {
             println!("jog {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;

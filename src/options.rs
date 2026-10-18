@@ -4,14 +4,21 @@ use std::path::PathBuf;
 use crate::files::{Listing, Sort};
 use crate::view::Zoom;
 
-pub const USAGE: &str = "\
+/// The start of the help, before its topics.
+const INTRO: &str = "\
 Usage: jog [OPTIONS] [FILE|DIR]...
 
 Shows the files named, and the images and videos in any directories named.
 With no arguments, opens the current directory. To open a directory at a
 particular file: jog DIR --start-at FILE
 
-Window:
+jog --help TOPIC shows one of:
+  ";
+
+/// The help, by topic: the word that asks for it, its heading, and what
+/// it says.
+pub const TOPICS: &[(&str, &str, &str)] = &[
+    ("window", "Window", "
   -F, --fullscreen           start fullscreen (the default)
   -w, --windowed             start in a window
   -g, --geometry WxH         start in a window of this size
@@ -22,17 +29,15 @@ Window:
                              blue, violet, crimson, orange, grass or teal
   -Y, --hide-pointer         hide the mouse pointer
       --no-animations        nothing slides, fades or glides: it is simply there
-                             (config: animations = false)
-
-Zoom:
+                             (config: animations = false)"),
+    ("zoom", "Zoom", "
   -., --scale-down           shrink large images to fit (the default)
   -Z, --auto-zoom            also enlarge small images to fit (the default)
       --no-auto-zoom         show small images at their actual size
       --zoom MODE            fit, fill, or a percentage such as 100
       --keep-zoom-vp         keep zoom and position when changing image
-      --force-aliasing       disable smooth scaling
-
-File list:
+      --force-aliasing       disable smooth scaling"),
+    ("list", "File list", "
   -r, --recursive            descend into directories
   -S, --sort ORDER           name, filename, dirname, newest (or latest),
                              oldest, largest or smallest; or random, as -z
@@ -48,14 +53,22 @@ File list:
       --filter TEXT          start with only the files the find box would show
                              for TEXT: jog --filter 'beach #video >10mb'
       --watch                add files as they appear in the directories, and
-                             drop those that go (W turns it on and off)
-
-Slideshow and actions:
+                             drop those that go (W turns it on and off)"),
+    ("sessions", "Sessions", "
+      --resume               pick up a session: what jog was showing when it was
+                             last quit, of those started in this folder. With
+                             several they are shown as cards, each with its id;
+                             Delete on a card forgets that session
+      --continue             pick up the latest session of this folder, unasked
+      --all                  with --resume or --continue, the sessions of every
+                             folder, each card saying which
+      --resume ID            the session with that id, whichever folder it is
+                             of; the start of an id will do when it is enough
+                             to tell it by"),
+    ("actions", "Slideshow and actions", "
   -D, --slideshow-delay SEC  advance automatically
       --on-last-slide WHAT   resume (default), hold or quit
       --cycle-once           same as --on-last-slide quit
-      --no-autoplay          stay on a video when it ends, instead of
-                             playing the next file (config: autoplay = false)
   -A, --action CMD           shell command for Enter / 0; %f is the path,
                              %n the file name
       --action1..9 CMD       shell commands for keys 1 to 9
@@ -67,6 +80,11 @@ Slideshow and actions:
       --frame-format KIND    png (the usual), jpg or webp
       --hdr KIND             how an Ultra HDR photo is shown: sdr (the usual),
                              hdr, or gainmap; H steps through them
+      --print-marked         print the marked files on exit
+      --dry-run              change nothing: copying, moving, renaming, deleting,
+                             converting and running a command only print what
+                             they would have done"),
+    ("convert", "Convert", "
       --convert FORMAT       write each picture listed as jxl, avif, jpeg, png or
                              webp, next to it, with the settings Convert uses
                              (config: [convert]), and quit. Files there already
@@ -77,46 +95,58 @@ Slideshow and actions:
       --quality N            with --convert, this quality (0 to 100) instead
       --audio CODEC          with --convert to a video: opus, aac or copy, in
                              place of the usual (AAC in MP4, Opus elsewhere)
-      --print-marked         print the marked files on exit
-      --benchmark            step, zoom and page through the files by itself,
-                             timing each, print the figures and quit
-      --dry-run              change nothing: copying, moving, renaming, deleting,
-                             converting and running a command only print what
-                             they would have done
-      --verbose              print each file as it comes up: its place in the
-                             list, dimensions, size and how long it took
-      --debug                print decode and video start times (also JOG_DEBUG=1)
+  K                          the Convert panel: each format's settings tried on
+                             the picture first, compared and scored; it opens
+                             on the format chosen last
+  File > Convert to ...      in one click; a video's progress toast has Cancel
+  Compare (File menu)        two pictures, one over the other; d shows where
+                             they differ, bright on black"),
+    ("video", "Videos", "
+Videos (mp4, mkv, webm and so on; needs libmpv) play in place, picking up
+where they were left unless --no-positions is given.
+      --no-autoplay          stay on a video when it ends, instead of
+                             playing the next file (config: autoplay = false)
       --no-positions         start videos from the beginning, and do not
                              remember where they were left (config:
                              positions = false)
-      --resume               pick up a session: what jog was showing when it was
-                             last quit, of those started in this folder. With
-                             several to choose from they are shown, to be
-                             picked with the arrows or a click; each shows its id
-      --continue             pick up the latest session of this folder, unasked
-      --all                  with --resume or --continue, the sessions of every
-                             folder, not only this one's; alone, --resume --all
-      --resume ID            the session with that id, whichever folder it is
-                             of; the start of an id will do when it is enough
-                             to tell it by
-
       --precise-seeking      seek to the exact moment asked for. The usual is
                              the nearest keyframe, which is much quicker and
                              may be a few seconds off (config: precise-seeking
                              = true; Precise seeking in the menu toggles)
       --no-seen              do not remember which videos have been watched, or
                              mark the rest as new (config: seen = false)
-
-Subtitles:
+  Space                      play / pause        Left / Right  seek about 5 seconds
+  PgUp / PgDn                previous / next file, as < and >
+  pointer at the bottom      seek bar with previews
+  Shift+Left / Shift+Right   step one frame; paused, stepping back is instant
+  Up / Down                  volume (m mutes)    b             back to the start
+  Space or the mouse button held down: twice the speed, until let go
+  l                          loop: this video, then the whole list, then off
+  T                          scenes of this video along the bottom: Left / Right
+                             then go from scene to scene, and a click plays one
+  j / J                      next subtitles, or none / next audio track
+  Ctrl+Left / Ctrl+Right, or , . < > n           previous / next file
+  Seeking past the end of a video starts the next file, and seeking back
+  past its start carries on into the one before, as though they lay end to end."),
+    ("sections", "Sections", "
+  A  B (with Shift)          mark the start / end of a section, which loops;
+                             its ends drag on the seek bar; Esc clears it
+  Video menu                 keep the section, or save it: quick (from the
+                             keyframe before), exact as MP4 or MKV, GIF,
+                             animated WebP or AVIF
+  T, then T again            the Sections tab: kept sections and the file's
+                             chapters; a click plays one, a right click on a
+                             kept one renames or removes it"),
+    ("subtitles", "Subtitles", "
       --no-subtitles         start with subtitles hidden (j shows them)
       --subtitle-font NAME   an installed font, such as Inter (the default)
       --subtitle-size N      their size as a percentage: 100 is the usual
       --subtitle-style HOW   outline (the default): letters edged in black;
                              shadow: a soft shadow and no edge;
-                             box: on a dark panel
-
-Overlays:
-  -d, --draw-info            show name, position, dimensions, zoom and size
+                             box: on a dark panel"),
+    ("overlays", "Overlays", "
+  -d, --draw-info            show name, position, dimensions, zoom and size;
+                             a click on the folder, name or dimensions copies it
       --draw-exif            show EXIF data
       --draw-actions         show the defined actions
   -t, --filmstrip            keep the filmstrip open
@@ -125,15 +155,14 @@ Overlays:
                              it, rather than over it (its pin does the same)
   -G, --grid                 start in the grid, with nothing playing
       --no-grid-titles       leave the names out from under the grid's pictures
-                             (config: grid-titles = false; i in the grid toggles)
-
-Config file:
+                             (config: grid-titles = false; i in the grid toggles)"),
+    ("config", "Config file", "
   ~/.config/jog/config.toml sets defaults, using the long option names:
       output-dir = \"~/Pictures/picks\"
       draw-info = true
       auto-zoom = false
-  Options on the command line override it.
-
+  Options on the command line override it."),
+    ("workspaces", "Workspaces", "
 Workspaces are folders with names, set in the config file:
       [workspaces]
       pictures = \"~/Downloads/Pictures\"
@@ -147,12 +176,16 @@ Workspaces are folders with names, set in the config file:
   newest; \"random\" lists it again and shuffles it; \"resume\" picks
   up where it was left. Marks are kept. --start says the same of what is
   opened by its path, which otherwise resumes. In the box for
-  a folder to copy or move into, @pictures means that workspace.
-
-  -h, --help                 show this help
-  -v, --version              show the version
-
-Keys:
+  a folder to copy or move into, @pictures means that workspace."),
+    ("debug", "Debugging", "
+      --benchmark            step, zoom and page through the files by itself,
+                             timing each, print the figures and quit
+      --verbose              print each file as it comes up: its place in the
+                             list, dimensions, size and how long it took
+      --debug                print decode and video start times (also JOG_DEBUG=1)
+  -h, --help [TOPIC]         show this help, or one topic of it
+  -v, --version              show the version"),
+    ("keys", "Keys", "
   > . n Right Space PgDn     next image          < , Left Backspace PgUp  previous
   Home / End                 first / last
   z                          shuffle the rest    { / }         previous / next directory
@@ -173,7 +206,7 @@ Keys:
                              is:image is:gif is:marked is:seen is:new, and sizes such as
                              >10mb or <1gb (b, kb, mb, gb). > first runs a
                              command; opened with nothing typed, it offers
-                             the commands run from it lately, latest first
+                             the files viewed and commands run lately
   Ctrl+arrows, Alt+arrows    scroll, by a page   Z  small images: fit screen / actual size
   s                          sort: name, newest, size, shuffle, reverse
   ( / )                      rotate              _ |           flip, mirror
@@ -191,40 +224,55 @@ Keys:
   Tab or right click         menu                h             slideshow
   x                          mark / unmark       c / C         copy file name / full path
   V / M                      copy / move marked files (or the current one) to -o DIR
-  u                          undo copy, move, rename or convert
-  F2                         rename; a path such as /tmp/a.png or ../done/ moves it
-  K                          convert, with each format's settings tried on the
-                             picture first (File > Convert to ... in one click)
+  u                          undo copy, move, rename or convert (or Undo on its toast)
+  F2                         rename; a path such as /tmp/a.png or ../done/ moves it,
+                             and Tab finishes a folder's name
+  K                          convert (see jog --help convert)
   r F5                       refresh: look for new and deleted files, and read
                              this one again
   W                          watch: refresh by itself as files come and go
   S save a copy, or of a video the frame on view  L save file list (marked ones
   if any)  w size window to image
   Delete                     remove from list    Ctrl+Delete   move to trash
-  Enter, 1-9                 run action          q Esc         quit
+  Enter, 1-9                 run action          q Esc         quit"),
+    ("mouse", "Mouse", "
+  Drag to pan, middle-drag to zoom, wheel for next/previous, Ctrl+wheel to
+  zoom, double click for fullscreen, bottom edge for the filmstrip.
+  Ctrl+Left / Ctrl+Right also change file when an image has nothing to
+  scroll sideways."),
+];
 
-Videos (mp4, mkv, webm and so on; needs libmpv) play in place, picking up
-where they were left unless --no-positions is given. While one is up:
-  Space                      play / pause        Left / Right  seek about 5 seconds
-  PgUp / PgDn                previous / next file, as < and >
-  pointer at the bottom      seek bar with previews
-  Shift+Left / Shift+Right   step one frame      Up / Down     volume (m mutes)
-  b                          back to the start of the video
-  A  B (with Shift)          mark the start / end of a section, which loops;
-                             its ends drag on the seek bar; Esc clears it
-  Space or the mouse button held down: twice the speed, until let go
-  l                          loop: this video, then the whole list, then off
-  T                          scenes of this video along the bottom: Left / Right
-                             then go from scene to scene, and a click plays one
-  j / J                      next subtitles, or none / next audio track
-  Ctrl+Left / Ctrl+Right, or , . < > n           previous / next file
-  Seeking past the end of a video starts the next file, and seeking back
-  past its start carries on into the one before, as though they lay end to end.
-
-Mouse: drag to pan, middle-drag to zoom, wheel for next/previous,
-Ctrl+wheel to zoom, double click for fullscreen, bottom edge for the
-filmstrip. Ctrl+Left / Ctrl+Right also change file when an image has
-nothing to scroll sideways.";
+/// The help: all of it, each topic under its heading, or the one topic
+/// asked for. None for a topic there is not.
+pub fn help(topic: Option<&str>) -> Option<String> {
+    // Each body starts on the line after its opening quote.
+    let body = |body: &str| body.strip_prefix('\n').unwrap_or(body).to_string();
+    match topic {
+        Some(asked) => {
+            let (_, title, text) = TOPICS.iter().find(|(name, ..)| name.eq_ignore_ascii_case(asked))?;
+            Some(format!("{title}:\n{}", body(text)))
+        }
+        None => {
+            // The topics' names, wrapped under the line that offers them.
+            let mut text = INTRO.to_string();
+            let mut width = 0;
+            for (at, (name, ..)) in TOPICS.iter().enumerate() {
+                if width + name.len() > 64 {
+                    text.truncate(text.trim_end().len());
+                    text.push_str("\n  ");
+                    width = 0;
+                }
+                text.push_str(name);
+                text.push_str(if at + 1 < TOPICS.len() { ", " } else { "\n" });
+                width += name.len() + 2;
+            }
+            for (_, title, text_of) in TOPICS {
+                text.push_str(&format!("\n{title}:\n{}\n", body(text_of)));
+            }
+            Some(text.trim_end().to_string())
+        }
+    }
+}
 
 /// How subtitles are set off from the picture behind them.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -473,7 +521,8 @@ pub fn save_workspace(name: &str, path: &std::path::Path) -> Result<PathBuf, Str
 
 pub enum Parsed {
     Run(Box<Options>),
-    Help,
+    /// The help, all of it or the topic named.
+    Help(Option<String>),
     Version,
 }
 
@@ -533,9 +582,10 @@ pub fn parse(args: impl Iterator<Item = OsString>) -> Result<Parsed, String> {
 }
 
 fn parse_with(
-    mut args: impl Iterator<Item = OsString>,
+    args: impl Iterator<Item = OsString>,
     config: Option<(PathBuf, String)>,
 ) -> Result<Parsed, String> {
+    let mut args = args.peekable();
     let mut options = Options {
         paths: Vec::new(),
         listing: Listing::default(),
@@ -639,7 +689,11 @@ fn parse_with(
                 next.ok_or_else(|| format!("option --{name} needs a value"))
             };
             match name.as_str() {
-                "help" => return Ok(Parsed::Help),
+                // A word after it is the topic: jog --help convert.
+                "help" => {
+                    let topic = attached.clone().or_else(|| args.next_if(|next| !next.to_string_lossy().starts_with('-')).map(|next| next.to_string_lossy().into_owned()));
+                    return Ok(Parsed::Help(topic));
+                }
                 "version" => return Ok(Parsed::Version),
                 name => apply(&mut options, &mut fullscreen, name, &mut value).map_err(|error| {
                     // `apply` names options the way the config file spells them.
