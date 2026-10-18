@@ -263,6 +263,17 @@ enum Undo {
     Trashed(Vec<(Moved, ops::Trashed)>),
 }
 
+/// What Undo took back, as Redo does it again.
+enum Redo {
+    /// Files made and then undone, waiting in the trash.
+    Created(Vec<ops::Trashed>),
+    /// Files moved, moved back: to be moved again.
+    Moved(Vec<Moved>),
+    Renamed { id: usize, from: PathBuf, to: PathBuf },
+    /// Files trashed, brought back: to be trashed again.
+    Trashed(Vec<usize>),
+}
+
 /// What a toast offers to be clicked: to undo what it tells of, or to go
 /// to the file it made.
 #[derive(Clone, PartialEq, Debug)]
@@ -880,6 +891,9 @@ pub struct App {
     files: Vec<PathBuf>,
     marks: HashSet<usize>,
     undo: Vec<Undo>,
+    /// What Undo took back, the latest last, for Redo; gone once anything
+    /// new is done.
+    redo: Vec<Redo>,
     /// The folder last typed to copy or move files into.
     last_folder: Option<String>,
     /// The workspaces: those of the config file, in its order, and after
@@ -1555,6 +1569,7 @@ impl App {
             cwd,
             marks: HashSet::new(),
             undo: Vec::new(),
+            redo: Vec::new(),
             last_folder: None,
             prompt: None,
             palette: None,
@@ -3551,6 +3566,7 @@ impl App {
             CopyToAsk => self.ask_folder(false),
             MoveToAsk => self.ask_folder(true),
             Undo => self.undo(event_loop),
+            Redo => self.redo(event_loop),
             Rename => self.start_rename(),
             Delete => self.ask_delete(),
             Convert(format) => self.convert(format),
@@ -3815,11 +3831,11 @@ impl App {
         if moving {
             let removed: Vec<(usize, usize)> = sent.iter().map(|moved| (moved.id, moved.pos)).collect();
             self.drop_from_list(&removed, event_loop);
-            self.undo.push(Undo::Moved(sent));
+            self.did(Undo::Moved(sent));
         } else {
             // The marked images have been dealt with; start a fresh selection.
             self.marks.clear();
-            self.undo.push(Undo::Created(sent.into_iter().map(|copy| copy.to).collect()));
+            self.did(Undo::Created(sent.into_iter().map(|copy| copy.to).collect()));
         }
     }
 
@@ -3942,9 +3958,24 @@ impl App {
         match self.undo.pop() {
             None => self.toast("Nothing to undo"),
             Some(Undo::Created(paths)) => {
-                let removed = paths.iter().filter(|path| std::fs::remove_file(path).is_ok()).count();
+                // Into the trash, where Redo finds them again; one on
+                // another filesystem is removed outright.
+                let (mut removed, mut kept) = (0, Vec::new());
                 for path in &paths {
-                    println!("[undo] removed {}", path.display());
+                    let gone = match ops::trash(path) {
+                        Ok(Some(trashed)) => {
+                            kept.push(trashed);
+                            true
+                        }
+                        _ => std::fs::remove_file(path).is_ok(),
+                    };
+                    if gone {
+                        println!("[undo] removed {}", path.display());
+                        removed += 1;
+                    }
+                }
+                if !kept.is_empty() {
+                    self.redo.push(Redo::Created(kept));
                 }
                 self.toast(format!("Undone  ·  {removed} removed"));
                 // Those the list had taken in leave it.
@@ -3957,56 +3988,120 @@ impl App {
                 }
             }
             Some(Undo::Moved(moved)) => {
-                let viewing = self.id();
+                let (viewing, total) = (self.id(), moved.len());
                 let mut restored = 0;
+                let mut again = Vec::new();
                 // In their original order, so each lands where it was.
-                for item in &moved {
+                for item in moved {
                     if ops::move_file(&item.to, &item.from).is_ok() {
                         println!("[undo] {} -> {}", item.to.display(), item.from.display());
-                        self.put_back(item);
+                        self.put_back(&item);
+                        again.push(item);
                         restored += 1;
                     } else {
                         eprintln!("jog: cannot move {} back", item.to.display());
                     }
                 }
                 self.pos = self.list.iter().position(|&id| id == viewing).unwrap_or(self.pos);
-                self.toast(format!("Undone  ·  {restored} of {} moved back", moved.len()));
+                if !again.is_empty() {
+                    self.redo.push(Redo::Moved(again));
+                }
+                self.toast(format!("Undone  ·  {restored} of {total} moved back"));
                 self.request();
                 self.refresh();
             }
             Some(Undo::Trashed(trashed)) => {
-                let mut first = None;
+                let mut back = Vec::new();
                 for (item, from_trash) in &trashed {
                     match ops::untrash(from_trash) {
                         Ok(()) => {
                             println!("[undo] {} -> {}", from_trash.file.display(), item.from.display());
                             self.put_back(item);
-                            first.get_or_insert(item.id);
+                            back.push(item.id);
                         }
                         Err(error) => eprintln!("jog: cannot bring {} back: {error}", item.from.display()),
                     }
                 }
                 // On the first one brought back.
-                if let Some(pos) = first.and_then(|id| self.list.iter().position(|&other| other == id)) {
+                if let Some(pos) = back.first().and_then(|id| self.list.iter().position(|other| other == id)) {
                     self.pos = pos;
                     self.error = None;
                     self.reset_view();
                 }
-                let restored = first.map_or(0, |_| trashed.len());
-                self.toast(format!("Undone  ·  {restored} restored"));
+                self.toast(format!("Undone  ·  {} restored", back.len()));
+                if !back.is_empty() {
+                    self.redo.push(Redo::Trashed(back));
+                }
                 self.request();
                 self.refresh();
             }
             Some(Undo::Renamed { id, from, to }) => {
                 if ops::move_file(&to, &from).is_ok() {
                     println!("[undo] {} -> {}", to.display(), from.display());
-                    self.set_path(id, from);
+                    self.set_path(id, from.clone());
+                    self.redo.push(Redo::Renamed { id, from, to });
                     self.toast(format!("Undone  ·  {}", self.name_of(id)));
                     self.refresh();
                 } else {
                     self.toast("Not undone");
                 }
             }
+        }
+    }
+
+    /// Something done that Undo can take back: what was undone before it
+    /// can no longer be redone.
+    fn did(&mut self, undo: Undo) {
+        self.undo.push(undo);
+        self.redo.clear();
+    }
+
+    /// Does again what Undo last took back.
+    fn redo(&mut self, event_loop: &ActiveEventLoop) {
+        match self.redo.pop() {
+            None => self.toast("Nothing to redo"),
+            Some(Redo::Created(trashed)) => {
+                let mut paths = Vec::new();
+                for trashed in &trashed {
+                    match ops::untrash(trashed) {
+                        Ok(()) => paths.push(trashed.from.clone()),
+                        Err(error) => eprintln!("jog: cannot bring {} back: {error}", trashed.from.display()),
+                    }
+                }
+                self.adopt_created(&paths);
+                self.toast(format!("Redone  ·  {} back", paths.len()));
+                if !paths.is_empty() {
+                    self.undo.push(Undo::Created(paths));
+                }
+            }
+            Some(Redo::Moved(moved)) => {
+                let (mut gone, mut again) = (Vec::new(), Vec::new());
+                for item in moved {
+                    let Some(pos) = self.list.iter().position(|&id| id == item.id) else { continue };
+                    if ops::move_file(&item.from, &item.to).is_ok() {
+                        println!("[redo] {} -> {}", item.from.display(), item.to.display());
+                        gone.push((item.id, pos));
+                        again.push(Moved { pos, ..item });
+                    }
+                }
+                self.toast(format!("Redone  ·  {} moved", again.len()));
+                if !gone.is_empty() {
+                    self.drop_from_list(&gone, event_loop);
+                    self.undo.push(Undo::Moved(again));
+                }
+            }
+            Some(Redo::Renamed { id, from, to }) => {
+                if ops::move_file(&from, &to).is_ok() {
+                    println!("[redo] {} -> {}", from.display(), to.display());
+                    self.set_path(id, to.clone());
+                    self.undo.push(Undo::Renamed { id, from, to });
+                    self.toast(format!("Redone  ·  {}", self.name_of(id)));
+                    self.refresh();
+                } else {
+                    self.toast("Not redone");
+                }
+            }
+            Some(Redo::Trashed(ids)) => self.trash_ids(ids, true, event_loop),
         }
     }
 
@@ -4149,7 +4244,7 @@ impl App {
             let made = &done.created[0];
             let size = std::fs::metadata(made).map_or(0, |meta| meta.len());
             self.toast_with(format!("{}  ·  {}", made.file_name().unwrap_or_default().to_string_lossy(), meta::human_size(size)), links);
-            self.undo.push(Undo::Created(done.created));
+            self.did(Undo::Created(done.created));
             return;
         }
         let mut summary = match done.created.as_slice() {
@@ -4171,7 +4266,7 @@ impl App {
             summary.push_str("  ·  the rest cancelled");
         }
         self.toast_with(summary, links);
-        self.undo.push(Undo::Created(done.created));
+        self.did(Undo::Created(done.created));
     }
 
     /// A file jog has just made, a frame or a copy: it joins the list, is
@@ -4179,7 +4274,7 @@ impl App {
     fn made(&mut self, path: PathBuf, said: String) {
         self.adopt_created(std::slice::from_ref(&path));
         self.toast_with(said, vec![("Show".into(), ToastLink::Show(path.clone())), ("Undo".into(), ToastLink::Undo)]);
-        self.undo.push(Undo::Created(vec![path]));
+        self.did(Undo::Created(vec![path]));
     }
 
     /// Files just made, by a convert or a saved section, put in the list
@@ -5668,7 +5763,7 @@ impl App {
                     false => println!("[rename] {old_name} -> {said}"),
                 }
                 self.set_path(prompt.id, to.clone());
-                self.undo.push(Undo::Renamed { id: prompt.id, from, to });
+                self.did(Undo::Renamed { id: prompt.id, from, to });
                 self.toast_with(format!("{} {said}", if moved { "Moved to" } else { "Renamed to" }), vec![("Undo".into(), ToastLink::Undo)]);
                 self.refresh();
             }
@@ -5786,8 +5881,14 @@ impl App {
         if self.dry(|app| app.targets().iter().map(|id| format!("move to trash: {}", app.files[*id].display())).collect(), "would move to trash") {
             return;
         }
+        self.trash_ids(self.targets(), false, event_loop);
+    }
+
+    /// Moves these files to the trash. Redo does too, without forgetting
+    /// what else can be redone.
+    fn trash_ids(&mut self, ids: Vec<usize>, redoing: bool, event_loop: &ActiveEventLoop) {
         let (mut removed, mut failed, mut undoable) = (Vec::new(), 0, Vec::new());
-        for id in self.targets() {
+        for id in ids {
             let Some(pos) = self.list.iter().position(|&other| other == id) else { continue };
             // Into the home trash, noted so that Undo can bring it back;
             // from another filesystem, by gio, for good.
@@ -5817,7 +5918,10 @@ impl App {
             self.toast(summary);
         } else {
             self.toast_with(summary, vec![("Undo".into(), ToastLink::Undo)]);
-            self.undo.push(Undo::Trashed(undoable));
+            match redoing {
+                true => self.undo.push(Undo::Trashed(undoable)),
+                false => self.did(Undo::Trashed(undoable)),
+            }
         }
         if !removed.is_empty() {
             self.drop_from_list(&removed, event_loop);
@@ -7243,6 +7347,7 @@ impl App {
                 | Command::CopyTo
                 | Command::MoveTo
                 | Command::Undo
+                | Command::Redo
                 | Command::Rename
                 | Command::Delete
                 | Command::Trash

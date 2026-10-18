@@ -152,6 +152,8 @@ pub enum Command {
     CopyToAsk,
     MoveToAsk,
     Undo,
+    /// Do again what was last undone.
+    Redo,
     Rename,
     Convert(Format),
     /// Open the Convert panel: each format's settings, tried on the
@@ -300,6 +302,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "M" => MoveTo,
             "V" => CopyTo,
             "u" => Undo,
+            "U" => Redo,
             "x" => Mark,
             "X" => MarkMenu,
             "c" => CopyName,
@@ -556,6 +559,7 @@ pub fn command_icon(command: Command) -> &'static str {
         Convert(_) | ConvertPanel | ConvertVideo(_) => REPLACE,
         Compare => EYE,
         Undo => UNDO,
+        Redo => ROTATE_CW,
         CopyName | CopyViewedName | CopyViewedPath | CopyViewedSize | SaveFilelist => COPY,
         CopyPath | CopyShell => CLIPBOARD,
         Reload => REFRESH,
@@ -760,6 +764,7 @@ const FILE: &[Option<MenuItem>] = &[
     video_item("Save this frame", "S", Command::Save),
     item("Save the file list", "L", Command::SaveFilelist),
     item("Undo", "u", Command::Undo),
+    item("Redo", "U", Command::Redo),
     None,
     item("Copy file name", "c", Command::CopyName),
     item("Copy full path", "C", Command::CopyPath),
