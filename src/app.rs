@@ -259,6 +259,8 @@ enum Undo {
     Created(Vec<PathBuf>),
     Moved(Vec<Moved>),
     Renamed { id: usize, from: PathBuf, to: PathBuf },
+    /// Files put in the home trash, each with its place in the list.
+    Trashed(Vec<(Moved, ops::Trashed)>),
 }
 
 /// What a toast offers to be clicked: to undo what it tells of, or to go
@@ -3961,14 +3963,7 @@ impl App {
                 for item in &moved {
                     if ops::move_file(&item.to, &item.from).is_ok() {
                         println!("[undo] {} -> {}", item.to.display(), item.from.display());
-                        let at = item.pos.min(self.list.len());
-                        if let Some((_, all)) = &mut self.filter {
-                            // Next to the neighbour it had among the matches.
-                            let before = at.checked_sub(1).map(|before| self.list[before]);
-                            let index = before.and_then(|before| all.iter().position(|id| *id == before));
-                            all.insert(index.map_or(0, |index| index + 1), item.id);
-                        }
-                        self.list.insert(at, item.id);
+                        self.put_back(item);
                         restored += 1;
                     } else {
                         eprintln!("jog: cannot move {} back", item.to.display());
@@ -3976,6 +3971,29 @@ impl App {
                 }
                 self.pos = self.list.iter().position(|&id| id == viewing).unwrap_or(self.pos);
                 self.toast(format!("Undone  ·  {restored} of {} moved back", moved.len()));
+                self.request();
+                self.refresh();
+            }
+            Some(Undo::Trashed(trashed)) => {
+                let mut first = None;
+                for (item, from_trash) in &trashed {
+                    match ops::untrash(from_trash) {
+                        Ok(()) => {
+                            println!("[undo] {} -> {}", from_trash.file.display(), item.from.display());
+                            self.put_back(item);
+                            first.get_or_insert(item.id);
+                        }
+                        Err(error) => eprintln!("jog: cannot bring {} back: {error}", item.from.display()),
+                    }
+                }
+                // On the first one brought back.
+                if let Some(pos) = first.and_then(|id| self.list.iter().position(|&other| other == id)) {
+                    self.pos = pos;
+                    self.error = None;
+                    self.reset_view();
+                }
+                let restored = first.map_or(0, |_| trashed.len());
+                self.toast(format!("Undone  ·  {restored} restored"));
                 self.request();
                 self.refresh();
             }
@@ -3990,6 +4008,18 @@ impl App {
                 }
             }
         }
+    }
+
+    /// A file brought back puts its id back in the list where it was, and
+    /// among a kept search's matches next to the one it followed.
+    fn put_back(&mut self, item: &Moved) {
+        let at = item.pos.min(self.list.len());
+        if let Some((_, all)) = &mut self.filter {
+            let before = at.checked_sub(1).map(|before| self.list[before]);
+            let index = before.and_then(|before| all.iter().position(|id| *id == before));
+            all.insert(index.map_or(0, |index| index + 1), item.id);
+        }
+        self.list.insert(at, item.id);
     }
 
     fn set_path(&mut self, id: usize, path: PathBuf) {
@@ -5756,22 +5786,39 @@ impl App {
         if self.dry(|app| app.targets().iter().map(|id| format!("move to trash: {}", app.files[*id].display())).collect(), "would move to trash") {
             return;
         }
-        let (mut removed, mut failed) = (Vec::new(), 0);
+        let (mut removed, mut failed, mut undoable) = (Vec::new(), 0, Vec::new());
         for id in self.targets() {
             let Some(pos) = self.list.iter().position(|&other| other == id) else { continue };
-            let status = std::process::Command::new("gio").arg("trash").arg("--").arg(&self.files[id]).status();
-            if status.is_ok_and(|s| s.success()) {
+            // Into the home trash, noted so that Undo can bring it back;
+            // from another filesystem, by gio, for good.
+            let done = match ops::trash(&self.files[id]) {
+                Ok(Some(trashed)) => {
+                    undoable.push((Moved { id, pos, from: self.files[id].clone(), to: trashed.file.clone() }, trashed));
+                    true
+                }
+                Ok(None) => std::process::Command::new("gio").arg("trash").arg("--").arg(&self.files[id]).status().is_ok_and(|s| s.success()),
+                Err(error) => {
+                    eprintln!("jog: cannot trash {}: {error}", self.files[id].display());
+                    false
+                }
+            };
+            if done {
                 println!("[trash] {}", self.files[id].display());
                 removed.push((id, pos));
             } else {
                 failed += 1;
             }
         }
-        let mut summary = format!("Moved {} to trash", removed.len());
+        let mut summary = format!("Trashed {}", removed.len());
         if failed > 0 {
-            summary.push_str(&format!(", {failed} failed"));
+            summary.push_str(&format!("  ·  {failed} failed"));
         }
-        self.toast(summary);
+        if undoable.is_empty() {
+            self.toast(summary);
+        } else {
+            self.toast_with(summary, vec![("Undo".into(), ToastLink::Undo)]);
+            self.undo.push(Undo::Trashed(undoable));
+        }
         if !removed.is_empty() {
             self.drop_from_list(&removed, event_loop);
         }

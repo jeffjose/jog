@@ -102,9 +102,114 @@ pub fn clipboard() -> Option<String> {
     })
 }
 
+/// A file put in the trash: where it was, where it is now, and the note
+/// the trash keeps of it, so that it can be put back.
+#[derive(Clone, Debug)]
+pub struct Trashed {
+    pub from: PathBuf,
+    pub file: PathBuf,
+    pub info: PathBuf,
+}
+
+/// The trash in the home folder, as the freedesktop.org spec has it.
+fn home_trash() -> Option<PathBuf> {
+    let data = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|dir| dir.is_absolute());
+    let data = data.or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))?;
+    Some(data.join("Trash"))
+}
+
+/// A path as a trash note spells it: each byte other than letters,
+/// digits, `/` and `-_.~` as %XX.
+fn percent_encoded(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut out = String::new();
+    for byte in path.as_os_str().as_bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => out.push(*byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Now, in local time, as the trash notes it: 2026-10-18T14:05:09.
+fn local_now() -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.as_secs()) as libc::time_t;
+    // SAFETY: localtime_r writes only into the tm given it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&now, &mut tm) };
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
+}
+
+/// Moves a file into the home trash, with the note that lets a file
+/// manager, or `untrash`, put it back. None when it is on another
+/// filesystem than the trash, which this does not reach: then
+/// `gio trash` is the way, and there is no undoing it here.
+pub fn trash(path: &Path) -> io::Result<Option<Trashed>> {
+    let Some(trash) = home_trash() else { return Ok(None) };
+    let (files, infos) = (trash.join("files"), trash.join("info"));
+    std::fs::create_dir_all(&files)?;
+    std::fs::create_dir_all(&infos)?;
+    let from = std::fs::canonicalize(path)?;
+    let name = from.file_name().ok_or_else(|| io::Error::other("no file name"))?.to_string_lossy().into_owned();
+    // A name not taken there yet: the note is made first, claiming it.
+    for n in 1..1000 {
+        let unique = if n == 1 { name.clone() } else { format!("{name}.{n}") };
+        let info = infos.join(format!("{unique}.trashinfo"));
+        let file = files.join(&unique);
+        if file.exists() {
+            continue;
+        }
+        let mut note = match std::fs::OpenOptions::new().write(true).create_new(true).open(&info) {
+            Ok(note) => note,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+        write!(note, "[Trash Info]\nPath={}\nDeletionDate={}\n", percent_encoded(&from), local_now())?;
+        return match std::fs::rename(&from, &file) {
+            Ok(()) => Ok(Some(Trashed { from, file, info })),
+            Err(error) => {
+                let _ = std::fs::remove_file(&info);
+                match error.kind() {
+                    ErrorKind::CrossesDevices => Ok(None),
+                    _ => Err(error),
+                }
+            }
+        };
+    }
+    Err(io::Error::other("no free name in the trash"))
+}
+
+/// Puts a trashed file back where it was, unless something is there now.
+pub fn untrash(trashed: &Trashed) -> io::Result<()> {
+    if trashed.from.exists() {
+        return Err(io::Error::new(ErrorKind::AlreadyExists, "a file is there now"));
+    }
+    std::fs::rename(&trashed.file, &trashed.from)?;
+    let _ = std::fs::remove_file(&trashed.info);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_trashed_file_comes_back() {
+        let dir = std::env::temp_dir().join(format!("jog-trash-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: tests that read XDG_DATA_HOME are this one alone.
+        unsafe { std::env::set_var("XDG_DATA_HOME", dir.join("data")) };
+        let file = dir.join("a b.txt");
+        std::fs::write(&file, "a").unwrap();
+        let trashed = trash(&file).unwrap().unwrap();
+        assert!(!file.exists() && trashed.file.exists());
+        let note = std::fs::read_to_string(&trashed.info).unwrap();
+        assert!(note.contains("a%20b.txt"), "{note}");
+        untrash(&trashed).unwrap();
+        assert!(file.exists() && !trashed.info.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn moving_and_copying_never_overwrite() {
