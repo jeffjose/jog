@@ -148,6 +148,9 @@ pub enum Command {
     ConvertPanel,
     /// Convert the target videos by ffmpeg.
     ConvertVideo(Target),
+    /// Compare two pictures: the two marked, or the one marked and the one
+    /// on view.
+    Compare,
     PlayPause,
     SeekForward,
     SeekBack,
@@ -534,6 +537,7 @@ pub fn command_icon(command: Command) -> &'static str {
         MoveTo | MoveToAsk => FOLDER_INPUT,
         Rename => PENCIL,
         Convert(_) | ConvertPanel | ConvertVideo(_) => REPLACE,
+        Compare => EYE,
         Undo => UNDO,
         CopyName | CopyViewedName | SaveFilelist => COPY,
         CopyPath | CopyShell => CLIPBOARD,
@@ -725,6 +729,7 @@ const FILE: &[Option<MenuItem>] = &[
     video_item("Convert to MP4 (HEVC)", "", Command::ConvertVideo(Target::new(Codec::Hevc, Container::Mp4))),
     video_item("Convert to MKV (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::Mkv))),
     video_item("Convert to WebM (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::WebM))),
+    image_item("Compare with the marked", "", Command::Compare),
     image_item("Save a copy", "S", Command::Save),
     video_item("Save this frame", "S", Command::Save),
     item("Save the file list", "L", Command::SaveFilelist),
@@ -878,6 +883,7 @@ pub const MARK_MENU: &[Option<MenuItem>] = &[
     video_item("Convert to MP4 (HEVC)", "", Command::ConvertVideo(Target::new(Codec::Hevc, Container::Mp4))),
     video_item("Convert to MKV (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::Mkv))),
     video_item("Convert to WebM (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::WebM))),
+    image_item("Compare the two", "", Command::Compare),
     None,
     item("Move to trash", "Ctrl+Del", Command::Trash),
     item("Delete...", "D", Command::Delete),

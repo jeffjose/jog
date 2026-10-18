@@ -445,7 +445,7 @@ fn decode_encoded(bytes: &[u8], format: Format) -> Option<DynamicImage> {
     }
 }
 
-fn score(original: &image::RgbImage, distorted: &image::RgbImage) -> Option<f64> {
+pub fn score(original: &image::RgbImage, distorted: &image::RgbImage) -> Option<f64> {
     use ssimulacra2::{ColorPrimaries, Rgb, TransferCharacteristic};
     let frame = |image: &image::RgbImage| {
         let data = image.pixels().map(|p| [f32::from(p[0]) / 255.0, f32::from(p[1]) / 255.0, f32::from(p[2]) / 255.0]).collect();

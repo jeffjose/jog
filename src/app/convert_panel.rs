@@ -84,7 +84,7 @@ enum Look {
     Choices { labels: Vec<&'static str>, chosen: usize },
 }
 
-const ZOOMS: [u32; 4] = [0, 1, 2, 4];
+pub(super) const ZOOMS: [u32; 4] = [0, 1, 2, 4];
 
 fn knobs(format: Format, settings: &Settings, jpeg: bool) -> Vec<Knob> {
     match format {
@@ -199,7 +199,7 @@ fn note(knob: Knob, format: Format, settings: &Settings) -> &'static str {
 }
 
 /// The words for a SSIMULACRA2 score.
-fn verdict(score: f64) -> &'static str {
+pub(super) fn verdict(score: f64) -> &'static str {
     match score {
         s if s >= 90.0 => "visually lossless",
         s if s >= 80.0 => "very good",
@@ -210,7 +210,7 @@ fn verdict(score: f64) -> &'static str {
 }
 
 /// A part of a picture as a frame to draw: `rect` in the picture's pixels.
-fn cut(image: &RgbImage, rect: [f64; 4]) -> Option<Frame> {
+pub(super) fn cut(image: &RgbImage, rect: [f64; 4]) -> Option<Frame> {
     let (iw, ih) = (image.width() as f64, image.height() as f64);
     let x0 = rect[0].floor().clamp(0.0, iw - 1.0) as u32;
     let y0 = rect[1].floor().clamp(0.0, ih - 1.0) as u32;
@@ -773,7 +773,7 @@ fn knobs_now(panel: &ConvertPanel, jpeg: bool) -> usize {
     knobs(panel.format, &panel.settings, jpeg).len()
 }
 
-fn in_rect(at: (f64, f64), [left, top, w, h]: [i32; 4]) -> bool {
+pub(super) fn in_rect(at: (f64, f64), [left, top, w, h]: [i32; 4]) -> bool {
     let (x, y) = (at.0 as i32, at.1 as i32);
     (left..left + w).contains(&x) && (top..top + h).contains(&y)
 }
@@ -785,7 +785,7 @@ fn panel_box(canvas: &mut Canvas, x: i32, y: i32, w: i32, h: i32, radius: i32) {
 /// The part of a picture of `size` that a preview box shows, and where in
 /// the box it goes: all of it fitted at zoom 0, else the box's own size
 /// over `zoom`, around `center`, kept inside the picture.
-fn shown_region(size: (f64, f64), [x, y, w, h]: [i32; 4], zoom: u32, center: (f64, f64)) -> ([f64; 4], [i32; 4]) {
+pub(super) fn shown_region(size: (f64, f64), [x, y, w, h]: [i32; 4], zoom: u32, center: (f64, f64)) -> ([f64; 4], [i32; 4]) {
     let (sw, sh) = size;
     if zoom == 0 {
         let scale = (f64::from(w) / sw).min(f64::from(h) / sh);
@@ -803,7 +803,7 @@ fn shown_region(size: (f64, f64), [x, y, w, h]: [i32; 4], zoom: u32, center: (f6
 /// Draws a cut of the picture into a rectangle: smoothly when it is made
 /// smaller, as it is when the whole picture is shown; with its pixels
 /// blended when made larger, which close up is what is wanted.
-fn draw_region(canvas: &mut Canvas, frame: &Frame, [x, y, w, h]: [i32; 4], zoom: u32) {
+pub(super) fn draw_region(canvas: &mut Canvas, frame: &Frame, [x, y, w, h]: [i32; 4], zoom: u32) {
     if zoom == 0 {
         canvas.image(frame, x, y, w, h);
     } else {

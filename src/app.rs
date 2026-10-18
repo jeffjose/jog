@@ -48,6 +48,7 @@ use convert_panel::{ConvertPanel, PanelSource};
 mod section;
 use section::{Edge, EntryFrames, Section, StripTab};
 mod back;
+mod compare;
 use crate::view::{Layout, View, Zoom};
 use crate::x11;
 
@@ -226,6 +227,9 @@ pub enum Event {
     /// The frames before a pause, fetched for stepping back at once: whose
     /// they are, and how long they took.
     BackFrames(u64, VecDeque<(f64, Vec<u32>)>, Duration),
+    /// Two pictures to compare, decoded; and how near the second is.
+    CompareLoaded(u64, Result<[Arc<image::RgbImage>; 2], String>),
+    CompareScore(u64, Option<f64>),
     /// File details read on another thread, for the info and EXIF overlays.
     Meta(usize, Meta),
     /// The font, loaded on another thread while the first image decodes.
@@ -1084,6 +1088,10 @@ pub struct App {
     back_due: Option<Instant>,
     back_jobs: Option<mpsc::Sender<back::Job>>,
     back_ticket: u64,
+    /// Two pictures compared, when they are, and the number of the latest
+    /// asked for.
+    compare: Option<compare::Compare>,
+    compare_ticket: u64,
     preview_id: Option<usize>,
     preview_frame: Option<Frame>,
     /// Where along the seek bar the pointer is, from 0 to 1, while over it.
@@ -1631,6 +1639,8 @@ impl App {
             back_due: None,
             back_jobs: None,
             back_ticket: 0,
+            compare: None,
+            compare_ticket: 0,
             preview_id: None,
             preview_frame: None,
             hover: None,
@@ -3434,6 +3444,7 @@ impl App {
             Convert(format) => self.convert(format),
             ConvertPanel => self.open_convert_panel(),
             ConvertVideo(target) => self.convert_videos(target),
+            Compare => self.open_compare(),
             SpeedUp => self.change_speed(Some(true)),
             SpeedDown => self.change_speed(Some(false)),
             SpeedReset => self.change_speed(None),
@@ -6946,6 +6957,9 @@ impl App {
         if self.convert_panel.is_some() {
             return self.panel_key(key, event_loop);
         }
+        if self.compare.is_some() {
+            return self.compare_key(key);
+        }
         if self.overview.is_some() && self.palette.is_none() && self.overview_key(key.clone()) {
             return;
         }
@@ -7028,7 +7042,7 @@ impl App {
         }
         // Over the Convert panel the pointer moves the divider and lights
         // up what it is on; nothing behind the panel sees it.
-        if self.convert_panel.is_some() {
+        if self.convert_panel.is_some() || self.compare.is_some() {
             return self.redraw();
         }
         // The scene under the pointer is picked out, and plays.
@@ -7225,6 +7239,12 @@ impl App {
         if self.convert_panel.is_some() {
             if button == MouseButton::Left && pressed {
                 self.panel_click(x, y);
+            }
+            return;
+        }
+        if self.compare.is_some() {
+            if button == MouseButton::Left && pressed {
+                self.compare_click(x, y);
             }
             return;
         }
@@ -7473,6 +7493,9 @@ impl App {
         }
         if self.convert_panel.is_some() {
             return self.panel_wheel(lines);
+        }
+        if self.compare.is_some() {
+            return self.compare_wheel(lines);
         }
         // In the find box it scrolls the list of matches, and what then
         // lies under the pointer is the one picked out. It does not step
@@ -8430,7 +8453,7 @@ impl App {
         let blocks = [&exif, &actions, &toast, &error, &footer, &time];
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty() && top_left.is_empty() && debug.is_empty();
         let panel = if viewing { self.list_panel() } else { None };
-        let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some();
+        let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some() || self.compare.is_some();
         // The filmstrip has words of its own: the lengths of its videos.
         let boxes = boxes || self.palette.is_some() || strip.is_some() || scene_strip.is_some() || self.overview.is_some() || self.triage_on;
         if nothing_to_write && !boxes && !self.help {
@@ -8578,6 +8601,9 @@ impl App {
         }
         if self.convert_panel.is_some() {
             self.draw_convert_panel(canvas, &mut text, px);
+        }
+        if self.compare.is_some() {
+            self.draw_compare(canvas, &mut text, px);
         }
         if let Some(layout) = self.palette_layout() {
             for id in self.palette_shown() {
@@ -10511,6 +10537,8 @@ impl ApplicationHandler<Event> for App {
                 self.tend_back();
             }
             Event::BackFrames(ticket, frames, took) => self.back_frames(ticket, frames, took),
+            Event::CompareLoaded(ticket, images) => self.compare_loaded(ticket, images),
+            Event::CompareScore(ticket, score) => self.compare_score(ticket, score),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {
                 self.spare = spare.ok().map(|player| Spare { player, id: None, from: 0.0 });
