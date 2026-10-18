@@ -225,6 +225,11 @@ pub(super) fn cut(image: &RgbImage, rect: [f64; 4]) -> Option<Frame> {
     Some(Frame::still(w, h, (w, h), pixels))
 }
 
+/// Where the format last chosen in the panel is kept.
+fn last_format_path() -> Option<PathBuf> {
+    crate::positions::state_dir().map(|dir| dir.join("convert-format"))
+}
+
 impl App {
     /// Opens the Convert panel on the picture on view.
     pub(super) fn open_convert_panel(&mut self) {
@@ -235,14 +240,19 @@ impl App {
         }
         let (jobs, inbox) = mpsc::channel::<(u64, Format, Settings)>();
         let proxy = self.proxy.clone();
+        // Turned and mirrored as it is shown, as Convert will write it.
+        let transform = self.transforms.get(&id).copied().unwrap_or_default();
         // One thread for the panel, working through what it is asked, the
         // latest first and the rest forgotten, until the panel closes.
         std::thread::spawn(move || {
             let loaded = (|| -> Result<PanelSource, String> {
                 let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
-                let image = crate::decode::open(&path).map_err(|error| error.to_string())?;
+                let image = convert::turned(crate::decode::open(&path).map_err(|error| error.to_string())?, transform);
                 let flat = convert::flat(&image);
-                let jpeg = bytes.starts_with(b"\xFF\xD8\xFF");
+                // A JPEG turned is encoded afresh, not repacked, so it is
+                // not offered as one.
+                let jpeg = transform.is_identity() && bytes.starts_with(b"\xFF\xD8\xFF");
+                let bytes = if transform.is_identity() { bytes } else { Vec::new() };
                 Ok(PanelSource { image, flat, bytes, jpeg })
             })();
             let source = match loaded {
@@ -260,7 +270,7 @@ impl App {
                     job = later;
                 }
                 let (asked, format, settings) = job;
-                let result = convert::trial_unscored(&source.image, Some(&source.bytes), format, &settings).map_err(|error| error.to_string());
+                let result = convert::trial_unscored(&source.image, Some(&source.bytes).filter(|bytes| !bytes.is_empty()).map(Vec::as_slice), format, &settings).map_err(|error| error.to_string());
                 let scoring = result.as_ref().ok().map(|trial| (trial.decoded.is_some(), !trial.how.contains("repacked")));
                 let decoded = result.as_ref().ok().and_then(|trial| trial.decoded.clone());
                 let how = result.as_ref().map(|trial| trial.how.clone()).unwrap_or_default();
@@ -282,9 +292,15 @@ impl App {
                 }
             }
         });
-        // JPEG XL first, the format most worth it; a JPEG XL already is
-        // offered as AVIF.
-        let format = if Format::of(&self.files[id]) == Some(Format::Jxl) { Format::Avif } else { Format::Jxl };
+        // The format chosen last time; else JPEG XL, the one most worth
+        // it. Never the picture's own: a JPEG XL is offered as AVIF.
+        let own = Format::of(&self.files[id]);
+        let last = last_format_path().and_then(|path| std::fs::read_to_string(path).ok()).and_then(|ext| Format::of(Path::new(&format!("x.{}", ext.trim()))));
+        let format = match last.filter(|last| Some(*last) != own) {
+            Some(last) => last,
+            None if own == Some(Format::Jxl) => Format::Avif,
+            None => Format::Jxl,
+        };
         self.convert_panel = Some(ConvertPanel {
             id,
             format,
@@ -363,6 +379,11 @@ impl App {
             panel.format = format;
             panel.row = panel.row.min(knobs(format, &panel.settings, false).len());
             self.try_settings();
+            // The panel opens on it next time.
+            if let Some(path) = last_format_path() {
+                let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")));
+                let _ = std::fs::write(path, format.extension());
+            }
         }
         self.redraw();
     }
