@@ -154,6 +154,10 @@ pub enum Command {
     Undo,
     /// Do again what was last undone.
     Redo,
+    /// What the toasts said lately: the find box, set to them.
+    Messages,
+    /// Copy one of those.
+    CopyMessage(usize),
     Rename,
     Convert(Format),
     /// Open the Convert panel: each format's settings, tried on the
@@ -560,6 +564,7 @@ pub fn command_icon(command: Command) -> &'static str {
         Compare => EYE,
         Undo => UNDO,
         Redo => ROTATE_CW,
+        Messages | CopyMessage(_) => CLOCK,
         CopyName | CopyViewedName | CopyViewedPath | CopyViewedSize | SaveFilelist => COPY,
         CopyPath | CopyShell => CLIPBOARD,
         Reload => REFRESH,
@@ -765,6 +770,7 @@ const FILE: &[Option<MenuItem>] = &[
     item("Save the file list", "L", Command::SaveFilelist),
     item("Undo", "u", Command::Undo),
     item("Redo", "U", Command::Redo),
+    item("Messages", "", Command::Messages),
     None,
     item("Copy file name", "c", Command::CopyName),
     item("Copy full path", "C", Command::CopyPath),

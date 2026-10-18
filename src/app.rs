@@ -894,6 +894,8 @@ pub struct App {
     /// What Undo took back, the latest last, for Redo; gone once anything
     /// new is done.
     redo: Vec<Redo>,
+    /// What the toasts have said, the latest last, for the find box.
+    messages: Vec<(Instant, String)>,
     /// The folder last typed to copy or move files into.
     last_folder: Option<String>,
     /// The workspaces: those of the config file, in its order, and after
@@ -1570,6 +1572,7 @@ impl App {
             marks: HashSet::new(),
             undo: Vec::new(),
             redo: Vec::new(),
+            messages: Vec::new(),
             last_folder: None,
             prompt: None,
             palette: None,
@@ -1852,9 +1855,34 @@ impl App {
         if !showing {
             self.toast_slide.set(Glide { from: 0.0, to: 1.0, since: Instant::now() });
         }
-        self.toast = Some((message.into(), Instant::now() + TOAST));
+        let message = message.into();
+        // Kept for the log: an encode's progress only as its latest word.
+        let progress = self.messages.last().is_some_and(|(_, last)| last.contains('%') && message.contains('%') && last.split("  ·  ").next() == message.split("  ·  ").next());
+        if progress {
+            self.messages.pop();
+        }
+        self.messages.push((Instant::now(), message.clone()));
+        if self.messages.len() > 200 {
+            self.messages.remove(0);
+        }
+        self.toast = Some((message, Instant::now() + TOAST));
         self.toast_links.clear();
         self.redraw();
+    }
+
+    /// The toasts of late, the latest first, as the find box lists
+    /// commands: each with how long ago, Enter copying it.
+    fn messages_matching(&self, typed: &str) -> Vec<(String, &'static str, Command)> {
+        let typed = typed.trim().to_lowercase();
+        let ago = |at: Instant| match at.elapsed().as_secs() {
+            0..=59 => "just now".to_string(),
+            seconds @ 60..=3599 => format!("{} min ago", seconds / 60),
+            seconds => format!("{} h ago", seconds / 3600),
+        };
+        (self.messages.iter().enumerate().rev())
+            .filter(|(_, (_, said))| typed.is_empty() || said.to_lowercase().contains(&typed))
+            .map(|(at, (when, said))| (format!("{said}  ·  {}", ago(*when)), "", Command::CopyMessage(at)))
+            .collect()
     }
 
     /// A toast with something to click: Undo, or Show for a file made. It
@@ -3543,13 +3571,15 @@ impl App {
                 self.toast(format!("{count} unmarked"));
             }
             CopyName => self.copy_text(false),
-            CopyViewedName | CopyViewedPath | CopyViewedSize => {
+            Messages => self.open_palette_with("~"),
+            CopyViewedName | CopyViewedPath | CopyViewedSize | CopyMessage(_) => {
                 let name = match command {
                     CopyViewedPath => {
                         let path = &self.files[self.id()];
                         std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()).display().to_string()
                     }
                     CopyViewedSize => self.native().map(|(w, h)| format!("{w}x{h}")).unwrap_or_default(),
+                    CopyMessage(at) => self.messages.get(at).map(|(_, said)| said.clone()).unwrap_or_default(),
                     _ => self.name(),
                 };
                 println!("[copy] {name}");
@@ -6848,6 +6878,7 @@ impl App {
             Some('>') if !typed[1..].starts_with(|c: char| c.is_ascii_digit()) => (Vec::new(), false, self.commands_matching(&typed[1..])),
             Some(':') => self.place_named(&typed[1..]),
             Some('@') => (Vec::new(), false, self.spaces_matching(&typed[1..])),
+            Some('~') => (Vec::new(), false, self.messages_matching(&typed[1..])),
             Some('!') => (Vec::new(), false, self.shell_matching(&typed[1..])),
             _ => {
                 let (matches, narrowed) = self.matching(&typed);
@@ -7199,6 +7230,7 @@ impl App {
             Some('>') if palette.matches.is_empty() => "Run:   ",
             Some(':') => "Go to:   ",
             Some('@') => "Workspace:   ",
+            Some('~') => "Messages:   ",
             Some('!') => "Run command:   ",
             _ => "Find:   ",
         };
