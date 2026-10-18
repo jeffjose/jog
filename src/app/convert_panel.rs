@@ -475,6 +475,7 @@ impl App {
                 return self.panel_step(row, if forward { by } else { -by });
             }
             Key::Character("r") => return self.panel_reset(),
+            Key::Character("f") => return self.ask_fit_size(),
             Key::Character("s") => return self.panel_save(),
             Key::Character("z") => {
                 let at = ZOOMS.iter().position(|z| *z == panel.zoom).unwrap_or(0);
@@ -779,7 +780,7 @@ impl App {
             }
         }
         y += footer_h + pad / 2;
-        let keys = "↑↓ setting   ←→ change (Shift: by 10)   Tab format   z zoom   r reset   s save as default   Enter convert   Esc close";
+        let keys = "↑↓ setting  ·  ←→ change (Shift ×10)  ·  Tab format  ·  z zoom  ·  f fit under a size  ·  r reset  ·  s save as default  ·  Enter convert  ·  Esc close";
         text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, keys);
 
         if let Some(panel) = &mut self.convert_panel {
@@ -829,5 +830,85 @@ pub(super) fn draw_region(canvas: &mut Canvas, frame: &Frame, [x, y, w, h]: [i32
         canvas.image(frame, x, y, w, h);
     } else {
         canvas.image_fast(frame, x, y, w, h);
+    }
+}
+
+/// A size as typed: 500, 500k, 500 KB, 1.2 MB. In bytes.
+fn parse_size(typed: &str) -> Option<u64> {
+    let typed = typed.trim().to_lowercase().replace(' ', "");
+    let digits = typed.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(typed.len());
+    let (number, unit) = typed.split_at(digits);
+    let number: f64 = number.parse().ok()?;
+    // A bare number is in KB, as the panel speaks of sizes.
+    let scale = match unit {
+        "" | "k" | "kb" => 1024.0,
+        "m" | "mb" => 1024.0 * 1024.0,
+        "b" => 1.0,
+        _ => return None,
+    };
+    Some((number * scale) as u64).filter(|bytes| *bytes > 0)
+}
+
+impl App {
+    /// f in the panel: asks for the size to fit the picture under.
+    pub(super) fn ask_fit_size(&mut self) {
+        let Some(panel) = &self.convert_panel else { return };
+        if panel.format == Format::Png {
+            return self.toast("PNG is lossless  ·  nothing to fit");
+        }
+        let id = panel.id;
+        self.prompt = Some(Prompt { id, kind: PromptKind::FitSize, field: TextField::new(Vec::new(), 0) });
+        self.redraw();
+    }
+
+    /// Looks, on another thread, for the highest quality whose file is
+    /// no larger than `typed` says, in the panel's format, lossy.
+    pub(super) fn fit_size(&mut self, typed: &str) {
+        let Some(target) = parse_size(typed) else { return self.toast("Not a size  ·  try 500 KB or 1.2 MB") };
+        let Some(panel) = &mut self.convert_panel else { return };
+        let Some(source) = panel.source.clone() else { return self.toast("Still reading…") };
+        let (format, id, mut settings) = (panel.format, panel.id, panel.settings);
+        // Fitting is of a lossy file: the lossless modes are left.
+        settings.jxl.lossless = false;
+        settings.jxl.recompress_jpeg = false;
+        settings.webp.lossless = false;
+        let proxy = self.proxy.clone();
+        self.toast(format!("Fitting under {}…", meta::human_size(target)));
+        std::thread::spawn(move || {
+            let size = |quality: f32| -> Option<usize> {
+                let mut tried = settings;
+                tried.set_quality(format, quality);
+                convert::trial_unscored(&source.image, None, format, &tried).ok().map(|trial| trial.size)
+            };
+            // The highest quality that fits, halving the range each time.
+            let (mut low, mut high, mut best) = (1u32, 100u32, None);
+            while low <= high {
+                let middle = (low + high) / 2;
+                match size(middle as f32) {
+                    Some(bytes) if bytes as u64 <= target => {
+                        best = Some((middle, bytes));
+                        low = middle + 1;
+                    }
+                    Some(_) => high = middle - 1,
+                    None => break,
+                }
+            }
+            let _ = proxy.send_event(Event::ConvertFit(id, format, best.map(|(quality, bytes)| (quality as f32, bytes as u64)), target));
+        });
+    }
+
+    /// The quality found to fit: set, and tried as any change is.
+    pub(super) fn convert_fit(&mut self, id: usize, format: Format, found: Option<(f32, u64)>, target: u64) {
+        let Some(panel) = self.convert_panel.as_mut().filter(|panel| panel.id == id && panel.format == format) else { return };
+        let Some((quality, bytes)) = found else {
+            return self.toast(format!("Nothing fits under {}", meta::human_size(target)));
+        };
+        panel.settings.jxl.lossless = false;
+        panel.settings.jxl.recompress_jpeg = false;
+        panel.settings.webp.lossless = false;
+        panel.settings.set_quality(format, quality);
+        self.toast(format!("Quality {quality:.0}  ·  {}", meta::human_size(bytes)));
+        self.try_settings();
+        self.redraw();
     }
 }

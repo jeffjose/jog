@@ -211,6 +211,9 @@ pub enum Event {
     ConvertSource(usize, Result<Arc<PanelSource>, String>),
     ConvertTrial(u64, Format, Result<convert::Trial, String>),
     ConvertScore(u64, Option<f64>),
+    /// The quality found to fit a size: the picture, the format, the
+    /// quality and the size it makes, and the size asked for.
+    ConvertFit(usize, Format, Option<(f32, u64)>, u64),
     /// How far along converting videos is, in words.
     VideoProgress(String),
     /// A frame for a cell of the Sections tab.
@@ -881,6 +884,8 @@ enum PromptKind {
     SendTo { moving: bool },
     /// A name for the kept section of the video on view with these ends.
     SectionName { start: f64, end: f64 },
+    /// A size for the Convert panel to fit the picture under.
+    FitSize,
 }
 
 pub struct App {
@@ -4464,6 +4469,11 @@ impl App {
                     self.prompt = None;
                     self.save_space(&typed);
                 }
+                PromptKind::FitSize => {
+                    let typed = prompt.field.string();
+                    self.prompt = None;
+                    self.fit_size(&typed);
+                }
                 PromptKind::SectionName { start, end } => {
                     let typed = prompt.field.string();
                     self.prompt = None;
@@ -4498,7 +4508,7 @@ impl App {
         let base = match prompt.kind {
             PromptKind::Rename => self.files[prompt.id].parent().map(Path::to_path_buf).unwrap_or_default(),
             PromptKind::SendTo { .. } => PathBuf::new(),
-            PromptKind::SaveWorkspace | PromptKind::SectionName { .. } => return,
+            PromptKind::SaveWorkspace | PromptKind::SectionName { .. } | PromptKind::FitSize => return,
         };
         let before: String = prompt.field.text[..prompt.field.cursor].iter().collect();
         if before.starts_with('@') {
@@ -9284,6 +9294,13 @@ impl App {
         if let Some(menu) = &self.menu {
             self.draw_menu(canvas, &mut text, menu);
         }
+        if self.convert_panel.is_some() {
+            self.draw_convert_panel(canvas, &mut text, px);
+        }
+        if self.compare.is_some() {
+            self.draw_compare(canvas, &mut text, px);
+        }
+        // Over the panels, which a box can be opened from.
         if let Some(prompt) = &self.prompt {
             let count = self.targets().len();
             let files = if count == 1 { self.name_of(prompt.id) } else { format!("{count} files") };
@@ -9291,18 +9308,13 @@ impl App {
                 PromptKind::Rename => (commands::icons::PENCIL, "Rename".to_string(), "Enter to rename  ·  a path moves it  ·  Tab completes"),
                 PromptKind::SaveWorkspace => (commands::icons::FOLDER_PLUS, "Save as workspace".to_string(), "Enter to save to the config"),
                 PromptKind::SectionName { start, end } => (commands::icons::PENCIL, format!("Name {} – {}", clock(start), clock(end)), "Enter to save  ·  empty clears it"),
+                PromptKind::FitSize => (commands::icons::REPLACE, "Fit under".to_string(), "500 KB, 1.2 MB  ·  Enter to fit"),
                 PromptKind::SendTo { moving: true } => (commands::icons::FOLDER_INPUT, format!("Move {files} to"), "Enter to move  ·  Tab completes"),
                 PromptKind::SendTo { moving: false } => (commands::icons::FOLDER_PLUS, format!("Copy {files} to"), "Enter to copy  ·  Tab completes"),
             };
             // What Enter would do, as it is typed.
             let hint = self.prompt_hint(prompt).unwrap_or_else(|| hint.to_string());
             draw_prompt(canvas, &mut text, icon, &title, &prompt.field, &hint, px);
-        }
-        if self.convert_panel.is_some() {
-            self.draw_convert_panel(canvas, &mut text, px);
-        }
-        if self.compare.is_some() {
-            self.draw_compare(canvas, &mut text, px);
         }
         if let Some(layout) = self.palette_layout() {
             for id in self.palette_shown() {
@@ -11276,6 +11288,7 @@ impl ApplicationHandler<Event> for App {
             Event::ConvertSource(id, source) => self.convert_source(id, source),
             Event::ConvertTrial(asked, format, trial) => self.convert_trial(asked, format, trial),
             Event::ConvertScore(asked, score) => self.convert_score(asked, score),
+            Event::ConvertFit(id, format, found, target) => self.convert_fit(id, format, found, target),
             // With a Cancel to click, for as long as it goes on.
             Event::VideoProgress(words) => self.toast_with(words, vec![("Cancel".into(), ToastLink::Cancel)]),
             Event::EntryFrame(found) => self.entry_frame(found),
