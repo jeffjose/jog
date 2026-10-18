@@ -147,6 +147,48 @@ impl App {
         self.say_section();
     }
 
+    /// Saves the section as `clip`, by ffmpeg on another thread, saying in
+    /// the toast how far along it is.
+    pub(super) fn save_section(&mut self, clip: crate::transcode::Clip) {
+        let Some(video) = &self.video else { return self.toast("A section is marked in a video") };
+        let Some((a, b)) = self.section().and_then(|section| section.span()) else {
+            return self.toast("Mark a section first: Shift+A at its start, Shift+B at its end");
+        };
+        let path = self.files[video.id].clone();
+        let settings = self.options.convert.video;
+        let what = clip.describe(&settings);
+        let output = crate::transcode::clip_output(&path, a, b, &clip);
+        if self.dry(|_| vec![format!("save {} – {} as {what}: {}", clock(a), clock(b), output.display())], "would save the section") {
+            return;
+        }
+        self.toast(format!("Saving {} – {} as {what}...", clock(a), clock(b)));
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let name = output.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let mut said = None;
+            let result = crate::transcode::cut(&path, a, b, &clip, &settings, |share| {
+                let percent = (share * 100.0) as u32;
+                if said != Some(percent) {
+                    said = Some(percent);
+                    let _ = proxy.send_event(Event::VideoProgress(format!("Saving {name}: {percent}%")));
+                }
+            });
+            let mut done = Converted { created: Vec::new(), failed: 0, what, before: 0, after: 0, how: None, error: None, saving: true };
+            match result {
+                Ok(made) => {
+                    println!("[section] {} {:.3}-{:.3} -> {}", path.display(), a, b, made.display());
+                    done.created.push(made);
+                }
+                Err(error) => {
+                    eprintln!("jog: cannot save the section of {}: {error}", path.display());
+                    done.failed = 1;
+                    done.error = Some(short_error(&path, &error));
+                }
+            }
+            let _ = proxy.send_event(Event::Converted(done));
+        });
+    }
+
     /// Draws the section over the seek bar's track: the stretch between
     /// the ends in the accent, and each end as a flag to take hold of.
     pub(super) fn draw_section(&self, canvas: &mut Canvas, bar: &SeekBar, top: i32, thickness: i32, length: f64, labels: &mut Vec<(i32, i32, Ordering, String)>, px: u32) {

@@ -243,11 +243,13 @@ struct Probe {
     seconds: f64,
     deep: bool,
     has_audio: bool,
+    /// HDR, which an 8-bit animation has to be tone mapped from.
+    hdr: bool,
 }
 
 fn probe(path: &Path) -> Probe {
     let output = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", "format=duration:stream=codec_type,pix_fmt", "-of", "default=nw=1"])
+        .args(["-v", "error", "-show_entries", "format=duration:stream=codec_type,pix_fmt,color_transfer", "-of", "default=nw=1"])
         .arg(path)
         .stdin(Stdio::null())
         .output();
@@ -257,6 +259,7 @@ fn probe(path: &Path) -> Probe {
         seconds: field("duration=").find_map(|value| value.parse().ok()).unwrap_or(0.0),
         deep: field("pix_fmt=").any(|format| format.contains("10") || format.contains("12")),
         has_audio: field("codec_type=").any(|kind| kind == "audio"),
+        hdr: field("color_transfer=").any(|transfer| transfer == "smpte2084" || transfer == "arib-std-b67"),
     }
 }
 
@@ -327,7 +330,7 @@ fn arguments(target: &Target, settings: &VideoSettings, probe: &Probe) -> Result
 /// Converts the video at `path`, telling `progress` how far along it is
 /// (0 to 1) as it goes. Written under another name and renamed when done,
 /// so an unfinished one is never left looking finished.
-pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, mut progress: impl FnMut(f64)) -> Result<PathBuf, String> {
+pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, progress: impl FnMut(f64)) -> Result<PathBuf, String> {
     if let Some(problem) = target.problem(settings) {
         return Err(problem);
     }
@@ -337,18 +340,66 @@ pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, mut pro
     }
     let probe = probe(path);
     let args = arguments(target, settings, &probe)?;
-    let partial = output.with_extension(format!("{}.part", target.container.extension()));
+    run(path, &[], &args, target.container.muxer(), &output, probe.seconds, progress)
+}
+
+/// The files ffmpeg is writing now, and the process group of the ffmpeg
+/// writing each. jog quits without unwinding: `abandon`, on the way out,
+/// stops those ffmpegs and takes their half files away. The group, not
+/// the process: `ffmpeg` on the PATH may be a shim (mise's) that runs the
+/// real one as a child, which nothing told to go with jog would reach.
+static UNFINISHED: std::sync::Mutex<Vec<(PathBuf, i32)>> = std::sync::Mutex::new(Vec::new());
+
+/// A file being written, known to `abandon` for as long as this lives.
+struct Unfinished(PathBuf);
+
+impl Unfinished {
+    fn new(path: &Path, group: u32) -> Unfinished {
+        UNFINISHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push((path.to_path_buf(), group as i32));
+        Unfinished(path.to_path_buf())
+    }
+}
+
+impl Drop for Unfinished {
+    fn drop(&mut self) {
+        UNFINISHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retain(|(path, _)| *path != self.0);
+    }
+}
+
+/// Stops what ffmpeg is in the middle of, and removes what it was
+/// writing, as jog quits.
+pub fn abandon() {
+    for (path, group) in UNFINISHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).drain(..) {
+        // SAFETY: kill takes plain numbers and touches no memory.
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        }
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Runs ffmpeg on `input` into `output`, with `before` ahead of the input
+/// (where to start reading) and `args` after it, saying how far along it
+/// is out of `seconds`. Written under another name until it is done, and
+/// gone if it fails.
+fn run(input: &Path, before: &[String], args: &[String], muxer: &str, output: &Path, seconds: f64, mut progress: impl FnMut(f64)) -> Result<PathBuf, String> {
+    let extension = output.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+    let partial = output.with_extension(format!("{extension}.part"));
     let mut command = Command::new("ffmpeg");
     command
-        .args(["-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-progress", "pipe:1", "-y", "-i"])
-        .arg(path)
-        .args(&args)
-        .args(["-f", target.container.muxer()])
+        .args(["-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-progress", "pipe:1", "-y"])
+        .args(before)
+        .arg("-i")
+        .arg(input)
+        .args(args)
+        .args(["-f", muxer])
         .arg(&partial)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // ffmpeg goes when jog does, rather than going on with the CPU alone.
+    // ffmpeg goes when jog does, rather than going on with the CPU alone:
+    // told to by the system if jog dies, and stopped with all its group by
+    // `abandon` when jog quits.
     // SAFETY: prctl is async-signal-safe and touches nothing shared.
     unsafe {
         command.pre_exec(|| {
@@ -356,7 +407,9 @@ pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, mut pro
             Ok(())
         });
     }
+    command.process_group(0);
     let mut child = command.spawn().map_err(|error| format!("cannot run ffmpeg: {error}"))?;
+    let _unfinished = Unfinished::new(&partial, child.id());
     let stderr = child.stderr.take();
     let errors = std::thread::spawn(move || {
         let mut text = String::new();
@@ -369,8 +422,8 @@ pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, mut pro
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             // Microseconds, in both of the names ffmpegs have used.
             let at = line.strip_prefix("out_time_us=").or_else(|| line.strip_prefix("out_time_ms="));
-            if let Some(micros) = at.and_then(|value| value.parse::<f64>().ok()).filter(|_| probe.seconds > 0.0) {
-                progress((micros / 1e6 / probe.seconds).clamp(0.0, 1.0));
+            if let Some(micros) = at.and_then(|value| value.parse::<f64>().ok()).filter(|_| seconds > 0.0) {
+                progress((micros / 1e6 / seconds).clamp(0.0, 1.0));
             }
         }
     }
@@ -381,8 +434,152 @@ pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, mut pro
         let last = said.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("ffmpeg failed");
         return Err(last.to_string());
     }
-    std::fs::rename(&partial, &output).map_err(|error| error.to_string())?;
-    Ok(output)
+    std::fs::rename(&partial, output).map_err(|error| error.to_string())?;
+    Ok(output.to_path_buf())
+}
+
+/// What a section of a video is saved as.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Clip {
+    /// The video and sound as they are, in seconds and losing nothing,
+    /// from the keyframe at or before the start: a little early, often.
+    Quick,
+    /// Encoded again, from the very frame marked.
+    Exact(Target),
+    Gif,
+    WebP,
+    Avif,
+}
+
+impl Clip {
+    pub fn describe(&self, settings: &VideoSettings) -> String {
+        match self {
+            Clip::Quick => "a clip, from the keyframe before".to_string(),
+            Clip::Exact(target) => target.describe(settings),
+            Clip::Gif => "GIF".to_string(),
+            Clip::WebP => "animated WebP".to_string(),
+            Clip::Avif => "animated AVIF".to_string(),
+        }
+    }
+}
+
+/// A time for a file name: 1m05.2s.
+fn stamp(seconds: f64) -> String {
+    let tenths = (seconds * 10.0).round() as u64;
+    format!("{}m{:02}.{}s", tenths / 600, tenths / 10 % 60, tenths % 10)
+}
+
+/// The container a quick clip keeps: the video's own, when it is one
+/// that takes the streams as they are; else MKV, which takes anything.
+fn own_container(path: &Path) -> (&'static str, &'static str) {
+    match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("mp4" | "m4v") => ("mp4", "mp4"),
+        Some("mov") => ("mov", "mov"),
+        Some("webm") => ("webm", "webm"),
+        _ => ("mkv", "matroska"),
+    }
+}
+
+/// Where a section from `a` to `b` of the video at `path` is saved:
+/// beside it, named for the stretch, clip.1m05.2s-1m12.0s.mp4.
+pub fn clip_output(path: &Path, a: f64, b: f64, clip: &Clip) -> PathBuf {
+    let stem = path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+    let ending = match clip {
+        Clip::Quick => own_container(path).0.to_string(),
+        Clip::Exact(target) => format!("{}.{}", target.codec.word(), target.container.extension()),
+        Clip::Gif => "gif".to_string(),
+        Clip::WebP => "webp".to_string(),
+        Clip::Avif => "avif".to_string(),
+    };
+    path.with_file_name(format!("{stem}.{}-{}.{ending}", stamp(a), stamp(b)))
+}
+
+/// Takes HDR down to SDR, for an 8-bit animation: without it an HLG or PQ
+/// video comes out grey and washed out. Nothing for SDR, or an ffmpeg
+/// without zscale.
+fn tone_map(probe: &Probe) -> &'static str {
+    let has_zscale = || {
+        static FOUND: OnceLock<bool> = OnceLock::new();
+        *FOUND.get_or_init(|| {
+            let output = Command::new("ffmpeg").args(["-hide_banner", "-filters"]).stdin(Stdio::null()).output();
+            output.is_ok_and(|output| String::from_utf8_lossy(&output.stdout).lines().any(|line| line.split_whitespace().nth(1) == Some("zscale")))
+        })
+    };
+    if probe.hdr && has_zscale() {
+        "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p,"
+    } else {
+        ""
+    }
+}
+
+/// Saves the section from `a` to `b` of the video at `path`, telling
+/// `progress` how far along it is.
+pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, progress: impl FnMut(f64)) -> Result<PathBuf, String> {
+    let output = clip_output(path, a, b, clip);
+    if output.exists() {
+        return Err(format!("{} is there already", output.display()));
+    }
+    let probe = probe(path);
+    let length = (b - a).max(0.0);
+    let to_strings = |items: &[&str]| items.iter().map(|item| item.to_string()).collect::<Vec<String>>();
+    // From the start, for as long as the section: read from there, which
+    // copying does from the keyframe before and encoding to the frame.
+    let before = to_strings(&["-ss", &format!("{a:.3}")]);
+    let mut args = to_strings(&["-t", &format!("{length:.3}")]);
+    let muxer = match clip {
+        Clip::Quick => {
+            let (extension, muxer) = own_container(path);
+            args.extend(to_strings(&["-map", "0:v:0", "-map", "0:a?", "-map_metadata", "0", "-c", "copy", "-avoid_negative_ts", "make_zero"]));
+            if extension == "mkv" {
+                args.extend(to_strings(&["-map", "0:s?"]));
+            }
+            if extension == "mp4" || extension == "mov" {
+                args.extend(to_strings(&["-movflags", "+faststart"]));
+            }
+            muxer
+        }
+        Clip::Exact(target) => {
+            if let Some(problem) = target.problem(settings) {
+                return Err(problem);
+            }
+            args.extend(arguments(target, settings, &probe)?);
+            target.container.muxer()
+        }
+        Clip::Gif => {
+            // A palette made for these frames, and dithered to it: GIF has
+            // 256 colours.
+            // Made small first, then tone mapped: four times quicker than
+            // mapping every pixel of a 4K frame and throwing most away.
+            let filter = format!(
+                "fps=15,scale='min(iw,640)':-2:flags=lanczos,{}split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=4",
+                tone_map(&probe)
+            );
+            args.extend(to_strings(&["-an", "-vf", &filter, "-loop", "0"]));
+            "gif"
+        }
+        Clip::WebP => {
+            if !has("libwebp_anim") {
+                return Err("this ffmpeg has no animated WebP encoder (libwebp_anim)".into());
+            }
+            let filter = format!("fps=20,scale='min(iw,960)':-2:flags=lanczos,{}", tone_map(&probe)).trim_end_matches(',').to_string();
+            args.extend(to_strings(&["-an", "-vf", &filter, "-c:v", "libwebp_anim", "-quality", "80", "-compression_level", "4", "-loop", "0"]));
+            "webp"
+        }
+        Clip::Avif => {
+            // 10-bit AV1, HDR kept, at a size for passing around.
+            args.extend(to_strings(&["-an", "-vf", "fps=30,scale='min(iw,1280)':-2:flags=lanczos"]));
+            if has("libsvtav1") {
+                args.extend(to_strings(&["-c:v", "libsvtav1", "-preset", "8", "-crf", "35"]));
+            } else if has("libaom-av1") {
+                args.extend(to_strings(&["-c:v", "libaom-av1", "-crf", "35", "-b:v", "0", "-cpu-used", "8", "-row-mt", "1"]));
+            } else {
+                return Err("this ffmpeg has no AV1 encoder (libsvtav1 or libaom-av1)".into());
+            }
+            args.extend(to_strings(&["-pix_fmt", "yuv420p10le"]));
+            "avif"
+        }
+    };
+    run(path, &before, &args, muxer, &output, length, progress)
 }
 
 /// Converts each of `paths`, one after another, saying how it goes; for
@@ -454,6 +651,16 @@ mod tests {
         let target = Target::new(Codec::H264, Container::Mp4);
         assert_eq!(target.output(Path::new("/v/clip.mp4")), PathBuf::from("/v/clip.h264.mp4"));
         assert_eq!(Target::new(Codec::Av1, Container::Mkv).output(Path::new("a.b.mov")), PathBuf::from("a.b.av1.mkv"));
+    }
+
+    #[test]
+    fn a_section_is_named_for_its_stretch() {
+        let path = Path::new("/v/clip.mp4");
+        assert_eq!(clip_output(path, 65.24, 72.0, &Clip::Quick), PathBuf::from("/v/clip.1m05.2s-1m12.0s.mp4"));
+        let av1 = Clip::Exact(Target::new(Codec::Av1, Container::Mkv));
+        assert_eq!(clip_output(path, 0.0, 3.5, &av1), PathBuf::from("/v/clip.0m00.0s-0m03.5s.av1.mkv"));
+        assert_eq!(clip_output(Path::new("a.avi"), 1.0, 2.0, &Clip::Quick), PathBuf::from("a.0m01.0s-0m02.0s.mkv"), "copied into MKV");
+        assert_eq!(clip_output(path, 1.0, 2.0, &Clip::Gif), PathBuf::from("/v/clip.0m01.0s-0m02.0s.gif"));
     }
 
     #[test]

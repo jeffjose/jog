@@ -199,6 +199,8 @@ pub struct Converted {
     how: Option<String>,
     /// Why the last that could not be converted could not.
     error: Option<String>,
+    /// A section of a video saved, rather than files converted.
+    saving: bool,
 }
 
 /// What background threads send to the event loop.
@@ -1728,6 +1730,7 @@ impl App {
         self.remember_position();
         self.save_session();
         self.print_marked();
+        crate::transcode::abandon();
         let _ = std::io::Write::flush(&mut std::io::stdout());
         std::process::exit(0);
     }
@@ -3119,6 +3122,7 @@ impl App {
             SectionClear => {
                 self.clear_section();
             }
+            SaveSection(clip) => self.save_section(clip),
             ToggleAntialias => {
                 self.antialias = !self.antialias;
                 self.toast(if self.antialias { "Smooth scaling on" } else { "Smooth scaling off" });
@@ -3822,7 +3826,7 @@ impl App {
         self.toast(format!("Converting {} to {} ({})...", paths.len(), format.name(), settings.describe(format)));
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let mut done = Converted { created: Vec::new(), failed: 0, what: format.name().to_string(), before: 0, after: 0, how: None, error: None };
+            let mut done = Converted { created: Vec::new(), failed: 0, what: format.name().to_string(), before: 0, after: 0, how: None, error: None, saving: false };
             for path in paths {
                 match convert::convert(&path, format, &settings) {
                     Ok((to, how)) => {
@@ -3862,7 +3866,7 @@ impl App {
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let total = paths.len();
-            let mut done = Converted { created: Vec::new(), failed: 0, what: what.clone(), before: 0, after: 0, how: None, error: None };
+            let mut done = Converted { created: Vec::new(), failed: 0, what: what.clone(), before: 0, after: 0, how: None, error: None, saving: false };
             for (index, path) in paths.iter().enumerate() {
                 let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 let mut said = None;
@@ -3897,7 +3901,15 @@ impl App {
         // Nothing made: why, rather than a count of nothing.
         if done.created.is_empty() {
             let why = done.error.unwrap_or_else(|| "see the terminal".to_string());
-            return self.toast(format!("Not converted: {why}"));
+            return self.toast(format!("{}: {why}", if done.saving { "Not saved" } else { "Not converted" }));
+        }
+        // A section saved: what and how large.
+        if done.saving {
+            let made = &done.created[0];
+            let size = std::fs::metadata(made).map_or(0, |meta| meta.len());
+            self.toast(format!("Saved {}  {}", made.file_name().unwrap_or_default().to_string_lossy(), meta::human_size(size)));
+            self.undo.push(Undo::Created(done.created));
+            return;
         }
         let mut summary = match done.created.as_slice() {
             [one] => format!("Converted to {}", one.file_name().unwrap_or_default().to_string_lossy()),

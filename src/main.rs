@@ -208,6 +208,7 @@ fn main() -> ExitCode {
     // threads and the window are the system's to reclaim, and it does so
     // at once, where closing a player that is in the middle of opening a
     // file takes it half a second, with the window standing meanwhile.
+    transcode::abandon();
     let _ = std::io::Write::flush(&mut std::io::stdout());
     std::process::exit(0)
 }

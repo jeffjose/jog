@@ -1,7 +1,7 @@
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 use crate::convert::Format;
-use crate::transcode::{Codec, Container, Target};
+use crate::transcode::{Clip, Codec, Container, Target};
 use crate::files::Sort;
 
 /// Everything the viewer can be told to do, from a key, the mouse or the menu.
@@ -35,6 +35,8 @@ pub enum Command {
     SectionStart,
     SectionEnd,
     SectionClear,
+    /// Save the section as a clip or an animation.
+    SaveSection(Clip),
     Flip,
     Mirror,
     ToggleAntialias,
@@ -484,6 +486,7 @@ pub fn command_icon(command: Command) -> &'static str {
         Restart => SKIP_BACK,
         SectionStart | SectionEnd => REPEAT,
         SectionClear => X,
+        SaveSection(_) => FILM,
         SpeedUp => CHEVRONS_RIGHT,
         SpeedDown => CHEVRONS_LEFT,
         SpeedReset => GAUGE,
@@ -582,6 +585,13 @@ const PLAYBACK: &[Option<MenuItem>] = &[
     video_item("Section starts here", "Shift+A", Command::SectionStart),
     video_item("Section ends here", "Shift+B", Command::SectionEnd),
     video_item("Clear the section", "Esc", Command::SectionClear),
+    video_item("Save the section (quick)", "", Command::SaveSection(Clip::Quick)),
+    video_item("Save the section as MP4 (H.264, exact)", "", Command::SaveSection(Clip::Exact(Target::new(Codec::H264, Container::Mp4)))),
+    video_item("Save the section as MP4 (HEVC, exact)", "", Command::SaveSection(Clip::Exact(Target::new(Codec::Hevc, Container::Mp4)))),
+    video_item("Save the section as MKV (AV1, exact)", "", Command::SaveSection(Clip::Exact(Target::new(Codec::Av1, Container::Mkv)))),
+    video_item("Save the section as GIF", "", Command::SaveSection(Clip::Gif)),
+    video_item("Save the section as animated WebP", "", Command::SaveSection(Clip::WebP)),
+    video_item("Save the section as animated AVIF", "", Command::SaveSection(Clip::Avif)),
     None,
     video_item("Faster", "]", Command::SpeedUp),
     video_item("Slower", "[", Command::SpeedDown),
