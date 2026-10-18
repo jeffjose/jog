@@ -231,7 +231,7 @@ impl App {
         let id = self.list[self.focus()];
         let path = self.files[id].clone();
         if files::is_video(&path) {
-            return self.toast("For videos: File > Convert to MP4, MKV or WebM");
+            return self.toast("Videos: File > Convert");
         }
         let (jobs, inbox) = mpsc::channel::<(u64, Format, Settings)>();
         let proxy = self.proxy.clone();
@@ -408,7 +408,7 @@ impl App {
         }
         let name = panel.format.name();
         self.try_settings();
-        self.toast(format!("{name} back to the recommended settings"));
+        self.toast(format!("{name} reset"));
     }
 
     fn panel_save(&mut self) {
@@ -417,9 +417,9 @@ impl App {
         match settings.save() {
             Ok(path) => {
                 self.options.convert = settings;
-                self.toast(format!("Convert uses these from now on (kept in {})", short_dir(&path)));
+                self.toast(format!("Saved as default ({})", short_dir(&path)));
             }
-            Err(error) => self.toast(format!("Cannot keep the settings: {error}")),
+            Err(error) => self.toast(format!("Not saved: {error}")),
         }
     }
 
@@ -733,7 +733,7 @@ impl App {
             text.draw(canvas, x + pad, y + (footer_h - line) / 2, px, if primary { on_accent() } else { TEXT_COLOR }, words);
             w
         };
-        let w = button(canvas, text, inner, "Reset to recommended", false);
+        let w = button(canvas, text, inner, "Reset", false);
         drawn.push((Hit::Reset, [inner, y, w, footer_h]));
         let save_x = inner + w + pad / 2;
         let w = button(canvas, text, save_x, "Save as default", false);

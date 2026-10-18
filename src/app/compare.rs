@@ -34,10 +34,10 @@ impl App {
         let ids = match marked.as_slice() {
             [a, b] => [*a, *b],
             [one] if *one != here => [*one, here],
-            _ => return self.toast("Mark two pictures (x) to compare them, or one to compare with the one on view"),
+            _ => return self.toast("Mark one or two pictures (x) to compare"),
         };
         if ids.iter().any(|id| files::is_video(&self.files[*id])) {
-            return self.toast("Compare is for pictures");
+            return self.toast("Pictures only");
         }
         self.compare_ticket += 1;
         let ticket = self.compare_ticket;
@@ -184,7 +184,7 @@ impl App {
         let (original, other) = if compare.original == compare.ids[0] { (&names[0], &names[1]) } else { (&names[1], &names[0]) };
         let verdict_words = match (&compare.score, dims) {
             (Some(Some(score)), _) => format!("SSIMULACRA2 {score:.1}, {}: {other} against {original}, the larger file", verdict(*score)),
-            (_, [Some(a), Some(b)]) if a != b => "Of different sizes: shown at the same, with no score".to_string(),
+            (_, [Some(a), Some(b)]) if a != b => "Different sizes: no score".to_string(),
             (Some(None), _) => "No score".to_string(),
             (None, _) if compare.images.is_some() => "Scoring…".to_string(),
             _ => String::new(),

@@ -1115,9 +1115,10 @@ pub struct App {
     /// Where along the seek bar the pointer is, from 0 to 1, while over it.
     hover: Option<f64>,
     /// The time the preview should show, the time last asked of its
-    /// player, and since when that request has been outstanding.
+    /// player and whether to that exact frame, and since when that request
+    /// has been outstanding.
     preview_want: Option<f64>,
-    preview_sent: Option<f64>,
+    preview_sent: Option<(f64, bool)>,
     preview_busy: Option<Instant>,
     /// Where the next video started is to begin, when a seek carried over
     /// from the file beside it: seconds in, or negative, from its end.
@@ -2155,12 +2156,20 @@ impl App {
             self.preview_frame = None;
             self.preview_sent = None;
         }
-        if self.preview_sent == Some(want) {
-            return;
-        }
         // The nearest keyframe is close enough, and much quicker to reach.
-        preview.command_later(&[b"seek", want.to_string().as_bytes(), b"absolute+keyframes"]);
-        self.preview_sent = Some(want);
+        // Paused, with the pointer still, the keyframe is followed by the
+        // exact frame there, what a click would show.
+        let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
+        let exact = match self.preview_sent {
+            Some((sent, exact)) if sent == want => match exact || !paused {
+                true => return,
+                false => true,
+            },
+            _ => false,
+        };
+        let how: &[u8] = if exact { b"absolute+exact" } else { b"absolute+keyframes" };
+        preview.command_later(&[b"seek", want.to_string().as_bytes(), how]);
+        self.preview_sent = Some((want, exact));
         self.preview_busy = Some(Instant::now());
     }
 
@@ -3399,7 +3408,7 @@ impl App {
                 println!("{copied}");
                 match self.snapshot.is_some() || ops::set_clipboard(&copied) {
                     true => self.toast("Copied"),
-                    false => self.toast("No clipboard tool found (xclip, xsel or wl-copy); printed to the terminal"),
+                    false => self.toast("No clipboard tool (xclip, xsel, wl-copy)"),
                 }
             }
             ToggleMute => {
@@ -3497,7 +3506,7 @@ impl App {
                 if self.snapshot.is_some() || ops::set_clipboard(&name) {
                     self.toast(format!("Copied {name}"));
                 } else {
-                    self.toast("No clipboard tool found (xclip, xsel or wl-copy); printed to the terminal");
+                    self.toast("No clipboard tool (xclip, xsel, wl-copy)");
                 }
             }
             CopyPath => self.copy_text(true),
@@ -3679,7 +3688,7 @@ impl App {
         if self.snapshot.is_some() || ops::set_clipboard(&line) {
             self.toast(format!("Copied {shown}"));
         } else {
-            self.toast("No clipboard tool found (xclip, xsel or wl-copy); printed to the terminal");
+            self.toast("No clipboard tool (xclip, xsel, wl-copy)");
         }
     }
 
@@ -3703,7 +3712,7 @@ impl App {
         if self.snapshot.is_some() || ops::set_clipboard(&lines.join("\n")) {
             self.toast(format!("Copied {what}"));
         } else {
-            self.toast("No clipboard tool found (xclip, xsel or wl-copy); printed to the terminal");
+            self.toast("No clipboard tool (xclip, xsel, wl-copy)");
         }
     }
 
@@ -3898,7 +3907,7 @@ impl App {
                 for path in &paths {
                     println!("[undo] removed {}", path.display());
                 }
-                self.toast(format!("Undone: removed {removed} new files"));
+                self.toast(format!("Undone  ·  {removed} removed"));
                 // Those the list had taken in leave it.
                 let listed: Vec<(usize, usize)> = (self.list.iter().enumerate())
                     .filter(|(_, id)| paths.contains(&self.files[**id]))
@@ -3929,7 +3938,7 @@ impl App {
                     }
                 }
                 self.pos = self.list.iter().position(|&id| id == viewing).unwrap_or(self.pos);
-                self.toast(format!("Undone: moved {restored} of {} back", moved.len()));
+                self.toast(format!("Undone  ·  {restored} of {} moved back", moved.len()));
                 self.request();
                 self.refresh();
             }
@@ -3937,7 +3946,7 @@ impl App {
                 if ops::move_file(&to, &from).is_ok() {
                     println!("[undo] {} -> {}", to.display(), from.display());
                     self.set_path(id, from);
-                    self.toast(format!("Undone: renamed back to {}", self.name_of(id)));
+                    self.toast(format!("Undone  ·  {}", self.name_of(id)));
                     self.refresh();
                 } else {
                     self.toast("Could not undo the rename");
@@ -3999,7 +4008,7 @@ impl App {
             .map(|id| (self.files[id].clone(), self.transforms.get(&id).copied().unwrap_or_default()))
             .collect();
         if paths.is_empty() {
-            return self.toast("Nothing to convert: no videos among them");
+            return self.toast("No videos to convert");
         }
         if let Some(problem) = target.problem(&settings) {
             return self.toast(problem);
@@ -4022,7 +4031,7 @@ impl App {
                     if said != Some(percent) {
                         said = Some(percent);
                         let of = if total > 1 { format!(" ({} of {total})", index + 1) } else { String::new() };
-                        let _ = proxy.send_event(Event::VideoProgress(format!("Converting {name} to {what}{of}: {percent}%")));
+                        let _ = proxy.send_event(Event::VideoProgress(format!("{name} → {what}{of}  {percent}%")));
                     }
                 });
                 match result {
@@ -4057,24 +4066,24 @@ impl App {
         if done.saving {
             let made = &done.created[0];
             let size = std::fs::metadata(made).map_or(0, |meta| meta.len());
-            self.toast_with(format!("Saved {}  {}", made.file_name().unwrap_or_default().to_string_lossy(), meta::human_size(size)), links);
+            self.toast_with(format!("{}  ·  {}", made.file_name().unwrap_or_default().to_string_lossy(), meta::human_size(size)), links);
             self.undo.push(Undo::Created(done.created));
             return;
         }
         let mut summary = match done.created.as_slice() {
-            [one] => format!("Converted to {}", one.file_name().unwrap_or_default().to_string_lossy()),
+            [one] => format!("{}", one.file_name().unwrap_or_default().to_string_lossy()),
             all => format!("Converted {} to {}", all.len(), done.what),
         };
         if done.before > 0 {
             let change = (done.after as f64 / done.before as f64 - 1.0) * 100.0;
-            summary.push_str(&format!("  {} → {} ({change:+.0}%)", meta::human_size(done.before), meta::human_size(done.after)));
+            summary.push_str(&format!("  ·  {} → {}  {change:+.0}%", meta::human_size(done.before), meta::human_size(done.after)));
         }
         // A JPEG repacked rather than encoded says so.
-        if let Some(how) = done.how.filter(|how| how.contains("repacked")) {
-            summary.push_str(&format!(", {how}"));
+        if done.how.is_some_and(|how| how.contains("repacked")) {
+            summary.push_str("  ·  lossless");
         }
         if done.failed > 0 {
-            summary.push_str(&format!(", {} failed (see the terminal)", done.failed));
+            summary.push_str(&format!("  ·  {} failed", done.failed));
         }
         self.toast_with(summary, links);
         self.undo.push(Undo::Created(done.created));
@@ -4172,7 +4181,7 @@ impl App {
         if before.starts_with('@') {
             return;
         }
-        let Some(done) = complete_folder(&base, &before) else { return self.toast("No folder by that start") };
+        let Some(done) = complete_folder(&base, &before) else { return self.toast("No match") };
         let Some(prompt) = &mut self.prompt else { return };
         let after = prompt.field.text.split_off(prompt.field.cursor);
         prompt.field.cursor = done.chars().count();
@@ -4194,24 +4203,19 @@ impl App {
                 let dir = to.parent()?;
                 let name = to.file_name()?.to_string_lossy();
                 let there = to.exists() && to != from.canonicalize().unwrap_or_default();
-                let mut hint = match Some(dir) == here.as_deref() {
-                    true if !there => return None,
-                    true => String::new(),
-                    false => format!("Moves to {}/{name}", short_dir(dir)),
-                };
-                if !dir.exists() {
-                    hint.push_str(", a new folder");
-                }
                 if there {
-                    hint.push_str(&format!("{}{name} is already there, choose another name", if hint.is_empty() { "" } else { ", but " }));
-                    return Some(hint);
+                    return Some(format!("{name} exists"));
                 }
-                Some(format!("{hint}. Enter to go ahead"))
+                if Some(dir) == here.as_deref() {
+                    return None;
+                }
+                let new = if dir.exists() { "" } else { "  (new folder)" };
+                Some(format!("→ {}/{name}{new}", short_dir(dir)))
             }
             PromptKind::SendTo { .. } if !typed.is_empty() && !typed.starts_with('@') => {
                 let dir = crate::options::expand_home(typed);
                 let shown = short_dir(&dir.canonicalize().unwrap_or_else(|_| dir.clone()));
-                Some(if dir.is_dir() { format!("Into {shown}. Enter to go ahead") } else { format!("Into {shown}, a new folder. Enter to go ahead") })
+                Some(if dir.is_dir() { format!("→ {shown}") } else { format!("→ {shown}  (new folder)") })
             }
             _ => None,
         }
@@ -8545,7 +8549,7 @@ impl App {
                     canvas.fill(at - 1, top, 2, thickness, 0x000000);
                 }
             }
-            self.draw_section(canvas, &bar, top, thickness, length, &mut labels, px);
+            let flags = self.draw_section(canvas, &bar, top, thickness, length, &mut labels, px);
             let handle = unit * 5 / 4;
             canvas.pill(bar.x + done - handle / 2, bar.middle - handle / 2, handle, handle, TEXT_COLOR, 256, handle);
             let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
@@ -8589,7 +8593,10 @@ impl App {
                 // that the frame from that part of the video.
                 let at = bar.x + (f64::from(bar.width) * fraction) as i32;
                 canvas.fill(at - 1, top - unit / 3, 2, thickness + unit * 2 / 3, MARK_COLOR);
-                let label_top = bar.middle - unit * 2 - line / 2;
+                // Over a section's flag, the time stands a line higher than
+                // the flag's letter.
+                let over_flag = flags.iter().any(|flag| (flag - at).abs() < line * 2);
+                let label_top = bar.middle - unit * 2 - line / 2 - if over_flag { line } else { 0 };
                 labels.push((at.clamp(unit * 4, width - unit * 4), label_top, Ordering::Equal, clock(fraction * length)));
                 // The video has changed under a pointer that has not moved:
                 // the frame kept is of the one before, and is not shown;
@@ -8805,10 +8812,10 @@ impl App {
             let count = self.targets().len();
             let files = if count == 1 { self.name_of(prompt.id) } else { format!("{count} files") };
             let (icon, title, hint) = match prompt.kind {
-                PromptKind::Rename => (commands::icons::PENCIL, "Rename".to_string(), "Enter to rename, a path to move it, Tab to finish a folder"),
+                PromptKind::Rename => (commands::icons::PENCIL, "Rename".to_string(), "Enter to rename  ·  a path moves it  ·  Tab completes"),
                 PromptKind::SaveWorkspace => (commands::icons::FOLDER_PLUS, "Save this folder as a workspace named".to_string(), "Enter to add it to the config file"),
-                PromptKind::SendTo { moving: true } => (commands::icons::FOLDER_INPUT, format!("Move {files} to"), "Enter to move, the folder is made if need be"),
-                PromptKind::SendTo { moving: false } => (commands::icons::FOLDER_PLUS, format!("Copy {files} to"), "Enter to copy, the folder is made if need be"),
+                PromptKind::SendTo { moving: true } => (commands::icons::FOLDER_INPUT, format!("Move {files} to"), "Enter to move  ·  Tab completes"),
+                PromptKind::SendTo { moving: false } => (commands::icons::FOLDER_PLUS, format!("Copy {files} to"), "Enter to copy  ·  Tab completes"),
             };
             // What Enter would do, as it is typed.
             let hint = self.prompt_hint(prompt).unwrap_or_else(|| hint.to_string());
@@ -10427,7 +10434,7 @@ fn draw_prompt(canvas: &mut Canvas, text: &mut Text, icon: &str, title: &str, fi
     let line_height = Text::line_height(px);
     let small = (px * 5 / 6).max(11);
     let heading = format!("{icon}  {title}");
-    let hint = format!("{hint}   Esc to cancel");
+    let hint = format!("{hint}  ·  Esc to cancel");
     let widest = text.width(&typed, px).max(text.width(&heading, px)).max(text.width(&hint, small));
     let width = (widest + 5 * pad).max(px as i32 * 32).min(canvas.width);
     let field_height = line_height + pad;

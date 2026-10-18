@@ -108,7 +108,7 @@ impl App {
 
     /// Marks an end of the section where the video is now.
     pub(super) fn mark_edge(&mut self, edge: Edge) {
-        let Some(video) = &self.video else { return self.toast("A section is marked in a video") };
+        let Some(video) = &self.video else { return self.toast("Sections are for videos") };
         let id = video.id;
         let Some((at, length)) = self.video_time() else { return };
         let mut section = self.sections.get(&id).copied().unwrap_or_default();
@@ -123,7 +123,7 @@ impl App {
             Edge::B => {
                 let a = section.a.unwrap_or(0.0);
                 if at <= a + SHORTEST {
-                    return self.toast(format!("The end has to come after the start, at {}", clock(a)));
+                    return self.toast(format!("End must be after {}", clock(a)));
                 }
                 section = Section { a: Some(a), b: Some(at.min(length)) };
             }
@@ -150,8 +150,8 @@ impl App {
     fn say_section(&mut self) {
         let Some(section) = self.section() else { return };
         match section.span() {
-            Some((a, b)) => self.toast(format!("Section {} – {} ({:.1} s), looping   Esc to clear", clock(a), clock(b), b - a)),
-            None => self.toast(format!("Section from {}   Shift+B to end it", clock(section.a.unwrap_or(0.0)))),
+            Some((a, b)) => self.toast(format!("Looping {} – {}  ({:.1} s)", clock(a), clock(b), b - a)),
+            None => self.toast(format!("A at {}  ·  Shift+B to end", clock(section.a.unwrap_or(0.0)))),
         }
     }
 
@@ -214,9 +214,9 @@ impl App {
     /// Saves the section as `clip`, by ffmpeg on another thread, saying in
     /// the toast how far along it is.
     pub(super) fn save_section(&mut self, clip: crate::transcode::Clip) {
-        let Some(video) = &self.video else { return self.toast("A section is marked in a video") };
+        let Some(video) = &self.video else { return self.toast("Sections are for videos") };
         let Some((a, b)) = self.section().and_then(|section| section.span()) else {
-            return self.toast("Mark a section first: Shift+A at its start, Shift+B at its end");
+            return self.toast("Mark a section first: Shift+A, Shift+B");
         };
         let path = self.files[video.id].clone();
         // Turned and mirrored as it is shown.
@@ -227,7 +227,7 @@ impl App {
         if self.dry(|_| vec![format!("save {} – {} as {what}: {}", clock(a), clock(b), output.display())], "would save the section") {
             return;
         }
-        self.toast(format!("Saving {} – {} as {what}...", clock(a), clock(b)));
+        self.toast(format!("Saving {what}…"));
         // A section worth saving is worth coming back to.
         self.keep_quietly(&path, a, b);
         let proxy = self.proxy.clone();
@@ -260,9 +260,9 @@ impl App {
     /// Keeps the section marked, to come back to in the Sections tab; or,
     /// kept already, forgets it.
     pub(super) fn keep_section(&mut self) {
-        let Some(video) = &self.video else { return self.toast("A section is marked in a video") };
+        let Some(video) = &self.video else { return self.toast("Sections are for videos") };
         let Some((a, b)) = self.section().and_then(|section| section.span()) else {
-            return self.toast("Mark a section first: Shift+A at its start, Shift+B at its end");
+            return self.toast("Mark a section first: Shift+A, Shift+B");
         };
         let path = self.files[video.id].clone();
         let kept = self.kept_sections.get_or_insert_with(read_kept);
@@ -278,9 +278,9 @@ impl App {
         }
         let result = write_kept(kept);
         match (result, forgetting) {
-            (Err(error), _) => self.toast(format!("Cannot keep it: {error}")),
-            (Ok(()), true) => self.toast(format!("Forgot the section {} – {}", clock(a), clock(b))),
-            (Ok(()), false) => self.toast(format!("Kept {} – {}: T, then T again, for the Sections", clock(a), clock(b))),
+            (Err(error), _) => self.toast(format!("Not kept: {error}")),
+            (Ok(()), true) => self.toast(format!("Removed {} – {}", clock(a), clock(b))),
+            (Ok(()), false) => self.toast(format!("Kept {} – {}", clock(a), clock(b))),
         }
         self.redraw();
     }
@@ -357,7 +357,7 @@ impl App {
     /// any; again, nothing.
     pub(super) fn cycle_strip(&mut self) {
         if self.video.is_none() {
-            return self.toast("Scenes are of a video: there are none to show here");
+            return self.toast("No scenes here");
         }
         let has_entries = !self.entries().is_empty();
         (self.scenes_on, self.strip_tab) = match (self.scenes_on, self.strip_tab) {
@@ -411,7 +411,7 @@ impl App {
         let hit = self.strip_tabs(&strip, px, count).into_iter().find(|(_, _, [l, t, w, h])| (*l..l + w).contains(&(x as i32)) && (*t..t + h).contains(&(y as i32)));
         if let Some((tab, ..)) = hit {
             if tab == StripTab::Sections && count == 0 {
-                self.toast("No sections yet: mark one with Shift+A and Shift+B, then keep or save it");
+                self.toast("No sections yet");
             } else {
                 self.strip_tab = tab;
             }
@@ -540,21 +540,35 @@ impl App {
 
     /// Draws the section over the seek bar's track: the stretch between
     /// the ends in the accent, and each end as a flag to take hold of.
-    pub(super) fn draw_section(&self, canvas: &mut Canvas, bar: &SeekBar, top: i32, thickness: i32, length: f64, labels: &mut Vec<(i32, i32, Ordering, String)>, px: u32) {
-        let Some(section) = self.section() else { return };
+    /// Gives back where the flags' letters stand across, for the time under
+    /// the pointer to stay clear of.
+    pub(super) fn draw_section(&self, canvas: &mut Canvas, bar: &SeekBar, top: i32, thickness: i32, length: f64, labels: &mut Vec<(i32, i32, Ordering, String)>, px: u32) -> Vec<i32> {
+        let Some(section) = self.section() else { return Vec::new() };
         let x_of = |at: f64| bar.x + (f64::from(bar.width) * at / length) as i32;
         if let Some((a, b)) = section.span() {
             let (left, right) = (x_of(a), x_of(b));
             canvas.round_fill(left, top - thickness / 3, (right - left).max(2), thickness + thickness * 2 / 3, thickness / 2, accent(), 200);
         }
         let line = Text::line_height(px);
+        // Ends close together put their letters back to back, A to the
+        // left of its flag and B to the right, rather than one on the other.
+        let close = match (section.a, section.b) {
+            (Some(a), Some(b)) => (x_of(b) - x_of(a)).abs() < line,
+            _ => false,
+        };
+        let mut flags = Vec::new();
         for (edge, at) in [(Edge::A, section.a), (Edge::B, section.b)] {
             let Some(at) = at else { continue };
             let x = x_of(at);
             let tall = thickness * 3;
             canvas.fill(x - 1, bar.middle - tall / 2, 3, tall, accent_soft());
-            let word = if edge == Edge::A { "A" } else { "B" };
-            labels.push((x, bar.middle - tall / 2 - line, Ordering::Equal, word.to_string()));
+            let (word, side) = match edge {
+                Edge::A => ("A", if close { Ordering::Less } else { Ordering::Equal }),
+                Edge::B => ("B", if close { Ordering::Greater } else { Ordering::Equal }),
+            };
+            labels.push((x, bar.middle - tall / 2 - line, side, word.to_string()));
+            flags.push(x);
         }
+        flags
     }
 }
