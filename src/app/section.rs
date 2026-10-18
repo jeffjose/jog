@@ -219,6 +219,8 @@ impl App {
             return self.toast("Mark a section first: Shift+A at its start, Shift+B at its end");
         };
         let path = self.files[video.id].clone();
+        // Turned and mirrored as it is shown.
+        let transform = self.transforms.get(&video.id).copied().unwrap_or_default();
         let settings = self.options.convert.video;
         let what = clip.describe(&settings);
         let output = crate::transcode::clip_output(&path, a, b, &clip);
@@ -232,7 +234,7 @@ impl App {
         std::thread::spawn(move || {
             let name = output.file_name().unwrap_or_default().to_string_lossy().into_owned();
             let mut said = None;
-            let result = crate::transcode::cut(&path, a, b, &clip, &settings, |share| {
+            let result = crate::transcode::cut(&path, a, b, &clip, &settings, transform, |share| {
                 let percent = (share * 100.0) as u32;
                 if said != Some(percent) {
                     said = Some(percent);

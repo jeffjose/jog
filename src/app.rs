@@ -3867,20 +3867,21 @@ impl App {
     /// Converts the target files on another thread; `Event::Converted`
     /// reports back.
     fn convert(&mut self, format: Format) {
-        let paths: Vec<PathBuf> = self.targets().into_iter().map(|id| self.files[id].clone()).collect();
-        self.convert_paths(paths, format, self.options.convert);
+        self.convert_ids(self.targets(), format, self.options.convert);
     }
 
-    fn convert_paths(&mut self, paths: Vec<PathBuf>, format: Format, settings: convert::Settings) {
-        if self.dry(|_| paths.iter().map(|path| format!("convert to {}: {}", format.name(), path.display())).collect(), &format!("would convert {}", paths.len())) {
+    /// Converts these files, each turned and mirrored as it is shown.
+    fn convert_ids(&mut self, ids: Vec<usize>, format: Format, settings: convert::Settings) {
+        let paths: Vec<(PathBuf, Transform)> = ids.into_iter().map(|id| (self.files[id].clone(), self.transforms.get(&id).copied().unwrap_or_default())).collect();
+        if self.dry(|_| paths.iter().map(|(path, _)| format!("convert to {}: {}", format.name(), path.display())).collect(), &format!("would convert {}", paths.len())) {
             return;
         }
         self.toast(format!("Converting {} to {} ({})...", paths.len(), format.name(), settings.describe(format)));
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let mut done = Converted { created: Vec::new(), failed: 0, what: format.name().to_string(), before: 0, after: 0, how: None, error: None, saving: false };
-            for path in paths {
-                match convert::convert(&path, format, &settings) {
+            for (path, transform) in paths {
+                match convert::convert(&path, format, &settings, transform) {
                     Ok((to, how)) => {
                         println!("[convert] {} -> {} ({how})", path.display(), to.display());
                         done.before += std::fs::metadata(&path).map_or(0, |meta| meta.len());
@@ -3903,7 +3904,13 @@ impl App {
     /// thread, saying how far along each is as it goes.
     fn convert_videos(&mut self, target: crate::transcode::Target) {
         let settings = self.options.convert.video;
-        let paths: Vec<PathBuf> = self.targets().into_iter().map(|id| self.files[id].clone()).filter(|path| files::is_video(path)).collect();
+        // Each turned and mirrored as it is shown.
+        let paths: Vec<(PathBuf, Transform)> = self
+            .targets()
+            .into_iter()
+            .filter(|id| files::is_video(&self.files[*id]))
+            .map(|id| (self.files[id].clone(), self.transforms.get(&id).copied().unwrap_or_default()))
+            .collect();
         if paths.is_empty() {
             return self.toast("Nothing to convert: no videos among them");
         }
@@ -3911,7 +3918,7 @@ impl App {
             return self.toast(problem);
         }
         let what = target.describe(&settings);
-        if self.dry(|_| paths.iter().map(|path| format!("convert to {what}: {}", path.display())).collect(), &format!("would convert {}", paths.len())) {
+        if self.dry(|_| paths.iter().map(|(path, _)| format!("convert to {what}: {}", path.display())).collect(), &format!("would convert {}", paths.len())) {
             return;
         }
         self.toast(format!("Converting {} to {what}...", paths.len()));
@@ -3919,10 +3926,10 @@ impl App {
         std::thread::spawn(move || {
             let total = paths.len();
             let mut done = Converted { created: Vec::new(), failed: 0, what: what.clone(), before: 0, after: 0, how: None, error: None, saving: false };
-            for (index, path) in paths.iter().enumerate() {
+            for (index, (path, transform)) in paths.iter().enumerate() {
                 let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 let mut said = None;
-                let result = crate::transcode::transcode(path, &target, &settings, |share| {
+                let result = crate::transcode::transcode(path, &target, &settings, *transform, |share| {
                     // A word only when the whole percentage moves on.
                     let percent = (share * 100.0) as u32;
                     if said != Some(percent) {

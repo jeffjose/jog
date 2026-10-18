@@ -427,8 +427,7 @@ impl App {
     fn panel_convert(&mut self) {
         let Some(panel) = self.convert_panel.take() else { return };
         let ids = if panel.marked { self.targets() } else { vec![panel.id] };
-        let paths: Vec<PathBuf> = ids.into_iter().map(|id| self.files[id].clone()).collect();
-        self.convert_paths(paths, panel.format, panel.settings);
+        self.convert_ids(ids, panel.format, panel.settings);
     }
 
     pub(super) fn panel_key(&mut self, key: Key<&str>, _event_loop: &ActiveEventLoop) {

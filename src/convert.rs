@@ -17,6 +17,7 @@ use image::codecs::png::PngEncoder;
 use image::DynamicImage;
 
 use crate::decode::{self, Result};
+use crate::frame::Transform;
 
 /// JPEG has no transparency, so transparent areas become this colour.
 const JPEG_BACKGROUND: u32 = 0xFFFFFF;
@@ -361,7 +362,7 @@ fn encode_inner(image: &DynamicImage, source: Option<&[u8]>, format: Format, set
 
 /// Writes a copy of the picture at `path` as `format`, next to it, and
 /// says where and how. An existing file is never overwritten.
-pub fn convert(path: &Path, format: Format, settings: &Settings) -> Result<(PathBuf, String)> {
+pub fn convert(path: &Path, format: Format, settings: &Settings, transform: Transform) -> Result<(PathBuf, String)> {
     if Format::of(path) == Some(format) {
         return Err(format!("already {}", format.name()).into());
     }
@@ -370,8 +371,13 @@ pub fn convert(path: &Path, format: Format, settings: &Settings) -> Result<(Path
         return Err(format!("{} is there already", target.display()).into());
     }
     let source = std::fs::read(path)?;
-    let image = decode::open(path)?;
-    let encoded = encode(&image, Some(&source), format, settings)?;
+    let image = turned(decode::open(path)?, transform);
+    // A JPEG turned cannot be repacked as it is: it is encoded.
+    let source = transform.is_identity().then_some(&source[..]);
+    let mut encoded = encode(&image, source, format, settings)?;
+    if !transform.is_identity() {
+        encoded.how.push_str(", turned as shown");
+    }
     // Creating the file fails if the name is taken, so nothing is clobbered.
     let mut file = OpenOptions::new().write(true).create_new(true).open(&target)?;
     if let Err(error) = file.write_all(&encoded.bytes) {
@@ -492,6 +498,18 @@ impl Settings {
     }
 }
 
+/// The picture turned and mirrored as `transform` says: mirrored first,
+/// then turned clockwise, as jog shows it.
+pub fn turned(image: DynamicImage, transform: Transform) -> DynamicImage {
+    let image = if transform.mirrored() { image.fliph() } else { image };
+    match transform.turns() {
+        1 => image.rotate90(),
+        2 => image.rotate180(),
+        3 => image.rotate270(),
+        _ => image,
+    }
+}
+
 /// Converts each of `paths` to `format`, one after another, saying how it
 /// goes on stdout and stderr; for `jog --convert`. False if any failed.
 pub fn convert_all(paths: &[PathBuf], format: Format, settings: &Settings) -> bool {
@@ -522,7 +540,7 @@ pub fn convert_all(paths: &[PathBuf], format: Format, settings: &Settings) -> bo
     eprintln!("jog: converting {total} to {} ({}){skipped}", format.name(), settings.describe(format));
     for (index, path) in todo.iter().enumerate() {
         let count = format!("[{}/{total}]", index + 1);
-        match convert(path, format, settings) {
+        match convert(path, format, settings, Transform::default()) {
             Ok((to, how)) => {
                 let (from_size, to_size) = (size(path), size(&to));
                 (before, after) = (before + from_size, after + to_size);
@@ -571,7 +589,7 @@ mod tests {
         photo().save(&source).unwrap();
         let settings = Settings::default();
         for format in [Format::Jxl, Format::Avif, Format::Jpeg, Format::WebP] {
-            let (target, _) = convert(&source, format, &settings).unwrap();
+            let (target, _) = convert(&source, format, &settings, Transform::default()).unwrap();
             assert_eq!(target, dir.join(format!("picture.{}", format.extension())));
             assert!(std::fs::metadata(&target).unwrap().len() > 100, "{format:?} wrote something");
         }
@@ -589,11 +607,29 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_is_written_turned_as_it_is_shown() {
+        let dir = scratch("turned");
+        let source = dir.join("wide.png");
+        // Red on the left half, wide.
+        RgbImage::from_fn(40, 20, |x, _| if x < 20 { Rgb([255, 0, 0]) } else { Rgb([0, 0, 255]) }).save(&source).unwrap();
+        let mut settings = Settings::default();
+        settings.webp.lossless = true;
+        let (out, how) = convert(&source, Format::WebP, &settings, Transform::CW).unwrap();
+        assert!(how.contains("turned"), "{how}");
+        let back = image::open(&out).unwrap().into_rgb8();
+        assert_eq!(back.dimensions(), (20, 40), "tall now");
+        // Turned clockwise, the left half is on top.
+        assert_eq!(back.get_pixel(10, 5).0, [255, 0, 0]);
+        assert_eq!(back.get_pixel(10, 35).0, [0, 0, 255]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_jpeg_becomes_jpeg_xl_without_loss() {
         let dir = scratch("jpeg");
         let source = dir.join("photo.jpg");
         photo().save(&source).unwrap();
-        let (target, how) = convert(&source, Format::Jxl, &Settings::default()).unwrap();
+        let (target, how) = convert(&source, Format::Jxl, &Settings::default(), Transform::default()).unwrap();
         assert!(how.contains("repacked"), "{how}");
         // The JPEG comes back out of it byte for byte.
         let jxl = std::fs::read(&target).unwrap();
@@ -613,10 +649,10 @@ mod tests {
         image.save(&source).unwrap();
         let mut settings = Settings::default();
         settings.webp.lossless = true;
-        let (webp, _) = convert(&source, Format::WebP, &settings).unwrap();
+        let (webp, _) = convert(&source, Format::WebP, &settings, Transform::default()).unwrap();
         assert_eq!(image::open(&webp).unwrap().into_rgba8(), image, "lossless, alpha kept");
         // JPEG has no transparency: it goes white.
-        let (jpeg, _) = convert(&source, Format::Jpeg, &settings).unwrap();
+        let (jpeg, _) = convert(&source, Format::Jpeg, &settings, Transform::default()).unwrap();
         let decoded = image::open(&jpeg).unwrap().into_rgb8();
         assert!(decoded.get_pixel(4, 1)[0] > 200 && decoded.get_pixel(4, 1)[2] < 60);
         assert!(decoded.get_pixel(4, 6).0.iter().all(|&c| c > 200), "transparent becomes white");
@@ -629,9 +665,9 @@ mod tests {
         let source = dir.join("picture.png");
         photo().save(&source).unwrap();
         let settings = Settings::default();
-        assert!(convert(&source, Format::Png, &settings).is_err(), "already a PNG");
+        assert!(convert(&source, Format::Png, &settings, Transform::default()).is_err(), "already a PNG");
         std::fs::write(dir.join("picture.jpg"), b"mine").unwrap();
-        assert!(convert(&source, Format::Jpeg, &settings).is_err());
+        assert!(convert(&source, Format::Jpeg, &settings, Transform::default()).is_err());
         assert_eq!(std::fs::read(dir.join("picture.jpg")).unwrap(), b"mine");
         std::fs::remove_dir_all(&dir).unwrap();
     }

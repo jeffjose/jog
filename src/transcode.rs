@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
+use crate::frame::Transform;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Codec {
     H264,
@@ -330,7 +332,39 @@ fn arguments(target: &Target, settings: &VideoSettings, probe: &Probe) -> Result
 /// Converts the video at `path`, telling `progress` how far along it is
 /// (0 to 1) as it goes. Written under another name and renamed when done,
 /// so an unfinished one is never left looking finished.
-pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, progress: impl FnMut(f64)) -> Result<PathBuf, String> {
+/// The filters that turn and mirror a video as `transform` says: as jog
+/// shows it, mirrored first, then turned clockwise. None for none.
+pub fn turn_filter(transform: Transform) -> Option<String> {
+    let mirror = transform.mirrored().then_some("hflip");
+    let turn = match transform.turns() {
+        1 => Some("transpose=clock"),
+        2 => Some("hflip,vflip"),
+        3 => Some("transpose=cclock"),
+        _ => None,
+    };
+    let steps: Vec<&str> = mirror.into_iter().chain(turn).collect();
+    (!steps.is_empty()).then(|| steps.join(","))
+}
+
+/// The arguments, before the input, that tell players to show a video
+/// copied as it is turned and mirrored as `transform` says: the picture
+/// itself cannot be turned without being encoded again.
+fn display_turn(transform: Transform) -> Vec<String> {
+    if transform.is_identity() {
+        return Vec::new();
+    }
+    // Counter-clockwise, as the metadata has it; the flip is applied
+    // after the turn, which mirroring first and then turning comes to
+    // when the turn goes the other way.
+    let turns = if transform.mirrored() { transform.turns() } else { (4 - transform.turns()) % 4 };
+    let mut args = vec!["-display_rotation:v:0".to_string(), (u32::from(turns) * 90).to_string()];
+    if transform.mirrored() {
+        args.push("-display_hflip:v:0".to_string());
+    }
+    args
+}
+
+pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, transform: Transform, progress: impl FnMut(f64)) -> Result<PathBuf, String> {
     if let Some(problem) = target.problem(settings) {
         return Err(problem);
     }
@@ -339,7 +373,10 @@ pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, progres
         return Err(format!("{} is there already", output.display()));
     }
     let probe = probe(path);
-    let args = arguments(target, settings, &probe)?;
+    let mut args = arguments(target, settings, &probe)?;
+    if let Some(turn) = turn_filter(transform) {
+        args.extend(["-vf".to_string(), turn]);
+    }
     run(path, &[], &args, target.container.muxer(), &output, probe.seconds, progress)
 }
 
@@ -512,9 +549,9 @@ fn tone_map(probe: &Probe) -> &'static str {
     }
 }
 
-/// Saves the section from `a` to `b` of the video at `path`, telling
-/// `progress` how far along it is.
-pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, progress: impl FnMut(f64)) -> Result<PathBuf, String> {
+/// Saves the section from `a` to `b` of the video at `path`, turned and
+/// mirrored as `transform` says, telling `progress` how far along it is.
+pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, transform: Transform, progress: impl FnMut(f64)) -> Result<PathBuf, String> {
     let output = clip_output(path, a, b, clip);
     if output.exists() {
         return Err(format!("{} is there already", output.display()));
@@ -522,12 +559,16 @@ pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, p
     let probe = probe(path);
     let length = (b - a).max(0.0);
     let to_strings = |items: &[&str]| items.iter().map(|item| item.to_string()).collect::<Vec<String>>();
+    // The turn, first of the filters, for those that are encoded again.
+    let turn = turn_filter(transform).map(|steps| format!("{steps},")).unwrap_or_default();
     // From the start, for as long as the section: read from there, which
     // copying does from the keyframe before and encoding to the frame.
-    let before = to_strings(&["-ss", &format!("{a:.3}")]);
+    let mut before = to_strings(&["-ss", &format!("{a:.3}")]);
     let mut args = to_strings(&["-t", &format!("{length:.3}")]);
     let muxer = match clip {
         Clip::Quick => {
+            // Copied as it is, the turn goes in as how to show it.
+            before.extend(display_turn(transform));
             let (extension, muxer) = own_container(path);
             args.extend(to_strings(&["-map", "0:v:0", "-map", "0:a?", "-map_metadata", "0", "-c", "copy", "-avoid_negative_ts", "make_zero"]));
             if extension == "mkv" {
@@ -543,6 +584,9 @@ pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, p
                 return Err(problem);
             }
             args.extend(arguments(target, settings, &probe)?);
+            if let Some(steps) = turn_filter(transform) {
+                args.extend(["-vf".to_string(), steps]);
+            }
             target.container.muxer()
         }
         Clip::Gif => {
@@ -551,7 +595,7 @@ pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, p
             // Made small first, then tone mapped: four times quicker than
             // mapping every pixel of a 4K frame and throwing most away.
             let filter = format!(
-                "fps=15,scale='min(iw,640)':-2:flags=lanczos,{}split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=4",
+                "{turn}fps=15,scale='min(iw,640)':-2:flags=lanczos,{}split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=4",
                 tone_map(&probe)
             );
             args.extend(to_strings(&["-an", "-vf", &filter, "-loop", "0"]));
@@ -561,13 +605,13 @@ pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, p
             if !has("libwebp_anim") {
                 return Err("this ffmpeg has no animated WebP encoder (libwebp_anim)".into());
             }
-            let filter = format!("fps=20,scale='min(iw,960)':-2:flags=lanczos,{}", tone_map(&probe)).trim_end_matches(',').to_string();
+            let filter = format!("{turn}fps=20,scale='min(iw,960)':-2:flags=lanczos,{}", tone_map(&probe)).trim_end_matches(',').to_string();
             args.extend(to_strings(&["-an", "-vf", &filter, "-c:v", "libwebp_anim", "-quality", "80", "-compression_level", "4", "-loop", "0"]));
             "webp"
         }
         Clip::Avif => {
             // 10-bit AV1, HDR kept, at a size for passing around.
-            args.extend(to_strings(&["-an", "-vf", "fps=30,scale='min(iw,1280)':-2:flags=lanczos"]));
+            args.extend(to_strings(&["-an", "-vf", &format!("{turn}fps=30,scale='min(iw,1280)':-2:flags=lanczos")]));
             if has("libsvtav1") {
                 args.extend(to_strings(&["-c:v", "libsvtav1", "-preset", "8", "-crf", "35"]));
             } else if has("libaom-av1") {
@@ -594,7 +638,7 @@ pub fn transcode_all(paths: &[PathBuf], target: &Target, settings: &VideoSetting
         let count = format!("[{}/{}]", index + 1, todo.len());
         let started = std::time::Instant::now();
         let shown = path.display().to_string();
-        let result = transcode(path, target, settings, |share| eprint!("\r{count} {shown}  {:.0}%\x1b[K", share * 100.0));
+        let result = transcode(path, target, settings, Transform::default(), |share| eprint!("\r{count} {shown}  {:.0}%\x1b[K", share * 100.0));
         match result {
             Ok(output) => {
                 let (from, to) = (size(path), size(&output));
