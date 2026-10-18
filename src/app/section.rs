@@ -253,12 +253,12 @@ impl App {
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let name = output.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            let mut said = None;
+            let (mut said, started) = (None, Instant::now());
             let result = crate::transcode::cut(&path, a, b, &clip, &settings, transform, |share| {
                 let percent = (share * 100.0) as u32;
                 if said != Some(percent) {
                     said = Some(percent);
-                    let _ = proxy.send_event(Event::VideoProgress(format!("Saving {name}: {percent}%")));
+                    let _ = proxy.send_event(Event::VideoProgress(format!("{name}  ·  {}", progress_words(share, started))));
                 }
             });
             let mut done = Converted { created: Vec::new(), failed: 0, what, before: 0, after: 0, how: None, error: None, saving: true };

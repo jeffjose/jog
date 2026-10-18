@@ -44,6 +44,8 @@ pub enum Command {
     RenameSection,
     /// Remove a kept section from the Sections tab.
     ForgetSection,
+    /// Stop the video being converted or saved, and those after it.
+    CancelEncode,
     Flip,
     Mirror,
     ToggleAntialias,
@@ -507,7 +509,7 @@ pub fn command_icon(command: Command) -> &'static str {
         SaveSection(_) => FILM,
         KeepSection => PIN,
         RenameSection => PENCIL,
-        ForgetSection => X,
+        ForgetSection | CancelEncode => X,
         SpeedUp => CHEVRONS_RIGHT,
         SpeedDown => CHEVRONS_LEFT,
         SpeedReset => GAUGE,
@@ -742,6 +744,7 @@ const FILE: &[Option<MenuItem>] = &[
     video_item("Convert to MP4 (HEVC)", "", Command::ConvertVideo(Target::new(Codec::Hevc, Container::Mp4))),
     video_item("Convert to MKV (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::Mkv))),
     video_item("Convert to WebM (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::WebM))),
+    item("Cancel the encode", "", Command::CancelEncode),
     image_item("Compare with the marked", "", Command::Compare),
     image_item("Save a copy", "S", Command::Save),
     video_item("Save this frame", "S", Command::Save),

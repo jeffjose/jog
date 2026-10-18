@@ -403,6 +403,32 @@ impl Drop for Unfinished {
     }
 }
 
+/// Goes up by one each time what is being encoded is called off: a job
+/// that sees it move on from what it was when the job began stops.
+static CANCELLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times encoding has been called off; for a job to compare with.
+pub fn generation() -> u64 {
+    CANCELLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Calls off what ffmpeg is encoding, and whatever was to follow it.
+/// Whether anything was.
+pub fn cancel() -> bool {
+    CANCELLED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let running = UNFINISHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for (_, group) in running.iter() {
+        // SAFETY: kill takes plain numbers and touches no memory.
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        }
+    }
+    !running.is_empty()
+}
+
+/// What a job called off says, rather than how ffmpeg failed.
+pub const CANCELLED_WORD: &str = "cancelled";
+
 /// Stops what ffmpeg is in the middle of, and removes what it was
 /// writing, as jog quits.
 pub fn abandon() {
@@ -422,6 +448,7 @@ pub fn abandon() {
 fn run(input: &Path, before: &[String], args: &[String], muxer: &str, output: &Path, seconds: f64, mut progress: impl FnMut(f64)) -> Result<PathBuf, String> {
     let extension = output.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
     let partial = output.with_extension(format!("{extension}.part"));
+    let began = generation();
     let mut command = Command::new("ffmpeg");
     command
         .args(["-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-progress", "pipe:1", "-y"])
@@ -468,6 +495,9 @@ fn run(input: &Path, before: &[String], args: &[String], muxer: &str, output: &P
     let said = errors.join().unwrap_or_default();
     if !status.success() {
         let _ = std::fs::remove_file(&partial);
+        if generation() != began {
+            return Err(CANCELLED_WORD.to_string());
+        }
         let last = said.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("ffmpeg failed");
         return Err(last.to_string());
     }

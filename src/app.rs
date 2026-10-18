@@ -264,6 +264,8 @@ enum Undo {
 enum ToastLink {
     Undo,
     Show(PathBuf),
+    /// Stop the encode it tells of.
+    Cancel,
 }
 
 /// Why the list is being brought up to date: the folders watched, a
@@ -1851,6 +1853,7 @@ impl App {
         match link {
             ToastLink::Undo => self.execute(Command::Undo, event_loop),
             ToastLink::Show(path) => self.show_path(&path),
+            ToastLink::Cancel => self.execute(Command::CancelEncode, event_loop),
         }
         true
     }
@@ -3261,6 +3264,11 @@ impl App {
             KeepSection => self.keep_section(),
             RenameSection => self.ask_section_name(),
             ForgetSection => self.forget_section(),
+            CancelEncode => {
+                if !crate::transcode::cancel() {
+                    self.toast("Nothing to cancel");
+                }
+            }
             ToggleAntialias => {
                 self.antialias = !self.antialias;
                 self.toast(if self.antialias { "Smooth scaling on" } else { "Smooth scaling off" });
@@ -4031,17 +4039,24 @@ impl App {
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let total = paths.len();
+            let began = crate::transcode::generation();
             let mut done = Converted { created: Vec::new(), failed: 0, what: what.clone(), before: 0, after: 0, how: None, error: None, saving: false };
             for (index, (path, transform)) in paths.iter().enumerate() {
+                // Called off: the rest are not begun.
+                if crate::transcode::generation() != began {
+                    done.error = Some(crate::transcode::CANCELLED_WORD.to_string());
+                    break;
+                }
                 let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 let mut said = None;
+                let started = Instant::now();
                 let result = crate::transcode::transcode(path, &target, &settings, *transform, |share| {
                     // A word only when the whole percentage moves on.
                     let percent = (share * 100.0) as u32;
                     if said != Some(percent) {
                         said = Some(percent);
                         let of = if total > 1 { format!(" ({} of {total})", index + 1) } else { String::new() };
-                        let _ = proxy.send_event(Event::VideoProgress(format!("{name} → {what}{of}  {percent}%")));
+                        let _ = proxy.send_event(Event::VideoProgress(format!("{name}{of}  ·  {}", progress_words(share, started))));
                     }
                 });
                 match result {
@@ -4052,6 +4067,10 @@ impl App {
                         done.created.push(to);
                     }
                     Err(error) => {
+                        if error == crate::transcode::CANCELLED_WORD {
+                            done.error = Some(error);
+                            continue;
+                        }
                         eprintln!("jog: cannot convert {}: {error}", path.display());
                         done.failed += 1;
                         done.error = Some(short_error(path, &error));
@@ -4063,6 +4082,10 @@ impl App {
     }
 
     fn converted(&mut self, done: Converted) {
+        let cancelled = done.error.as_deref() == Some(crate::transcode::CANCELLED_WORD);
+        if cancelled && done.created.is_empty() {
+            return self.toast("Cancelled");
+        }
         // Nothing made: why, rather than a count of nothing.
         if done.created.is_empty() {
             let why = done.error.unwrap_or_else(|| "see the terminal".to_string());
@@ -4081,7 +4104,7 @@ impl App {
             return;
         }
         let mut summary = match done.created.as_slice() {
-            [one] => format!("{}", one.file_name().unwrap_or_default().to_string_lossy()),
+            [one] => one.file_name().unwrap_or_default().to_string_lossy().into_owned(),
             all => format!("Converted {} to {}", all.len(), done.what),
         };
         if done.before > 0 {
@@ -4094,6 +4117,9 @@ impl App {
         }
         if done.failed > 0 {
             summary.push_str(&format!("  ·  {} failed", done.failed));
+        }
+        if cancelled {
+            summary.push_str("  ·  the rest cancelled");
         }
         self.toast_with(summary, links);
         self.undo.push(Undo::Created(done.created));
@@ -10083,6 +10109,18 @@ fn title_of(path: &Path) -> String {
 /// only its ends when it is a long one.
 /// An error about a file, short enough for a toast: the file's own folder
 /// left out of the paths in it.
+/// How far an encode is, and once it has gone on long enough to tell,
+/// about how long it has left: "42%  ·  1:05 left".
+fn progress_words(share: f64, began: Instant) -> String {
+    let percent = (share * 100.0) as u32;
+    let gone = began.elapsed().as_secs_f64();
+    if share < 0.03 || gone < 2.0 {
+        return format!("{percent}%");
+    }
+    let left = gone / share * (1.0 - share);
+    format!("{percent}%  ·  {} left", clock(left.ceil()))
+}
+
 fn short_error(path: &Path, error: &str) -> String {
     match path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         Some(dir) => error.replace(&format!("{}/", dir.display()), ""),
@@ -10817,7 +10855,8 @@ impl ApplicationHandler<Event> for App {
             Event::ConvertSource(id, source) => self.convert_source(id, source),
             Event::ConvertTrial(asked, format, trial) => self.convert_trial(asked, format, trial),
             Event::ConvertScore(asked, score) => self.convert_score(asked, score),
-            Event::VideoProgress(words) => self.toast(words),
+            // With a Cancel to click, for as long as it goes on.
+            Event::VideoProgress(words) => self.toast_with(words, vec![("Cancel".into(), ToastLink::Cancel)]),
             Event::EntryFrame(found) => self.entry_frame(found),
             Event::Video(which, signal) if which == self.active => {
                 self.video_signal(signal);
