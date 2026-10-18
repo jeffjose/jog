@@ -423,7 +423,27 @@ pub fn cancel() -> bool {
             libc::kill(-group, libc::SIGKILL);
         }
     }
-    !running.is_empty()
+    !running.is_empty() || BATCHES.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
+/// How many batches of pictures are being converted, which a cancel
+/// stops between one picture and the next.
+static BATCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A batch being converted, counted for as long as this lives.
+pub struct Batch;
+
+impl Batch {
+    pub fn begin() -> Batch {
+        BATCHES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Batch
+    }
+}
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        BATCHES.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// What a job called off says, rather than how ffmpeg failed.

@@ -4168,7 +4168,19 @@ impl App {
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let mut done = Converted { created: Vec::new(), failed: 0, what: format.name().to_string(), before: 0, after: 0, how: None, error: None, saving: false };
-            for (path, transform) in paths {
+            let (total, began, started) = (paths.len(), crate::transcode::generation(), Instant::now());
+            let _batch = crate::transcode::Batch::begin();
+            for (index, (path, transform)) in paths.into_iter().enumerate() {
+                // Called off: the rest are not begun.
+                if crate::transcode::generation() != began {
+                    done.error = Some(crate::transcode::CANCELLED_WORD.to_string());
+                    break;
+                }
+                // Of several, how far along, as a video's encode says.
+                if total > 1 {
+                    let words = format!("{} of {total} → {}  ·  {}", index + 1, format.name(), progress_words(index as f64 / total as f64, started));
+                    let _ = proxy.send_event(Event::VideoProgress(words));
+                }
                 match convert::convert(&path, format, &settings, transform) {
                     Ok((to, how)) => {
                         println!("[convert] {} -> {} ({how})", path.display(), to.display());
@@ -4213,7 +4225,7 @@ impl App {
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let total = paths.len();
-            let began = crate::transcode::generation();
+            let (began, _batch) = (crate::transcode::generation(), crate::transcode::Batch::begin());
             let mut done = Converted { created: Vec::new(), failed: 0, what: what.clone(), before: 0, after: 0, how: None, error: None, saving: false };
             for (index, (path, transform)) in paths.iter().enumerate() {
                 // Called off: the rest are not begun.
