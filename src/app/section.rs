@@ -1,8 +1,72 @@
 //! A section of a video, marked with Shift+A at its start and Shift+B at
 //! its end: played over and over while it is marked, shown on the seek
 //! bar, its ends dragged there to move them.
+//!
+//! Sections can be kept, and are when saved as a file: they come back in
+//! the Sections tab of the strip along the bottom (T, then T again), with
+//! the chapters the file has of its own, a click marking one again.
 
 use super::*;
+
+/// What the strip along the bottom of a video shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum StripTab {
+    #[default]
+    Scenes,
+    Sections,
+}
+
+/// A stretch of a video in the Sections tab: kept from a section marked,
+/// or a chapter of the file's own.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Entry {
+    pub start: f64,
+    pub end: f64,
+    /// The chapter's title; none for a section kept.
+    pub title: Option<String>,
+}
+
+/// The frames of the entries of a video, for the cells of the tab.
+#[derive(Default)]
+pub struct EntryFrames {
+    starts: Vec<f64>,
+    frames: Vec<Option<Arc<Frame>>>,
+}
+
+/// Where the sections kept are written: a line each, start, end and the
+/// video's path, by tabs.
+fn kept_path() -> Option<PathBuf> {
+    crate::positions::state_dir().map(|dir| dir.join("sections"))
+}
+
+fn read_kept() -> HashMap<PathBuf, Vec<(f64, f64)>> {
+    let text = kept_path().and_then(|path| std::fs::read_to_string(path).ok()).unwrap_or_default();
+    let mut kept: HashMap<PathBuf, Vec<(f64, f64)>> = HashMap::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(a), Some(b), Some(path)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
+            kept.entry(PathBuf::from(path)).or_default().push((a, b));
+        }
+    }
+    kept
+}
+
+fn write_kept(kept: &HashMap<PathBuf, Vec<(f64, f64)>>) -> std::io::Result<()> {
+    let path = kept_path().ok_or_else(|| std::io::Error::other("no folder to keep it in"))?;
+    let mut paths: Vec<&PathBuf> = kept.keys().collect();
+    paths.sort();
+    let mut text = String::new();
+    for video in paths {
+        for (a, b) in &kept[video] {
+            text.push_str(&format!("{a:.3}\t{b:.3}\t{}\n", video.display()));
+        }
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, text)
+}
 
 /// Either end of a section.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -162,6 +226,8 @@ impl App {
             return;
         }
         self.toast(format!("Saving {} – {} as {what}...", clock(a), clock(b)));
+        // A section worth saving is worth coming back to.
+        self.keep_quietly(&path, a, b);
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let name = output.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -187,6 +253,285 @@ impl App {
             }
             let _ = proxy.send_event(Event::Converted(done));
         });
+    }
+
+    /// Keeps the section marked, to come back to in the Sections tab; or,
+    /// kept already, forgets it.
+    pub(super) fn keep_section(&mut self) {
+        let Some(video) = &self.video else { return self.toast("A section is marked in a video") };
+        let Some((a, b)) = self.section().and_then(|section| section.span()) else {
+            return self.toast("Mark a section first: Shift+A at its start, Shift+B at its end");
+        };
+        let path = self.files[video.id].clone();
+        let kept = self.kept_sections.get_or_insert_with(read_kept);
+        let list = kept.entry(path).or_default();
+        let same = |(x, y): &(f64, f64)| (x - a).abs() < 0.05 && (y - b).abs() < 0.05;
+        let forgetting = list.iter().any(same);
+        match forgetting {
+            true => list.retain(|span| !same(span)),
+            false => {
+                list.push((a, b));
+                list.sort_by(|x, y| x.0.total_cmp(&y.0));
+            }
+        }
+        let result = write_kept(kept);
+        match (result, forgetting) {
+            (Err(error), _) => self.toast(format!("Cannot keep it: {error}")),
+            (Ok(()), true) => self.toast(format!("Forgot the section {} – {}", clock(a), clock(b))),
+            (Ok(()), false) => self.toast(format!("Kept {} – {}: T, then T again, for the Sections", clock(a), clock(b))),
+        }
+        self.redraw();
+    }
+
+    /// Keeps the section without a word, as saving it as a file does.
+    fn keep_quietly(&mut self, path: &Path, a: f64, b: f64) {
+        let kept = self.kept_sections.get_or_insert_with(read_kept);
+        let list = kept.entry(path.to_path_buf()).or_default();
+        if !list.iter().any(|(x, y)| (x - a).abs() < 0.05 && (y - b).abs() < 0.05) {
+            list.push((a, b));
+            list.sort_by(|x, y| x.0.total_cmp(&y.0));
+            let _ = write_kept(kept);
+        }
+    }
+
+    /// The sections kept and the chapters of the video on view, in order.
+    pub(super) fn entries(&mut self) -> Vec<Entry> {
+        let Some(video) = &self.video else { return Vec::new() };
+        let id = video.id;
+        let Some((_, length)) = self.video_time() else { return Vec::new() };
+        let path = self.files[id].clone();
+        let mut entries: Vec<Entry> = self.kept_sections.get_or_insert_with(read_kept).get(&path).into_iter().flatten().map(|(a, b)| Entry { start: *a, end: *b, title: None }).collect();
+        // The file's chapters, read from the player once a video.
+        if !self.chapters.contains_key(&id) {
+            let found = self.player.as_ref().map(|player| {
+                let count = player.number("chapter-list/count").unwrap_or(0.0) as usize;
+                (0..count.min(200))
+                    .filter_map(|n| {
+                        let time = player.number(&format!("chapter-list/{n}/time"))?;
+                        let title = player.text(&format!("chapter-list/{n}/title")).filter(|title| !title.is_empty()).unwrap_or_else(|| format!("Chapter {}", n + 1));
+                        Some((time, title))
+                    })
+                    .collect::<Vec<_>>()
+            });
+            if let Some(found) = found.filter(|_| video.showing) {
+                self.chapters.insert(id, found);
+            }
+        }
+        let chapters = self.chapters.get(&id).cloned().unwrap_or_default();
+        for (index, (time, title)) in chapters.iter().enumerate() {
+            let end = chapters.get(index + 1).map_or(length, |(next, _)| *next);
+            entries.push(Entry { start: *time, end, title: Some(title.clone()) });
+        }
+        entries.sort_by(|x, y| x.start.total_cmp(&y.start));
+        entries
+    }
+
+    /// Asks for a frame from where each entry starts, unless they have
+    /// been asked for already.
+    fn want_entry_frames(&mut self, entries: &[Entry]) {
+        let Some(video) = self.video.as_ref().filter(|video| video.showing) else { return };
+        let id = video.id;
+        let starts: Vec<f64> = entries.iter().map(|entry| entry.start).collect();
+        if self.entry_frames.get(&id).is_some_and(|had| had.starts == starts) || starts.is_empty() {
+            return;
+        }
+        self.entry_frames.insert(id, EntryFrames { frames: vec![None; starts.len()], starts: starts.clone() });
+        let proxy = self.proxy.clone();
+        let finder = self.section_finder.get_or_insert_with(|| scenes::Finder::new(move |found| proxy.send_event(Event::EntryFrame(found)).is_ok()));
+        finder.want(id, self.files[id].clone(), starts);
+    }
+
+    pub(super) fn entry_frame(&mut self, found: scenes::Found) {
+        let scenes::Found(id, index, frame) = found;
+        if let Some(place) = self.entry_frames.get_mut(&id).and_then(|had| had.frames.get_mut(index)) {
+            *place = Some(Arc::new(frame));
+        }
+        self.redraw();
+    }
+
+    /// T: the scenes; again, the sections and chapters, when there are
+    /// any; again, nothing.
+    pub(super) fn cycle_strip(&mut self) {
+        if self.video.is_none() {
+            return self.toast("Scenes are of a video: there are none to show here");
+        }
+        let has_entries = !self.entries().is_empty();
+        (self.scenes_on, self.strip_tab) = match (self.scenes_on, self.strip_tab) {
+            (false, _) => (true, StripTab::Scenes),
+            (true, StripTab::Scenes) if has_entries => (true, StripTab::Sections),
+            _ => (false, StripTab::Scenes),
+        };
+        self.redraw();
+    }
+
+    /// Where the cell of an entry stands, its row centred as the scenes'.
+    fn entry_left(strip: &Strip, index: usize, count: usize, window_width: i32) -> i32 {
+        let row = count as i32 * strip.pitch() - strip.pad;
+        (window_width - row).max(strip.pad * 12) / 2 + index as i32 * strip.pitch()
+    }
+
+    /// The entry whose cell a window position is on.
+    pub(super) fn entry_at(&mut self, x: f64, y: f64) -> Option<usize> {
+        let (width, height) = self.window_size();
+        let strip = Strip::for_height(height);
+        if self.strip_tab != StripTab::Sections || !self.scenes_shown() || y < f64::from(strip.top) {
+            return None;
+        }
+        let count = self.entries().len();
+        (0..count).find(|&index| {
+            let left = Self::entry_left(&strip, index, count, width as i32);
+            (left..left + strip.cell_w).contains(&(x as i32))
+        })
+    }
+
+    /// The two tabs, at the strip's left end: their words and places.
+    fn strip_tabs(&self, strip: &Strip, px: u32, count: usize) -> [(StripTab, String, [i32; 4]); 2] {
+        let small = (px * 3 / 4).max(10);
+        let line = Text::line_height(small);
+        let h = line + strip.pad / 2;
+        let w = small as i32 * 8;
+        let left = strip.pad;
+        let middle = strip.top + strip.height / 2;
+        [
+            (StripTab::Scenes, "Scenes".to_string(), [left, middle - h - strip.pad / 4, w, h]),
+            (StripTab::Sections, format!("Sections {count}"), [left, middle + strip.pad / 4, w, h]),
+        ]
+    }
+
+    /// A click on the strip: on a tab, that tab; on an entry, that
+    /// stretch marked as the section, looping. Whether it was either.
+    pub(super) fn strip_click(&mut self, x: f64, y: f64, px: u32) -> bool {
+        let (_, height) = self.window_size();
+        let strip = Strip::for_height(height);
+        let count = self.entries().len();
+        let hit = self.strip_tabs(&strip, px, count).into_iter().find(|(_, _, [l, t, w, h])| (*l..l + w).contains(&(x as i32)) && (*t..t + h).contains(&(y as i32)));
+        if let Some((tab, ..)) = hit {
+            if tab == StripTab::Sections && count == 0 {
+                self.toast("No sections yet: mark one with Shift+A and Shift+B, then keep or save it");
+            } else {
+                self.strip_tab = tab;
+            }
+            self.redraw();
+            return true;
+        }
+        if self.strip_tab != StripTab::Sections {
+            return false;
+        }
+        if let Some(index) = self.entry_at(x, y) {
+            self.choose_entry(index);
+        }
+        true
+    }
+
+    /// Marks an entry as the section, and plays it from its start.
+    fn choose_entry(&mut self, index: usize) {
+        let entries = self.entries();
+        let (Some(entry), Some(video)) = (entries.get(index), &self.video) else { return };
+        let Some((_, length)) = self.video_time() else { return };
+        self.sections.insert(video.id, Section { a: Some(entry.start), b: Some(entry.end) });
+        self.apply_loop();
+        self.seek_to(entry.start / length, true);
+        self.say_section();
+    }
+
+    /// Left and Right in the Sections tab: the entry after or before the
+    /// one marked. Whether there were entries to go by.
+    pub(super) fn entry_jump(&mut self, forward: bool) -> bool {
+        let entries = self.entries();
+        if entries.is_empty() {
+            return false;
+        }
+        let at = self.section().and_then(|section| section.a);
+        let now = at.and_then(|a| entries.iter().position(|entry| (entry.start - a).abs() < 0.05));
+        let to = match (now, forward) {
+            (None, _) => 0,
+            (Some(index), true) => (index + 1).min(entries.len() - 1),
+            (Some(index), false) => index.saturating_sub(1),
+        };
+        self.choose_entry(to);
+        true
+    }
+
+    /// The cells of the Sections tab: where each starts, the one marked
+    /// ringed.
+    pub(super) fn draw_entries(&mut self, canvas: &mut Canvas, strip: Strip) {
+        canvas.shade(0, strip.top, canvas.width, strip.height, 64);
+        let entries = self.entries();
+        self.want_entry_frames(&entries);
+        let id = self.video.as_ref().map(|video| video.id);
+        let frames = id.and_then(|id| self.entry_frames.get(&id));
+        let marked = self.section().and_then(|section| section.span());
+        let over = {
+            let (mx, my) = self.mouse;
+            let (width, _) = (canvas.width, 0);
+            let count = entries.len();
+            (my >= f64::from(strip.top)).then(|| (0..count).find(|&index| {
+                let left = Self::entry_left(&strip, index, count, width);
+                (left..left + strip.cell_w).contains(&(mx as i32))
+            })).flatten()
+        };
+        let top = strip.top + strip.pad;
+        let (round, edge) = ((strip.pad * 2 / 3).max(3), (strip.pad / 4).max(2));
+        for (index, entry) in entries.iter().enumerate() {
+            let left = Self::entry_left(&strip, index, entries.len(), canvas.width);
+            if left + strip.cell_w < 0 || left > canvas.width {
+                continue;
+            }
+            let frame = frames.filter(|had| had.starts.get(index) == Some(&entry.start)).and_then(|had| had.frames.get(index)).and_then(Option::as_ref);
+            let [x, y, w, h] = match frame {
+                Some(frame) => {
+                    let (w, h) = fit_size((frame.width, frame.height), (strip.cell_w as u32, strip.cell_h as u32), false);
+                    let (w, h) = (w as i32, h as i32);
+                    let place = [left + (strip.cell_w - w) / 2, top + (strip.cell_h - h) / 2, w, h];
+                    canvas.image_rounded(frame, place[0], place[1], w, h, round);
+                    place
+                }
+                None => {
+                    canvas.round_fill(left, top, strip.cell_w, strip.cell_h, round, PLACEHOLDER_COLOR, 256);
+                    [left, top, strip.cell_w, strip.cell_h]
+                }
+            };
+            let is_marked = marked.is_some_and(|(a, b)| (a - entry.start).abs() < 0.05 && (b - entry.end).abs() < 0.05);
+            let ring = if is_marked { Some(accent()) } else { (over == Some(index)).then_some(accent_soft()) };
+            if let Some(color) = ring {
+                canvas.round_outline(x - edge, y - edge, w + 2 * edge, h + 2 * edge, round + edge, edge, color);
+            }
+        }
+    }
+
+    /// The words of the strip: the tabs, and on each entry its stretch
+    /// and, for a chapter, its title.
+    pub(super) fn draw_strip_words(&mut self, canvas: &mut Canvas, text: &mut Text, strip: &Strip, px: u32) {
+        let entries = self.entries();
+        for (tab, words, [l, t, w, h]) in self.strip_tabs(strip, px, entries.len()) {
+            let chosen = tab == self.strip_tab;
+            let small = (px * 3 / 4).max(10);
+            canvas.round_fill(l, t, w, h, h / 2, if chosen { accent() } else { 0x000000 }, if chosen { 256 } else { 150 });
+            let color = if chosen { on_accent() } else if tab == StripTab::Sections && entries.is_empty() { DIM_TEXT_COLOR } else { TEXT_COLOR };
+            let tw = text.width(&words, small);
+            text.draw(canvas, l + (w - tw) / 2, t + (h - Text::line_height(small)) / 2, small, color, &words);
+        }
+        if self.strip_tab != StripTab::Sections {
+            return;
+        }
+        let small = (px * 3 / 4).max(10);
+        let (top, pad, line) = (strip.top + strip.pad, (small as i32 / 4).max(2), Text::line_height(small));
+        for (index, entry) in entries.iter().enumerate() {
+            let left = Self::entry_left(strip, index, entries.len(), canvas.width);
+            if left + strip.cell_w < 0 || left > canvas.width {
+                continue;
+            }
+            let span = format!("{} – {}", clock(entry.start), clock(entry.end));
+            let bottom = top + strip.cell_h;
+            let badge_w = text.width(&span, small) + 2 * pad;
+            canvas.round_fill(left + strip.cell_w - badge_w - pad, bottom - line - pad, badge_w, line, pad, 0x000000, 190);
+            text.draw(canvas, left + strip.cell_w - badge_w, bottom - line - pad, small, TEXT_COLOR, &span);
+            if let Some(title) = &entry.title {
+                let title_w = (text.width(title, small) + 2 * pad).min(strip.cell_w - 2 * pad);
+                canvas.round_fill(left + pad, top + pad, title_w, line, pad, 0x000000, 190);
+                text.draw(canvas, left + 2 * pad, top + pad, small, TEXT_COLOR, title);
+            }
+        }
     }
 
     /// Draws the section over the seek bar's track: the stretch between

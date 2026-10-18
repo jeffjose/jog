@@ -37,6 +37,8 @@ pub enum Command {
     SectionClear,
     /// Save the section as a clip or an animation.
     SaveSection(Clip),
+    /// Keep the section, for the Sections tab; or forget it, kept.
+    KeepSection,
     Flip,
     Mirror,
     ToggleAntialias,
@@ -487,6 +489,7 @@ pub fn command_icon(command: Command) -> &'static str {
         SectionStart | SectionEnd => REPEAT,
         SectionClear => X,
         SaveSection(_) => FILM,
+        KeepSection => PIN,
         SpeedUp => CHEVRONS_RIGHT,
         SpeedDown => CHEVRONS_LEFT,
         SpeedReset => GAUGE,
@@ -585,6 +588,7 @@ const PLAYBACK: &[Option<MenuItem>] = &[
     video_item("Section starts here", "Shift+A", Command::SectionStart),
     video_item("Section ends here", "Shift+B", Command::SectionEnd),
     video_item("Clear the section", "Esc", Command::SectionClear),
+    video_item("Keep the section (or forget it)", "", Command::KeepSection),
     video_item("Save the section (quick)", "", Command::SaveSection(Clip::Quick)),
     video_item("Save the section as MP4 (H.264, exact)", "", Command::SaveSection(Clip::Exact(Target::new(Codec::H264, Container::Mp4)))),
     video_item("Save the section as MP4 (HEVC, exact)", "", Command::SaveSection(Clip::Exact(Target::new(Codec::Hevc, Container::Mp4)))),

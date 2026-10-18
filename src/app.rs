@@ -46,7 +46,7 @@ use crate::ui::{self, Canvas, Text};
 mod convert_panel;
 use convert_panel::{ConvertPanel, PanelSource};
 mod section;
-use section::{Edge, Section};
+use section::{Edge, EntryFrames, Section, StripTab};
 use crate::view::{Layout, View, Zoom};
 use crate::x11;
 
@@ -213,6 +213,8 @@ pub enum Event {
     ConvertScore(u64, Option<f64>),
     /// How far along converting videos is, in words.
     VideoProgress(String),
+    /// A frame for a cell of the Sections tab.
+    EntryFrame(scenes::Found),
     /// A signal from one of the two players that take turns playing: the
     /// number says which.
     Video(u8, Signal),
@@ -1129,6 +1131,14 @@ pub struct App {
     /// The section marked in each video, by file: still there when the
     /// video is come back to.
     sections: HashMap<usize, Section>,
+    /// The strip's tab; the sections kept, by video, read the first time
+    /// they are wanted; each video's own chapters, read from the player;
+    /// and the frames for the Sections tab's cells.
+    strip_tab: StripTab,
+    kept_sections: Option<HashMap<PathBuf, Vec<(f64, f64)>>>,
+    chapters: HashMap<usize, Vec<(f64, String)>>,
+    entry_frames: HashMap<usize, EntryFrames>,
+    section_finder: Option<scenes::Finder>,
     /// Which of them the pointer is over.
     triage_over: Option<usize>,
     list_search: Option<TextField>,
@@ -1632,6 +1642,11 @@ impl App {
             triage_buttons: RefCell::new(Vec::new()),
             convert_panel: None,
             sections: HashMap::new(),
+            strip_tab: StripTab::Scenes,
+            kept_sections: None,
+            chapters: HashMap::new(),
+            entry_frames: HashMap::new(),
+            section_finder: None,
             triage_over: None,
             list_search: None,
             list_cursor: None,
@@ -2634,7 +2649,11 @@ impl App {
                 Key::Named(NamedKey::ArrowLeft) => Some(false),
                 _ => None,
             };
-            if way.is_some_and(|forward| self.scene_jump(forward)) {
+            let jumped = match self.strip_tab {
+                StripTab::Scenes => way.is_some_and(|forward| self.scene_jump(forward)),
+                StripTab::Sections => way.is_some_and(|forward| self.entry_jump(forward)),
+            };
+            if jumped {
                 return true;
             }
         }
@@ -3123,6 +3142,7 @@ impl App {
                 self.clear_section();
             }
             SaveSection(clip) => self.save_section(clip),
+            KeepSection => self.keep_section(),
             ToggleAntialias => {
                 self.antialias = !self.antialias;
                 self.toast(if self.antialias { "Smooth scaling on" } else { "Smooth scaling off" });
@@ -3400,12 +3420,7 @@ impl App {
                 self.precise = !self.precise;
                 self.toast(if self.precise { "Seeking to the exact moment" } else { "Seeking to the nearest keyframe, which is quicker" });
             }
-            ToggleScenes => {
-                self.scenes_on = !self.scenes_on;
-                if self.scenes_on && self.video.is_none() {
-                    self.toast("Scenes are of a video: there are none to show here");
-                }
-            }
+            ToggleScenes => self.cycle_strip(),
             CycleSubtitles => self.cycle_subtitles(),
             CycleAudio => self.cycle_audio(),
             SubtitlesLarger => self.size_subtitles(true),
@@ -5044,6 +5059,9 @@ impl App {
 
     /// The scene whose cell a window position is on.
     fn scene_at(&self, x: f64, y: f64) -> Option<usize> {
+        if self.strip_tab != StripTab::Scenes {
+            return None;
+        }
         let (width, height) = self.window_size();
         let strip = Strip::for_height(height);
         let (_, starts, _) = self.scenes_now().filter(|_| self.scenes_shown() && y >= f64::from(strip.top))?;
@@ -7266,6 +7284,8 @@ impl App {
                 } else if self.strip_close().is_some_and(|place| (place.x..place.x + place.width).contains(&(x as i32)) && (place.y..place.y + place.height).contains(&(y as i32))) {
                     (self.strip_pinned, self.strip_hover, self.strip_over) = (false, false, None);
                     self.redraw();
+                } else if self.scenes_shown() && y >= f64::from(strip.top) && self.strip_click(x, y, ui_px(height)) {
+                    // A tab, or a section marked from the Sections tab.
                 } else if self.scenes_shown() && y >= f64::from(strip.top) {
                     // A click on a scene plays from where it starts.
                     let start = self.scene_at(x, y).and_then(|index| Some(self.scenes_now()?.1[index]));
@@ -8057,8 +8077,13 @@ impl App {
             Strip { top: strip.top + ((1.0 - scenes_level) * f64::from(strip.height)) as i32, ..strip }
         });
         if let Some(strip) = scene_strip {
-            self.want_scenes();
-            self.draw_scenes(canvas, strip);
+            match self.strip_tab {
+                StripTab::Scenes => {
+                    self.want_scenes();
+                    self.draw_scenes(canvas, strip);
+                }
+                StripTab::Sections => self.draw_entries(canvas, strip),
+            }
         }
         let bottom = strip.or(scene_strip).map_or(height, |s| s.top) - margin;
 
@@ -8297,7 +8322,10 @@ impl App {
         // What sits on the right moves over likewise when the list is there.
         let width = width - self.right_inset();
         if let Some(strip) = &scene_strip {
-            self.draw_scene_labels(canvas, &mut text, strip, px);
+            if self.strip_tab == StripTab::Scenes {
+                self.draw_scene_labels(canvas, &mut text, strip, px);
+            }
+            self.draw_strip_words(canvas, &mut text, strip, px);
         }
         if let Some(strip) = &strip {
             self.draw_strip_lengths(canvas, &mut text, strip, px);
@@ -8384,7 +8412,10 @@ impl App {
             canvas.dissolve(0, band_top, width, height - band_top, behind, 256);
             // Its words went with it, and are written again.
             if let Some(strip) = &scene_strip {
-                self.draw_scene_labels(canvas, &mut text, strip, px);
+                if self.strip_tab == StripTab::Scenes {
+                    self.draw_scene_labels(canvas, &mut text, strip, px);
+                }
+                self.draw_strip_words(canvas, &mut text, strip, px);
             }
             if let Some(strip) = &strip {
                 self.draw_strip_lengths(canvas, &mut text, strip, px);
@@ -10334,6 +10365,7 @@ impl ApplicationHandler<Event> for App {
             Event::ConvertTrial(asked, format, trial) => self.convert_trial(asked, format, trial),
             Event::ConvertScore(asked, score) => self.convert_score(asked, score),
             Event::VideoProgress(words) => self.toast(words),
+            Event::EntryFrame(found) => self.entry_frame(found),
             Event::Video(which, signal) if which == self.active => self.video_signal(signal),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {
