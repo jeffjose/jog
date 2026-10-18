@@ -899,6 +899,8 @@ pub struct App {
     /// The files jumps were made from, for Ctrl+O, and those gone back
     /// from, for Ctrl+I; and whether one of those is being made now.
     jumps_back: Vec<usize>,
+    /// The file marked last, where a Shift+click run of marks starts.
+    mark_anchor: Option<usize>,
     jumps_forward: Vec<usize>,
     travelling: bool,
     /// The folder last typed to copy or move files into.
@@ -1581,6 +1583,7 @@ impl App {
             redo: Vec::new(),
             messages: Vec::new(),
             jumps_back: Vec::new(),
+            mark_anchor: None,
             jumps_forward: Vec::new(),
             travelling: false,
             last_folder: None,
@@ -3809,8 +3812,31 @@ impl App {
         } else {
             self.marks.insert(id);
             println!("[mark] {}", self.name_of(id));
+            self.mark_anchor = Some(id);
         }
         self.redraw();
+    }
+
+    /// Ctrl+click: marks the file at this place in the list, or takes its
+    /// mark away.
+    fn mark_one(&mut self, pos: usize) {
+        let Some(&id) = self.list.get(pos) else { return };
+        if !self.marks.remove(&id) {
+            self.marks.insert(id);
+            self.mark_anchor = Some(id);
+        }
+        self.redraw();
+    }
+
+    /// Shift+click: marks every file from the one marked last (or the one
+    /// on view) to this place in the list.
+    fn mark_range(&mut self, pos: usize) {
+        let from = self.mark_anchor.and_then(|id| self.list.iter().position(|&other| other == id)).unwrap_or(self.focus());
+        let (low, high) = (from.min(pos), from.max(pos).min(self.list.len().saturating_sub(1)));
+        let before = self.marks.len();
+        self.marks.extend(self.list[low..=high].iter().copied());
+        self.mark_anchor = self.list.get(pos).copied();
+        self.toast(format!("{} marked  ·  {} new", self.marks.len(), self.marks.len() - before));
     }
 
     /// Copies file names, or full paths, to the clipboard and the terminal.
@@ -7904,7 +7930,16 @@ impl App {
                         self.drag = Some(Drag::Pages);
                         self.drag_pages(x);
                     } else if self.point_cursor() {
-                        self.open_from_grid();
+                        // Shift marks the run from the last one marked to
+                        // here; Ctrl marks this one; a plain click opens it.
+                        let cursor = self.focus();
+                        if self.modifiers.shift_key() {
+                            self.mark_range(cursor);
+                        } else if self.modifiers.control_key() {
+                            self.mark_one(cursor);
+                        } else {
+                            self.open_from_grid();
+                        }
                     }
                 }
                 (MouseButton::Left, false) => self.drag = None,
@@ -7994,8 +8029,14 @@ impl App {
                     }
                     self.redraw();
                 } else if panel.is_some() {
-                    // A click on a name goes to that file.
-                    if let Some(pos) = self.list_row_at(x, y) {
+                    // A click on a name goes to that file; with Shift it
+                    // marks the run to it, with Ctrl it marks it.
+                    let row = self.list_row_at(x, y);
+                    if let Some(pos) = row.filter(|_| self.modifiers.shift_key()) {
+                        self.mark_range(pos);
+                    } else if let Some(pos) = row.filter(|_| self.modifiers.control_key()) {
+                        self.mark_one(pos);
+                    } else if let Some(pos) = row {
                         // The list and the strip stay as they are: the one
                         // clicked is not brought to the middle.
                         let first = self.list_panel().map(|panel| panel.first);
