@@ -1151,6 +1151,8 @@ pub struct App {
     /// The shell commands run before, read when first wanted, and the one
     /// just typed into the find box, on its way to being run.
     shell_history: Option<Vec<String>>,
+    /// The files viewed in this run, the latest first, for the find box.
+    visited: RefCell<Vec<usize>>,
     shell_typed: Option<String>,
     /// Whether the file list stands at the right of the window, and whether
     /// it is pinned there: the picture then has what is left beside it,
@@ -1688,6 +1690,7 @@ impl App {
             loupe: None,
             precise: options.precise_seeking,
             shell_history: None,
+            visited: RefCell::new(Vec::new()),
             shell_typed: None,
             list_right: options.list_right,
             list_pinned: options.list_pinned,
@@ -1915,6 +1918,15 @@ impl App {
     fn request(&self) {
         if self.monitor.0 == 0 || self.monitor.1 == 0 {
             return;
+        }
+        // The file on view goes first among those viewed lately.
+        if let Some(&id) = self.list.get(self.pos) {
+            let mut visited = self.visited.borrow_mut();
+            if visited.first() != Some(&id) {
+                visited.retain(|had| *had != id);
+                visited.insert(0, id);
+                visited.truncate(50);
+            }
         }
         let len = self.list.len() as i64;
         let wanted = Self::around(&self.list, self.pos, self.forward, self.loader.workers());
@@ -3600,6 +3612,10 @@ impl App {
                 if let Some(typed) = self.shell_typed.take() {
                     self.run_shell(&typed);
                 }
+            }
+            OpenRecent(id) => {
+                let path = self.files[id].clone();
+                self.show_path(&path);
             }
             RunShell(at) => {
                 if let Some(command) = self.shell_history.get_or_insert_with(history::load).get(at).cloned() {
@@ -6624,7 +6640,8 @@ impl App {
     fn palette_changed(&mut self) {
         let Some(palette) = &self.palette else { return };
         let typed = palette.field.string();
-        let recent = typed.is_empty().then(|| self.recent_commands()).filter(|recent| !recent.is_empty());
+        // Nothing typed: the files viewed lately, then the commands.
+        let recent = typed.is_empty().then(|| [self.recent_files(), self.recent_commands()].concat()).filter(|recent| !recent.is_empty());
         let (matches, narrowed, commands) = match typed.chars().next() {
             // Nothing typed yet: the commands run from here lately, the
             // latest first, to run again at once. A letter finds files.
@@ -6715,6 +6732,15 @@ impl App {
         }
         let all = self.commands_matching("");
         recent.iter().filter_map(|label| all.iter().find(|entry| entry.0 == *label).cloned()).collect()
+    }
+
+    /// The files viewed lately, the one on view aside, as the box lists
+    /// commands: a few, the latest first.
+    fn recent_files(&self) -> Vec<(String, &'static str, Command)> {
+        let current = self.list.get(self.pos).copied();
+        let visited = self.visited.borrow();
+        let others = visited.iter().filter(|id| Some(**id) != current && self.files[**id].exists());
+        others.take(5).map(|&id| (self.name_of(id), "", Command::OpenRecent(id))).collect()
     }
 
     /// Puts a command first among those run lately, and keeps the list.
@@ -6849,7 +6875,7 @@ impl App {
             }
             // A command from the menu's, remembered to be offered first
             // next time.
-            if matches!(palette.field.text.first(), None | Some('>')) {
+            if matches!(palette.field.text.first(), None | Some('>')) && !matches!(command, Command::OpenRecent(_)) {
                 self.remember_command(label);
             }
             self.run_next = Some(*command);

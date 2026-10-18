@@ -189,6 +189,8 @@ pub enum Command {
     /// of those run before, or the last one run once more.
     RunTyped,
     RunShell(usize),
+    /// Go back to a file seen lately, by its number: from the find box.
+    OpenRecent(usize),
     RepeatShell,
     /// In the grid, go back to the video that is playing.
     ShowPlaying,
@@ -492,6 +494,7 @@ pub fn command_icon(command: Command) -> &'static str {
         Reject => X_FILLED,
         OnlyKept | OnlyRejected | OnlyUndecided => LIST_FILTER,
         Shell | RunTyped | RunShell(_) | RepeatShell => TERMINAL,
+        OpenRecent(_) => CLOCK,
         ListSearch => SEARCH,
         ListPin => PIN,
         ListFlip => REPLACE,
