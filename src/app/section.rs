@@ -303,8 +303,10 @@ impl App {
         let Some((_, length)) = self.video_time() else { return Vec::new() };
         let path = self.files[id].clone();
         let mut entries: Vec<Entry> = self.kept_sections.get_or_insert_with(read_kept).get(&path).into_iter().flatten().map(|(a, b)| Entry { start: *a, end: *b, title: None }).collect();
-        // The file's chapters, read from the player once a video.
-        if !self.chapters.contains_key(&id) {
+        // The file's chapters, read from the player once a video, when it
+        // has the file open: each is a wait on it, not to be made a frame
+        // until then.
+        if video.showing && !self.chapters.contains_key(&id) {
             let found = self.player.as_ref().map(|player| {
                 let count = player.number("chapter-list/count").unwrap_or(0.0) as usize;
                 (0..count.min(200))
@@ -315,7 +317,7 @@ impl App {
                     })
                     .collect::<Vec<_>>()
             });
-            if let Some(found) = found.filter(|_| video.showing) {
+            if let Some(found) = found {
                 self.chapters.insert(id, found);
             }
         }

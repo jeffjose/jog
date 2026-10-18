@@ -2214,7 +2214,7 @@ impl App {
         }
         // The video being left, if this replaces one; and its frames kept.
         self.remember_position();
-        (self.back, self.back_due) = (None, None);
+        self.drop_back();
         // Paused on the video being left, the next is opened paused too, so
         // going back and forth across files to look does not set them
         // playing. Stopped at its end is no pause asked for: the next plays.

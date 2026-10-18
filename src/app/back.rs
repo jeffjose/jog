@@ -22,6 +22,8 @@ const SETTLE: Duration = Duration::from_millis(300);
 const BUDGET: usize = 1536 << 20;
 /// How long the back player is waited on for a frame before it is given up.
 const PATIENCE: Duration = Duration::from_secs(5);
+/// How long the back player is kept with nothing to do before it goes.
+const IDLE: Duration = Duration::from_secs(3);
 
 /// Frames, oldest first, each with its time.
 type Frames = VecDeque<(f64, Vec<u32>)>;
@@ -74,7 +76,15 @@ fn worker(jobs: mpsc::Receiver<Job>, proxy: EventLoopProxy<Event>) {
     player.set("untimed", "yes");
     let mut next = None;
     loop {
-        let Some(mut job) = next.take().or_else(|| jobs.recv().ok()) else { return };
+        // Nothing more asked for a while: the player goes, and its decoder
+        // and buffers with it, hundreds of megabytes for a 4K video. The
+        // next pause starts another, which is not seen: it fetches while
+        // the video stands still.
+        let Some(mut job) = next.take().or_else(|| jobs.recv_timeout(IDLE).ok()) else {
+            drop(player);
+            trim();
+            return;
+        };
         while let Ok(later) = jobs.try_recv() {
             job = later;
         }
@@ -129,7 +139,31 @@ fn worker(jobs: mpsc::Receiver<Job>, proxy: EventLoopProxy<Event>) {
     }
 }
 
+/// Gives memory freed back to the system. Each 4K frame is just under the
+/// size glibc maps on its own, so once a few have come and gone they come
+/// from its pools, and freed they stay with the process: over a gigabyte,
+/// after a pause on a 4K video.
+fn trim() {
+    // SAFETY: malloc_trim takes a plain number and only walks the heap.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 impl App {
+    /// Lets the frames before a pause go, and the memory they took, on
+    /// another thread: freeing and trimming a gigabyte takes time that
+    /// playing again should not wait for.
+    pub(super) fn drop_back(&mut self) {
+        self.back_due = None;
+        if let Some(back) = self.back.take() {
+            std::thread::spawn(move || {
+                drop(back);
+                trim();
+            });
+        }
+    }
+
     /// After the main player has said what it has to say: once paused a
     /// moment, the frames before are to be fetched; playing, they are of
     /// no more use.
@@ -138,7 +172,7 @@ impl App {
         let Some(video) = self.video.as_ref().filter(|video| video.showing) else { return };
         if player.flag("pause") != Some(true) {
             if self.back.as_ref().is_some_and(|back| back.shown.is_none()) {
-                self.back = None;
+                self.drop_back();
             }
             self.back_due = None;
             return;
@@ -177,24 +211,43 @@ impl App {
         if self.options.debug {
             eprintln!("jog: back: fetching {:.3}-{anchor:.3} at {}x{}, {most} frames at most", (anchor - SPAN).max(0.0), size.0, size.1);
         }
-        let job = Job { ticket, path: self.files[video.id].clone(), anchor, size, view: view.clone(), sid, half_frame, most };
+        let id = video.id;
+        let job = Job { ticket, path: self.files[id].clone(), anchor, size, view: view.clone(), sid, half_frame, most };
         let proxy = self.proxy.clone();
-        let jobs = self.back_jobs.get_or_insert_with(|| {
+        // To the worker there is, or, it having gone for want of work, to a
+        // new one.
+        let start = |proxy: EventLoopProxy<Event>| {
             let (send, receive) = mpsc::channel();
             std::thread::Builder::new().name("back".into()).spawn(move || worker(receive, proxy)).ok();
             send
-        });
-        if jobs.send(job).is_err() {
-            self.back_jobs = None;
-            return;
+        };
+        let job = match &self.back_jobs {
+            Some(jobs) => jobs.send(job).err().map(|mpsc::SendError(job)| job),
+            None => Some(job),
+        };
+        if let Some(job) = job {
+            let jobs = start(proxy);
+            if jobs.send(job).is_err() {
+                return;
+            }
+            self.back_jobs = Some(jobs);
         }
-        self.back = Some(BackFrames { ticket, id: video.id, anchor, size, view, frames: VecDeque::new(), filling: true, shown: None, pending: 0, half_frame });
+        // The frames of a pause before this one go, off this thread.
+        self.drop_back();
+        self.back = Some(BackFrames { ticket, id, anchor, size, view, frames: VecDeque::new(), filling: true, shown: None, pending: 0, half_frame });
     }
 
     /// The frames before the pause are all there; the steps asked for
     /// meanwhile are taken.
     pub(super) fn back_frames(&mut self, ticket: u64, frames: Frames, took: Duration) {
-        let Some(back) = self.back.as_mut().filter(|back| back.ticket == ticket) else { return };
+        let Some(back) = self.back.as_mut().filter(|back| back.ticket == ticket) else {
+            // For a pause there is no more: let go of on another thread.
+            std::thread::spawn(move || {
+                drop(frames);
+                trim();
+            });
+            return;
+        };
         if self.options.debug {
             eprintln!("jog: back: {} frames kept, {:.3}-{:.3}, in {took:.1?}", frames.len(), frames.front().map_or(0.0, |f| f.0), frames.back().map_or(0.0, |f| f.0));
         }
