@@ -47,6 +47,7 @@ mod convert_panel;
 use convert_panel::{ConvertPanel, PanelSource};
 mod section;
 use section::{Edge, EntryFrames, Section, StripTab};
+mod back;
 use crate::view::{Layout, View, Zoom};
 use crate::x11;
 
@@ -222,6 +223,9 @@ pub enum Event {
     /// The same pair for the player that fetches seek-bar previews.
     Preview(Signal),
     PreviewPlayer(Result<Player, String>),
+    /// The frames before a pause, fetched for stepping back at once: whose
+    /// they are, and how long they took.
+    BackFrames(u64, VecDeque<(f64, Vec<u32>)>, Duration),
     /// File details read on another thread, for the info and EXIF overlays.
     Meta(usize, Meta),
     /// The font, loaded on another thread while the first image decodes.
@@ -1074,6 +1078,12 @@ pub struct App {
     /// A second, muted player that fetches the frames shown while the
     /// pointer is over the seek bar, the file it has open, and its picture.
     preview: Option<Player>,
+    /// The frames before a pause, when they are to be fetched, and the
+    /// thread that fetches them, with the number of the latest ask.
+    back: Option<back::BackFrames>,
+    back_due: Option<Instant>,
+    back_jobs: Option<mpsc::Sender<back::Job>>,
+    back_ticket: u64,
     preview_id: Option<usize>,
     preview_frame: Option<Frame>,
     /// Where along the seek bar the pointer is, from 0 to 1, while over it.
@@ -1617,6 +1627,10 @@ impl App {
             player_asked: false,
             video: None,
             preview: None,
+            back: None,
+            back_due: None,
+            back_jobs: None,
+            back_ticket: 0,
             preview_id: None,
             preview_frame: None,
             hover: None,
@@ -2188,8 +2202,9 @@ impl App {
         if self.player.is_none() {
             return;
         }
-        // The video being left, if this replaces one.
+        // The video being left, if this replaces one; and its frames kept.
         self.remember_position();
+        (self.back, self.back_due) = (None, None);
         // Paused on the video being left, the next is opened paused too, so
         // going back and forth across files to look does not set them
         // playing. Stopped at its end is no pause asked for: the next plays.
@@ -2737,6 +2752,14 @@ impl App {
     }
 
     fn video_action(&mut self, action: VideoAction) {
+        // A step among the frames kept from before the pause, at once; and
+        // anything else is from the frame on show, the main player put on
+        // it first.
+        match action {
+            VideoAction::Frame(forward) if self.back_step(forward) => return,
+            VideoAction::Frame(_) | VideoAction::Volume(_) => {}
+            _ => self.leave_back(),
+        }
         let (Some(player), Some(video)) = (&self.player, &mut self.video) else { return };
         // What pausing or playing turns it into: the player's own word for
         // it comes later, with its events.
@@ -2825,10 +2848,12 @@ impl App {
     fn video_time(&self) -> Option<(f64, f64)> {
         let (player, video) = (self.player.as_ref()?, self.video.as_ref()?);
         let length = player.number("duration").filter(|length| *length > 0.0)?;
-        // Straight after a seek mpv still reports where it was.
-        let position = match video.seeking {
-            Some((at, target)) if at.elapsed() < SEEK_SETTLE => target,
-            _ => player.number("time-pos")?,
+        // A frame kept from before a pause, on show: its own time. Straight
+        // after a seek mpv still reports where it was.
+        let position = match (self.back_shown(), video.seeking) {
+            (Some((at, _)), _) => at,
+            (None, Some((at, target))) if at.elapsed() < SEEK_SETTLE => target,
+            (None, _) => player.number("time-pos")?,
         };
         Some((position.clamp(0.0, length), length))
     }
@@ -4034,7 +4059,24 @@ impl App {
     /// is, in the folder set for frames, or the one files are copied to,
     /// or else beside the video.
     fn save_frame(&mut self) {
+        // A frame kept from before a pause is on show: the main player is
+        // put on it, and given a moment to get there, so that the frame
+        // saved is that one, at the video's own size.
+        let kept_at = self.back_shown().map(|(at, _)| at);
+        if let Some(at) = kept_at {
+            self.leave_back();
+            let asked = Instant::now();
+            while let Some(player) = self.player.as_ref().filter(|_| asked.elapsed() < Duration::from_secs(3)) {
+                if player.number_now("time-pos").is_some_and(|now| (now - at).abs() < 0.008) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        // Named for the frame it is: the one kept, by its own time, the
+        // player's word for where it is lagging until its events are read.
         let Some((position, _)) = self.video_time() else { return };
+        let position = kept_at.unwrap_or(position);
         let path = self.path().to_path_buf();
         let stem = path.file_stem().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
         let whole = position as u64;
@@ -7948,6 +7990,18 @@ impl App {
             }
         }
         let playing = self.grid.is_none() && self.video.as_ref().is_some_and(|video| video.showing);
+        // A frame kept from before a pause, stepped back to: drawn as it
+        // was kept, at this very size, in place of the main player's.
+        if playing {
+            let len = window.0 as usize * window.1 as usize;
+            if let Some((_, kept)) = self.back_shown().filter(|(_, kept)| kept.len() == len) {
+                ui::copy_into(pixels, kept);
+                self.video_kept.set(None);
+                self.repainted.set(true);
+                self.scene_live = false;
+                return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
+            }
+        }
         let player = self.player.as_ref().filter(|_| playing);
         let started = Instant::now();
         if let Some(player) = player {
@@ -10445,7 +10499,11 @@ impl ApplicationHandler<Event> for App {
             Event::ConvertScore(asked, score) => self.convert_score(asked, score),
             Event::VideoProgress(words) => self.toast(words),
             Event::EntryFrame(found) => self.entry_frame(found),
-            Event::Video(which, signal) if which == self.active => self.video_signal(signal),
+            Event::Video(which, signal) if which == self.active => {
+                self.video_signal(signal);
+                self.tend_back();
+            }
+            Event::BackFrames(ticket, frames, took) => self.back_frames(ticket, frames, took),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {
                 self.spare = spare.ok().map(|player| Spare { player, id: None, from: 0.0 });
@@ -10674,7 +10732,11 @@ impl ApplicationHandler<Event> for App {
             self.redraw();
         }
         let toast_leaves = toast_leaves.filter(|at| *at > now);
-        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due];
+        // A pause held long enough: the frames before it are fetched.
+        if self.back_due.is_some_and(|due| due <= now) {
+            self.fill_back();
+        }
+        let deadlines = [self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due, self.back_due];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

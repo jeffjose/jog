@@ -463,6 +463,12 @@ impl Player {
                 _ => None,
             };
         }
+        self.number_now(property)
+    }
+
+    /// A number asked of the player now, not as it was last told of: for
+    /// waiting on it, when the events that would tell are not being read.
+    pub fn number_now(&self, property: &str) -> Option<f64> {
         let mut value: c_double = 0.0;
         let data = (&mut value as *mut c_double).cast();
         let asked = Instant::now();
