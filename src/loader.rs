@@ -331,7 +331,7 @@ impl Loader {
     /// Replaces what is wanted. What was decoded stays cached, within a
     /// memory budget, so coming back to an image is instant.
     pub fn request(&self, request: Request) {
-        let mut state = self.shared.state.lock().unwrap();
+        let mut state = self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.clock += 1;
         let clock = state.clock;
         for id in request.wanted.iter().chain(&request.thumbs) {
@@ -355,23 +355,23 @@ impl Loader {
 
     /// Sets the user's rotation for an image. Its frames are redone.
     pub fn set_transform(&self, id: usize, transform: Transform) {
-        self.shared.state.lock().unwrap().transforms.insert(id, transform);
+        self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).transforms.insert(id, transform);
         self.shared.wake.notify_all();
     }
 
     /// Records that a file now lives at `path`. What was decoded stays valid.
     pub fn set_path(&self, id: usize, path: PathBuf) {
-        self.shared.state.lock().unwrap().files[id] = path;
+        self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).files[id] = path;
     }
 
     /// Takes on another file, which gets the next id.
     pub fn add_file(&self, path: PathBuf) {
-        self.shared.state.lock().unwrap().files.push(path);
+        self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).files.push(path);
     }
 
     /// Forgets everything decoded for `id`, so it is read from disk again.
     pub fn invalidate(&self, id: usize) {
-        let mut state = self.shared.state.lock().unwrap();
+        let mut state = self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.fitted.remove(&id);
         state.thumbs.remove(&id);
         if state.full.as_ref().is_some_and(|(full_id, _)| *full_id == id) {
@@ -387,20 +387,20 @@ impl Loader {
     /// The fitted frame for `id`, the reason it failed, or `None` while it is
     /// still loading. A frame made for another screen size is still returned.
     pub fn fitted(&self, id: usize) -> Option<Result<Arc<Frame>, String>> {
-        let state = self.shared.state.lock().unwrap();
+        let state = self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let slot = state.fitted.get(&id)?;
         (slot.frame.is_err() || slot.transform == state.transform(id)).then(|| slot.frame.clone())
     }
 
     pub fn full(&self, id: usize) -> Option<Arc<Frame>> {
-        let state = self.shared.state.lock().unwrap();
+        let state = self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (full_id, slot) = state.full.as_ref()?;
         let usable = *full_id == id && slot.transform == state.transform(id) && slot.hdr == state.request.hdr;
         slot.frame.as_ref().ok().filter(|_| usable).cloned()
     }
 
     pub fn thumb(&self, id: usize) -> Option<Arc<Frame>> {
-        let state = self.shared.state.lock().unwrap();
+        let state = self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let slot = state.thumbs.get(&id)?;
         slot.frame.as_ref().ok().filter(|_| slot.transform == state.transform(id)).cloned()
     }
@@ -408,13 +408,13 @@ impl Loader {
     /// What the file's first bytes said it was when its frame was made,
     /// and whether it is an Ultra HDR photo; nothing until then.
     pub fn sniffed(&self, id: usize) -> Option<(Option<&'static str>, bool)> {
-        let state = self.shared.state.lock().unwrap();
+        let state = self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let slot = state.fitted.get(&id).filter(|slot| slot.frame.is_ok())?;
         Some((slot.made.format, slot.made.ultra_hdr))
     }
 
     pub fn stats(&self, id: usize) -> Stats {
-        let state = self.shared.state.lock().unwrap();
+        let state = self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let kept = |cache: &HashMap<usize, Slot>| (cache.len(), cache.values().map(Slot::bytes).sum());
         Stats {
             fitted: state.fitted.get(&id).map(|slot| slot.made),
@@ -461,10 +461,10 @@ fn give_way() {
 }
 
 fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allowed: bool) {
-    let mut state = shared.state.lock().unwrap();
+    let mut state = shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     loop {
         let Some(job) = state.next_job(thumbs_allowed) else {
-            state = shared.wake.wait(state).unwrap();
+            state = shared.wake.wait(state).unwrap_or_else(std::sync::PoisonError::into_inner);
             continue;
         };
         let (spec, work, keep) = state.plan(job, shared.background);
@@ -481,7 +481,10 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
             Work::FromSource(_) => "from decoded",
             Work::FromFrame(_) => "from frame",
         };
-        let (result, source, read, (format, ultra_hdr)) = perform(shared, (job, urgent), work, spec, keep);
+        // A decoder that panics on a broken file fails that file, not the
+        // thread: the rest go on decoding.
+        let performed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| perform(shared, (job, urgent), work, spec, keep)));
+        let (result, source, read, (format, ultra_hdr)) = performed.unwrap_or_else(|_| (Err("the decoder crashed on it".into()), None, started.elapsed(), (None, false)));
         let took = started.elapsed();
         let made = Made { how, read, fit: took.saturating_sub(read), at: Instant::now(), format, ultra_hdr };
         if shared.debug.load(Ordering::Relaxed) {
@@ -501,7 +504,7 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
         });
         let slot = Slot { frame, size: spec.target.unwrap_or_default(), enlarge: spec.enlarge, hdr: spec.hdr, transform: spec.transform, made, used: 0 };
 
-        state = shared.state.lock().unwrap();
+        state = shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.busy.remove(&job);
         if let Some(source) = source {
             state.source = Some((job.id(), source));
@@ -555,18 +558,18 @@ fn perform(shared: &Shared, job: (Job, bool), work: Work, spec: Spec, keep: bool
 /// done before they start, since on the pool they would all share the
 /// cores alike, and the one waited for would take as long as the lot.
 fn on_pool<R: Send>(shared: &Shared, (job, urgent): (Job, bool), work: impl FnOnce() -> R + Send) -> R {
-    let mut first = shared.urgent.lock().unwrap();
+    let mut first = shared.urgent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if urgent {
         *first = Some(job);
     } else {
         while first.is_some() {
-            first = shared.calm.wait(first).unwrap();
+            first = shared.calm.wait(first).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
     }
     drop(first);
     let result = decode_pool().install(work);
     if urgent {
-        let mut first = shared.urgent.lock().unwrap();
+        let mut first = shared.urgent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // Another may have taken over as the one on view meanwhile.
         if *first == Some(job) {
             *first = None;

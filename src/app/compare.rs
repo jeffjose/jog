@@ -104,7 +104,7 @@ impl App {
         // Decoded, as they are shown, on another thread; then scored.
         std::thread::spawn(move || {
             let open = |(path, transform): &(PathBuf, Transform)| -> Result<RgbImage, String> {
-                let image = crate::decode::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
+                let image = crate::decode::open_guarded(path).map_err(|error| format!("{}: {error}", path.display()))?;
                 Ok(convert::flat(&convert::turned(image, *transform)))
             };
             let images = open(&jobs[0]).and_then(|a| Ok([Arc::new(a), Arc::new(open(&jobs[1])?)]));

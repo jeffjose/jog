@@ -247,7 +247,7 @@ impl App {
         std::thread::spawn(move || {
             let loaded = (|| -> Result<PanelSource, String> {
                 let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
-                let image = convert::turned(crate::decode::open(&path).map_err(|error| error.to_string())?, transform);
+                let image = convert::turned(crate::decode::open_guarded(&path).map_err(|error| error.to_string())?, transform);
                 let flat = convert::flat(&image);
                 // A JPEG turned is encoded afresh, not repacked, so it is
                 // not offered as one.

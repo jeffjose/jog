@@ -47,7 +47,7 @@ impl Finder {
             let (signals, inbox) = mpsc::channel();
             let signals = Mutex::new(signals);
             let wake = move |signal| {
-                let _ = signals.lock().unwrap().send(signal);
+                let _ = signals.lock().unwrap_or_else(std::sync::PoisonError::into_inner).send(signal);
             };
             let player = Player::new(Role::Preview, wake).ok();
             for (id, path, starts) in queue {

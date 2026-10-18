@@ -300,6 +300,12 @@ fn ffmpeg_image(path: &Path) -> Result<Vec<u8>> {
 }
 
 /// The image at full resolution, upright, with any transparency intact.
+/// `open`, with a decoder that panics on a broken file making an error of
+/// it rather than taking the thread down.
+pub fn open_guarded(path: &Path) -> Result<DynamicImage> {
+    std::panic::catch_unwind(|| open(path)).unwrap_or_else(|_| Err("the decoder crashed on it".into()))
+}
+
 pub fn open(path: &Path) -> Result<DynamicImage> {
     let Decoded { mut image, orientation, .. } = decode_file(path, None, false)?;
     image.apply_orientation(orientation);

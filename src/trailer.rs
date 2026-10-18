@@ -82,7 +82,7 @@ impl Trailers {
         let latest = Arc::new(Mutex::new(None));
         let (signals, slot) = (Mutex::new(messages.clone()), latest.clone());
         std::thread::spawn(move || {
-            let wake = move |signal| drop(signals.lock().unwrap().send(Message::Player(signal)));
+            let wake = move |signal| drop(signals.lock().unwrap_or_else(std::sync::PoisonError::into_inner).send(Message::Player(signal)));
             // Without a player there are no trailers; the grid does without.
             let Ok(player) = Player::new(Role::Preview, wake) else { return };
             player.set("loop-file", "inf");
@@ -129,7 +129,7 @@ impl Trailers {
                             _ => {
                                 player.set("pause", "yes");
                                 player.command_later(&[b"stop"]);
-                                *slot.lock().unwrap() = None;
+                                *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                                 None
                             }
                         };
@@ -150,7 +150,7 @@ impl Trailers {
                         let mut pixels = vec![0; width as usize * height as usize];
                         if player.render(&mut pixels, width, height) {
                             let frame = Frame::still(width, height, native, pixels);
-                            let waiting = slot.lock().unwrap().replace((playing.id, frame)).is_some();
+                            let waiting = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).replace((playing.id, frame)).is_some();
                             if !waiting && !notify(Note::Frame) {
                                 return;
                             }
@@ -205,6 +205,6 @@ impl Trailers {
 
     /// The newest frame, if one has come since the last was taken.
     pub fn take(&self) -> Option<(usize, Frame)> {
-        self.latest.lock().unwrap().take()
+        self.latest.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
     }
 }

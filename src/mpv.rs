@@ -343,7 +343,7 @@ impl Player {
     /// not taken, on which the player waits in turn.
     fn known(&self, property: &str) -> Option<Option<Known>> {
         let index = watched(property).filter(|_| self.watching)?;
-        Some(self.known.lock().unwrap()[index].clone())
+        Some(self.known.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[index].clone())
     }
 
     pub fn command(&self, arguments: &[&[u8]]) {
@@ -551,7 +551,7 @@ impl Player {
                             self.apply_filter();
                         }
                     }
-                    let mut known = self.known.lock().unwrap();
+                    let mut known = self.known.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     // Told of again with the same value, as it is on a
                     // file being opened, nothing has changed.
                     if known[index] != value {

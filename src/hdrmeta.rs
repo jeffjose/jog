@@ -509,7 +509,7 @@ mod mp4 {
             } else if size == 0 {
                 size = end - at;
             }
-            if size < header || at + size > end {
+            if size < header || at.checked_add(size).is_none_or(|stop| stop > end) {
                 break;
             }
             items.push(Item { kind, start: at + header, end: at + size });
