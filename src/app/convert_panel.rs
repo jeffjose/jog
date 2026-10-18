@@ -440,7 +440,7 @@ impl App {
                 self.options.convert = settings;
                 self.toast(format!("Saved as default ({})", short_dir(&path)));
             }
-            Err(error) => self.toast(format!("Not saved: {error}")),
+            Err(error) => self.toast(format!("Not saved · {error}")),
         }
     }
 
@@ -603,7 +603,7 @@ impl App {
         let label_w = px as i32 * 8;
         let row_h = line + pad * 2 / 3;
         if knobs.is_empty() {
-            text.draw(canvas, inner, y + (row_h - small_line) / 2, small, DIM_TEXT_COLOR, "PNG keeps every pixel: there is nothing to set.");
+            text.draw(canvas, inner, y + (row_h - small_line) / 2, small, DIM_TEXT_COLOR, "PNG is lossless  ·  nothing to set");
             y += row_h;
         }
         for (index, knob) in knobs.iter().enumerate() {
@@ -706,7 +706,7 @@ impl App {
             canvas.round_fill(preview[0] + preview[2] - zw - pad / 2, preview[1] + pad / 2, zw, small_line + pad / 2, pad / 3, 0x000000, 170);
             text.draw(canvas, preview[0] + preview[2] - zw, preview[1] + pad / 2 + pad / 4, small, DIM_TEXT_COLOR, &zoom_words);
         } else {
-            let words = panel.failed.clone().map_or("Reading the picture…".to_string(), |error| format!("Cannot read it: {error}"));
+            let words = panel.failed.clone().map_or("Reading…".to_string(), |error| format!("Not readable · {error}"));
             text.draw(canvas, preview[0] + pad, preview[1] + pad, px, DIM_TEXT_COLOR, &words);
         }
         y = preview[1] + preview[3] + pad / 2;
@@ -735,7 +735,7 @@ impl App {
                     say(canvas, text, "trying the new settings…", accent_soft());
                 }
             }
-            Some(Err(error)) => say(canvas, text, &format!("Cannot encode it: {error}"), DANGER_COLOR),
+            Some(Err(error)) => say(canvas, text, &format!("Not encoded · {error}"), DANGER_COLOR),
             None if panel.source.is_some() => say(canvas, text, "Encoding…", DIM_TEXT_COLOR),
             None => {}
         }

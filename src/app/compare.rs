@@ -81,7 +81,7 @@ impl App {
         let ids = match marked.as_slice() {
             [a, b] => [*a, *b],
             [one] if *one != here => [*one, here],
-            _ => return self.toast("Mark one or two pictures (x) to compare"),
+            _ => return self.toast("Mark one or two pictures (x)"),
         };
         if ids.iter().any(|id| files::is_video(&self.files[*id])) {
             return self.toast("Pictures only");
@@ -149,8 +149,8 @@ impl App {
             // Where they differ, and back.
             Key::Character("d") => match compare.delta.is_some() {
                 true => compare.showing_delta = !compare.showing_delta,
-                false if compare.images.as_ref().is_some_and(|[a, b]| a.dimensions() != b.dimensions()) => return self.toast("Different sizes: no difference"),
-                false => return self.toast("Working out the difference…"),
+                false if compare.images.as_ref().is_some_and(|[a, b]| a.dimensions() != b.dimensions()) => return self.toast("Different sizes · no difference"),
+                false => return self.toast("Still working…"),
             },
             // The other way round: the second on the left.
             Key::Named(NamedKey::Tab) => {
@@ -238,7 +238,7 @@ impl App {
             }
             canvas.fill(split - 1, dest[1], 2, dest[3], TEXT_COLOR);
         } else {
-            let words = compare.failed.clone().map_or("Reading the two…".to_string(), |error| format!("Cannot read them: {error}"));
+            let words = compare.failed.clone().map_or("Reading…".to_string(), |error| format!("Not readable · {error}"));
             text.draw(canvas, place[0] + pad, place[1] + pad, px, DIM_TEXT_COLOR, &words);
         }
 
@@ -258,7 +258,7 @@ impl App {
         let verdict_words = match (&compare.score, dims) {
             _ if delta.is_some() => {
                 let delta = delta.map_or((0.0, 0), |delta| (delta.changed, delta.most));
-                format!("Difference  ·  {:.1}% of pixels changed  ·  most {}/255", delta.0 * 100.0, delta.1)
+                format!("Difference  ·  {:.1}% changed  ·  max {}/255", delta.0 * 100.0, delta.1)
             }
             (Some(Some(score)), _) => format!("SSIMULACRA2 {score:.1}  ·  {}  ·  {other} vs {original}", verdict(*score)),
             (_, [Some(a), Some(b)]) if a != b => "Different sizes: no score".to_string(),

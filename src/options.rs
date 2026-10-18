@@ -131,7 +131,7 @@ where they were left unless --no-positions is given.
     ("sections", "Sections", "
   A  B (with Shift)          mark the start / end of a section, which loops;
                              its ends drag on the seek bar; Esc clears it
-  Video menu                 keep the section, or save it: quick (from the
+  Section menu               keep the section, or save it: quick (from the
                              keyframe before), exact as MP4 or MKV, GIF,
                              animated WebP or AVIF
   T, then T again            the Sections tab: kept sections and the file's

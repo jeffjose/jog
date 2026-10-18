@@ -143,7 +143,7 @@ impl App {
             Edge::B => {
                 let a = section.a.unwrap_or(0.0);
                 if at <= a + SHORTEST {
-                    return self.toast(format!("End must be after {}", clock(a)));
+                    return self.toast(format!("End must come after {}", clock(a)));
                 }
                 section = Section { a: Some(a), b: Some(at.min(length)) };
             }
@@ -171,7 +171,7 @@ impl App {
         let Some(section) = self.section() else { return };
         match section.span() {
             Some((a, b)) => self.toast(format!("Looping {} – {}  ({:.1} s)", clock(a), clock(b), b - a)),
-            None => self.toast(format!("A at {}  ·  Shift+B to end", clock(section.a.unwrap_or(0.0)))),
+            None => self.toast(format!("A {}  ·  Shift+B ends it", clock(section.a.unwrap_or(0.0)))),
         }
     }
 
@@ -236,7 +236,7 @@ impl App {
     pub(super) fn save_section(&mut self, clip: crate::transcode::Clip) {
         let Some(video) = &self.video else { return self.toast("Sections are for videos") };
         let Some((a, b)) = self.section().and_then(|section| section.span()) else {
-            return self.toast("Mark a section first: Shift+A, Shift+B");
+            return self.toast("No section · Shift+A, Shift+B");
         };
         let path = self.files[video.id].clone();
         // Turned and mirrored as it is shown.
@@ -282,7 +282,7 @@ impl App {
     pub(super) fn keep_section(&mut self) {
         let Some(video) = &self.video else { return self.toast("Sections are for videos") };
         let Some((a, b)) = self.section().and_then(|section| section.span()) else {
-            return self.toast("Mark a section first: Shift+A, Shift+B");
+            return self.toast("No section · Shift+A, Shift+B");
         };
         let path = self.files[video.id].clone();
         let kept = self.kept_sections.get_or_insert_with(read_kept);
@@ -297,7 +297,7 @@ impl App {
         }
         let result = write_kept(kept);
         match (result, forgetting) {
-            (Err(error), _) => self.toast(format!("Not kept: {error}")),
+            (Err(error), _) => self.toast(format!("Not kept · {error}")),
             (Ok(()), true) => self.toast(format!("Removed {} – {}", clock(a), clock(b))),
             (Ok(()), false) => self.toast(format!("Kept {} – {}", clock(a), clock(b))),
         }
@@ -337,7 +337,7 @@ impl App {
         }
         match write_kept(kept) {
             Ok(()) => self.toast(format!("Removed {} – {}", clock(entry.start), clock(entry.end))),
-            Err(error) => self.toast(format!("Not removed: {error}")),
+            Err(error) => self.toast(format!("Not removed · {error}")),
         }
         self.entry_target = None;
         // The tab goes with the last of them.
@@ -367,7 +367,7 @@ impl App {
             found.name = Some(typed.trim().to_string()).filter(|name| !name.is_empty());
         }
         if let Err(error) = write_kept(kept) {
-            self.toast(format!("Not saved: {error}"));
+            self.toast(format!("Not saved · {error}"));
         }
         self.entry_target = None;
         self.redraw();

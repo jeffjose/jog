@@ -1867,7 +1867,7 @@ impl App {
     /// Goes to a file, by its path: one just made, say.
     fn show_path(&mut self, path: &Path) {
         let Some(id) = self.files.iter().position(|file| file == path) else {
-            return self.toast(format!("{} is not in the list", path.display()));
+            return self.toast(format!("Not in the list · {}", path.display()));
         };
         // A kept search that leaves it out gives way.
         if !self.list.contains(&id) && self.filter.is_some() {
@@ -2295,7 +2295,7 @@ impl App {
                     .collect();
                 let count = videos.len();
                 eprintln!("jog: leaving out {count} videos; playing them needs libmpv (the libmpv1 or libmpv2 package): {error}");
-                self.toast(format!("Cannot play videos, leaving out {count}: {error}"));
+                self.toast(format!("{count} videos left out · {error}"));
                 if count > 0 {
                     self.drop_from_list(&videos, event_loop);
                 }
@@ -2578,8 +2578,8 @@ impl App {
         let (repeat, once) = (commands::icons::REPEAT, commands::icons::REPEAT_1);
         self.toast(match self.looping {
             Looping::Off => format!("{repeat}  Loop off"),
-            Looping::File => format!("{once}  Looping this video"),
-            Looping::List => format!("{repeat}  Looping the whole list"),
+            Looping::File => format!("{once}  Loop this video"),
+            Looping::List => format!("{repeat}  Loop the list"),
         });
     }
 
@@ -2673,7 +2673,7 @@ impl App {
         let Some(player) = self.player.as_ref().filter(|_| self.video.is_some()) else { return };
         let tracks = tracks_of(player, "sub");
         if tracks.is_empty() {
-            return self.toast("This video has no subtitles");
+            return self.toast("No subtitles");
         }
         let showing = tracks.iter().position(|track| track.selected).filter(|_| self.subtitles);
         let next = match showing {
@@ -2696,11 +2696,11 @@ impl App {
         let Some(player) = self.player.as_ref().filter(|_| self.video.is_some()) else { return };
         let tracks = tracks_of(player, "audio");
         if tracks.len() < 2 {
-            return self.toast(if tracks.is_empty() { "This video has no sound" } else { "This video has one audio track" });
+            return self.toast(if tracks.is_empty() { "No sound" } else { "One audio track" });
         }
         let at = tracks.iter().position(|track| track.selected).map_or(0, |at| (at + 1) % tracks.len());
         player.set("aid", &tracks[at].id.to_string());
-        self.toast(format!("{}  {}   {} of {}", commands::icons::AUDIO_LINES, tracks[at].name, at + 1, tracks.len()));
+        self.toast(format!("{}  {}  ·  {} of {}", commands::icons::AUDIO_LINES, tracks[at].name, at + 1, tracks.len()));
     }
 
     /// Makes subtitles a step larger or smaller.
@@ -3250,12 +3250,12 @@ impl App {
             ZoomFill => self.set_zoom(Zoom::Fill),
             ToggleEnlarge => {
                 self.view.enlarge = !self.view.enlarge;
-                self.toast(if self.view.enlarge { "Small images fit the screen" } else { "Small images at actual size" });
+                self.toast(if self.view.enlarge { "Small images: fit" } else { "Small images: actual size" });
                 self.view_changed();
             }
             ToggleKeepView => {
                 self.keep_view = !self.keep_view;
-                self.toast(if self.keep_view { "Keeping zoom from one file to the next" } else { "Zoom starts afresh with each file" });
+                self.toast(if self.keep_view { "Zoom kept between files" } else { "Zoom resets per file" });
             }
             // With nothing to scroll sideways, Ctrl+Left and Ctrl+Right move
             // between files, as they do over a video.
@@ -3286,7 +3286,7 @@ impl App {
             }
             ToggleAntialias => {
                 self.antialias = !self.antialias;
-                self.toast(if self.antialias { "Smooth scaling on" } else { "Smooth scaling off" });
+                self.toast(if self.antialias { "Smooth scaling" } else { "Pixelated scaling" });
             }
             Render => {
                 self.settle_at = None;
@@ -3311,13 +3311,13 @@ impl App {
             }
             ToggleVerbose => {
                 self.options.verbose = !self.options.verbose;
-                self.toast(if self.options.verbose { "Printing files to the terminal" } else { "No longer printing files" });
+                self.toast(if self.options.verbose { "Verbose on" } else { "Verbose off" });
             }
             ToggleDebugLog => {
                 self.options.debug = !self.options.debug;
                 self.loader.set_debug(self.options.debug);
                 crate::mpv::DEBUG.store(self.options.debug, atomic::Ordering::Relaxed);
-                self.toast(if self.options.debug { "Printing timings to the terminal" } else { "No longer printing timings" });
+                self.toast(if self.options.debug { "Debug on" } else { "Debug off" });
             }
             ToggleExif => self.show_exif = !self.show_exif,
             ToggleActions => self.show_actions = !self.show_actions,
@@ -3341,7 +3341,7 @@ impl App {
                     self.toast("Slideshow paused");
                 } else {
                     self.slide_at = Some(Instant::now() + self.slide_delay);
-                    self.toast(format!("Slideshow, {}s per image", self.slide_delay.as_secs_f64()));
+                    self.toast(format!("Slideshow  ·  {}s", self.slide_delay.as_secs_f64()));
                 }
             }
             SizeToImage => self.size_window_to_image(),
@@ -3419,7 +3419,7 @@ impl App {
                 // one that is not such a photo is shown as it always is.
                 self.toast(match self.is_ultra_hdr(self.id()) {
                     true => format!("Ultra HDR: {}", self.hdr.name()),
-                    false => format!("Ultra HDR photos: {} (this one is not one)", self.hdr.name()),
+                    false => format!("Ultra HDR: {}  ·  not this one", self.hdr.name()),
                 });
             }
             CopyDebug | CopyDebugJson => {
@@ -3464,7 +3464,7 @@ impl App {
                 }
                 match std::fs::copy(self.path(), &copy) {
                     Ok(_) => self.toast(format!("Saved {copy}")),
-                    Err(error) => self.toast(format!("Could not save {copy}: {error}")),
+                    Err(error) => self.toast(format!("Not saved · {error}")),
                 }
             }
             SaveFilelist => {
@@ -3477,7 +3477,7 @@ impl App {
                 }
                 match std::fs::write(&name, lines) {
                     Ok(()) => self.toast(format!("Saved {name}")),
-                    Err(error) => self.toast(format!("Could not save {name}: {error}")),
+                    Err(error) => self.toast(format!("Not saved · {error}")),
                 }
             }
             Action(slot) => self.run_action(slot),
@@ -3487,7 +3487,7 @@ impl App {
             Workspace(to) => self.switch_space(to),
             WorkspaceKey(key) => match self.spaces.iter().position(|space| space.key == Some(key)) {
                 Some(to) => self.switch_space(to),
-                None => self.toast(format!("No workspace is on Ctrl+{key}")),
+                None => self.toast(format!("Nothing on Ctrl+{key}")),
             },
             HomeWorkspace => self.switch_space(self.home),
             NextWorkspace => self.switch_space((self.space + 1) % self.spaces.len()),
@@ -3514,7 +3514,7 @@ impl App {
             }
             MarkAll => {
                 self.marks = self.list.iter().copied().collect();
-                self.toast(format!("Marked all {}", self.marks.len()));
+                self.toast(format!("{} marked", self.marks.len()));
             }
             InvertMarks => {
                 self.marks = self.list.iter().copied().filter(|id| !self.marks.contains(id)).collect();
@@ -3523,7 +3523,7 @@ impl App {
             ClearMarks => {
                 let count = self.marks.len();
                 self.marks.clear();
-                self.toast(format!("Cleared {count} marks"));
+                self.toast(format!("{count} unmarked"));
             }
             CopyName => self.copy_text(false),
             CopyViewedName | CopyViewedPath | CopyViewedSize => {
@@ -3576,7 +3576,7 @@ impl App {
             CycleLoop => self.cycle_loop(),
             TogglePrecise => {
                 self.precise = !self.precise;
-                self.toast(if self.precise { "Seeking to the exact moment" } else { "Seeking to the nearest keyframe, which is quicker" });
+                self.toast(if self.precise { "Precise seeking" } else { "Keyframe seeking" });
             }
             ToggleScenes => self.cycle_strip(),
             CycleSubtitles => self.cycle_subtitles(),
@@ -3591,7 +3591,7 @@ impl App {
                 self.strip_used = true;
                 self.request();
                 self.apply_video_view();
-                self.toast(if self.triage_on { "Triage: Space keeps, x rejects; nothing is done to the files" } else { "Triage left: what was decided is kept" });
+                self.toast(if self.triage_on { "Triage  ·  Space keeps  ·  x rejects" } else { "Triage off  ·  decisions kept" });
             }
             Keep => self.decide(Verdict::Kept),
             Reject => self.decide(Verdict::Rejected),
@@ -3627,7 +3627,7 @@ impl App {
             }
             RepeatShell => match self.shell_history.get_or_insert_with(history::load).first().cloned() {
                 Some(command) => self.run_shell(&command),
-                None => self.toast("No command has been run yet: ! is for typing one"),
+                None => self.toast("No command yet  ·  ! to type one"),
             },
             ShowAllHere => self.clear_filter(true),
             Quit => self.leave(event_loop),
@@ -3640,7 +3640,7 @@ impl App {
             // Enter and the digits are spare keys until actions are set
             // for them; only then is an unset one worth a word.
             if self.options.actions.iter().any(Option::is_some) {
-                self.toast(format!("Nothing is set for key {slot}"));
+                self.toast(format!("Nothing on {slot}"));
             }
             return;
         };
@@ -3655,7 +3655,7 @@ impl App {
                 std::thread::spawn(move || child.wait());
                 self.toast(format!("Action {slot}: {command}"));
             }
-            Err(error) => self.toast(format!("Action {slot} failed: {error}")),
+            Err(error) => self.toast(format!("Action {slot} failed · {error}")),
         }
     }
 
@@ -3772,7 +3772,7 @@ impl App {
             return;
         }
         if let Err(error) = std::fs::create_dir_all(&dir) {
-            self.toast(format!("Cannot use {}: {error}", dir.display()));
+            self.toast(format!("Not usable · {error}"));
             return;
         }
 
@@ -3986,7 +3986,7 @@ impl App {
                     self.toast(format!("Undone  ·  {}", self.name_of(id)));
                     self.refresh();
                 } else {
-                    self.toast("Could not undo the rename");
+                    self.toast("Not undone");
                 }
             }
         }
@@ -4009,7 +4009,7 @@ impl App {
         if self.dry(|_| paths.iter().map(|(path, _)| format!("convert to {}: {}", format.name(), path.display())).collect(), &format!("would convert {}", paths.len())) {
             return;
         }
-        self.toast(format!("Converting {} to {} ({})...", paths.len(), format.name(), settings.describe(format)));
+        self.toast(format!("Converting {} → {}  ·  {}…", paths.len(), format.name(), settings.describe(format)));
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let mut done = Converted { created: Vec::new(), failed: 0, what: format.name().to_string(), before: 0, after: 0, how: None, error: None, saving: false };
@@ -4054,7 +4054,7 @@ impl App {
         if self.dry(|_| paths.iter().map(|(path, _)| format!("convert to {what}: {}", path.display())).collect(), &format!("would convert {}", paths.len())) {
             return;
         }
-        self.toast(format!("Converting {} to {what}...", paths.len()));
+        self.toast(format!("Converting {} → {what}…", paths.len()));
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let total = paths.len();
@@ -4108,7 +4108,7 @@ impl App {
         // Nothing made: why, rather than a count of nothing.
         if done.created.is_empty() {
             let why = done.error.unwrap_or_else(|| "see the terminal".to_string());
-            return self.toast(format!("{}: {why}", if done.saving { "Not saved" } else { "Not converted" }));
+            return self.toast(format!("{} · {why}", if done.saving { "Not saved" } else { "Not converted" }));
         }
         // What was made joins the list beside what it was made from, and
         // the toast goes to it on a click.
@@ -4218,7 +4218,7 @@ impl App {
                         };
                         match folder {
                             Some(folder) => self.send_to(folder, moving, event_loop),
-                            None => self.toast(format!("There is no workspace named {}", &typed[1..])),
+                            None => self.toast(format!("No workspace @{}", &typed[1..])),
                         }
                     }
                 }
@@ -4291,7 +4291,7 @@ impl App {
         for line in lines(self) {
             println!("[dry run] {line}");
         }
-        self.toast(format!("Dry run: {summary}"));
+        self.toast(format!("Dry run · {summary}"));
         true
     }
 
@@ -4329,7 +4329,7 @@ impl App {
             return;
         }
         if let Err(error) = std::fs::create_dir_all(&dir) {
-            return self.toast(format!("Cannot use {}: {error}", dir.display()));
+            return self.toast(format!("Not usable · {error}"));
         }
         // The player writes it, and says nothing of how that went.
         let Some(player) = &self.player else { return };
@@ -4339,7 +4339,7 @@ impl App {
                 println!("[frame] {}", to.display());
                 self.toast(format!("{}  Saved {}", commands::icons::CAMERA, to.file_name().unwrap_or_default().to_string_lossy()));
             }
-            false => self.toast(format!("Could not save the frame to {}", to.display())),
+            false => self.toast(format!("Not saved · {}", to.display())),
         }
     }
 
@@ -4371,7 +4371,7 @@ impl App {
             self.toast(match to {
                 Some(Verdict::Kept) => format!("{}  Kept {name}", commands::icons::CHECK_FILLED),
                 Some(Verdict::Rejected) => format!("{}  Rejected {name}", commands::icons::X_FILLED),
-                None => format!("Undecided again: {name}"),
+                None => format!("Undecided  ·  {name}"),
             });
         }
         self.redraw();
@@ -4402,7 +4402,7 @@ impl App {
         let now = self.everything().len();
         self.toast(match now.cmp(&before) {
             Ordering::Greater => format!("{}  {} more files", commands::icons::REFRESH, now - before),
-            Ordering::Less => format!("{}  {} files fewer", commands::icons::REFRESH, before - now),
+            Ordering::Less => format!("{}  {} fewer files", commands::icons::REFRESH, before - now),
             Ordering::Equal => format!("{}  No files have come or gone", commands::icons::REFRESH),
         });
     }
@@ -4863,9 +4863,9 @@ impl App {
             _ => format!("{}…", text.chars().take(58).collect::<String>()),
         };
         self.toast(match (failed, ids.len()) {
-            (Some(error), _) => format!("Could not run it: {error}"),
+            (Some(error), _) => format!("Not run · {error}"),
             (None, 1) => format!("{}  {}", commands::icons::TERMINAL, short(template)),
-            (None, count) => format!("{}  On {count} files: {}", commands::icons::TERMINAL, short(template)),
+            (None, count) => format!("{}  {count} files  ·  {}", commands::icons::TERMINAL, short(template)),
         });
     }
 
@@ -5497,7 +5497,7 @@ impl App {
         }
         let total = self.total();
         self.narrow(typed, matches, picked);
-        self.toast(format!("Showing {} of {total} (Esc goes {})", self.list.len(), self.back_label()));
+        self.toast(format!("{} of {total}  ·  Esc {}", self.list.len(), self.back_label()));
     }
 
     /// Puts only `matches` in the list, in the order the list had them,
@@ -5583,14 +5583,14 @@ impl App {
             let (matches, narrowed) = self.matching(&typed);
             if narrowed && matches.contains(&picked) {
                 self.narrow(typed.clone(), matches, Some(picked));
-                return self.toast(format!("Back to \"{typed}\", at {} of {}", self.focus() + 1, self.list.len()));
+                return self.toast(format!("“{typed}”  ·  {} of {}", self.focus() + 1, self.list.len()));
             }
             self.filter_from.clear();
         }
         if self.options.verbose {
             eprintln!("jog: search cleared: all {} files, at {}", self.list.len(), self.pos + 1);
         }
-        self.toast(format!("Showing all files, at {} of {}", self.focus() + 1, self.list.len()));
+        self.toast(format!("All files  ·  {} of {}", self.focus() + 1, self.list.len()));
     }
 
     fn finish_rename(&mut self) {
@@ -5605,7 +5605,7 @@ impl App {
         // A path moves it as well: to another folder, made if it is not
         // there, under the name at the end.
         let Some(to) = ops::rename_target(&from, name).filter(|_| name != "." && name != "..") else {
-            self.toast("Not a usable file name");
+            self.toast("Not a usable name");
             return;
         };
         let here = from.parent().and_then(|dir| dir.canonicalize().ok());
@@ -5619,7 +5619,7 @@ impl App {
         }
         if let Some(dir) = to.parent().filter(|_| moved) {
             if let Err(error) = std::fs::create_dir_all(dir) {
-                return self.toast(format!("Cannot use {}: {error}", dir.display()));
+                return self.toast(format!("Not usable · {error}"));
             }
         }
         match ops::move_file(&from, &to) {
@@ -5633,7 +5633,7 @@ impl App {
                 self.toast_with(format!("{} {said}", if moved { "Moved to" } else { "Renamed to" }), vec![("Undo".into(), ToastLink::Undo)]);
                 self.refresh();
             }
-            Err(error) => self.toast(format!("Cannot rename to {said}: {error}")),
+            Err(error) => self.toast(format!("Not renamed · {error}")),
         }
     }
 
@@ -5735,7 +5735,7 @@ impl App {
     /// The `X` menu: what can be done with the marked images.
     fn open_mark_menu(&mut self) {
         let title = match self.marks.len() {
-            0 => format!("Nothing marked: applies to {}", self.name_of(self.list[self.focus()])),
+            0 => format!("Nothing marked  ·  {}", self.name_of(self.list[self.focus()])),
             1 => "1 marked image".to_string(),
             count => format!("{count} marked images"),
         };
@@ -6075,7 +6075,7 @@ impl App {
     /// left after that.
     fn switch_space(&mut self, to: usize) {
         let Some(name) = self.spaces.get(to).map(|space| space.name.clone()) else {
-            return self.toast(format!("There is no workspace {}", to + 1));
+            return self.toast(format!("No workspace {}", to + 1));
         };
         if to == self.space {
             return self.toast(format!("@{name}"));
@@ -6091,7 +6091,7 @@ impl App {
                 let listing = files::Listing { recursive: space.recursive, sort, reverse: space.reverse, filelist: space.filelist.clone(), ..files::Listing::default() };
                 let found = files::collect(&space.paths, &listing).files;
                 if found.is_empty() {
-                    return self.toast(format!("@{name} has nothing to show"));
+                    return self.toast(format!("@{name} is empty"));
                 }
                 // Files seen before, in whatever workspace, keep their ids.
                 let mut list = self.ids_for(found);
@@ -6146,7 +6146,7 @@ impl App {
         if self.watch.is_some() {
             self.set_watch(true);
         }
-        self.toast(format!("@{name}   {count} files"));
+        self.toast(format!("@{name}  ·  {count} files"));
         if self.options.verbose {
             eprintln!("jog: workspace @{name}: {count} files");
         }
@@ -6185,7 +6185,7 @@ impl App {
         }
         let here = &self.spaces[self.space];
         if !here.saved && query.is_empty() {
-            rows.push((format!("Save {} as a workspace...", here.name), "", Command::SaveWorkspace));
+            rows.push((format!("Save {} as workspace…", here.name), "", Command::SaveWorkspace));
         }
         rows
     }
@@ -6195,10 +6195,10 @@ impl App {
     fn ask_workspace_name(&mut self) {
         let here = &self.spaces[self.space];
         if here.saved {
-            return self.toast(format!("@{} is a workspace already", here.name));
+            return self.toast(format!("Already @{}", here.name));
         }
         if !matches!(here.paths.as_slice(), [only] if only.is_dir()) {
-            return self.toast("Only a single folder can be saved as a workspace");
+            return self.toast("Only one folder can be a workspace");
         }
         let text: Vec<char> = here.name.chars().collect();
         let id = self.list[self.focus()];
@@ -6213,13 +6213,13 @@ impl App {
             return;
         }
         if self.spaces.iter().any(|space| space.saved && space.name == name) {
-            return self.toast(format!("There is a workspace named {name} already"));
+            return self.toast(format!("@{name} exists"));
         }
         if self.dry(|_| vec![format!("add the workspace {name} to the config file")], "would save the workspace") {
             return;
         }
         let Some(folder) = self.spaces[self.space].paths.first().and_then(|path| path.canonicalize().ok()) else {
-            return self.toast("Cannot tell where this folder is");
+            return self.toast("Folder not found");
         };
         match crate::options::save_workspace(name, &folder) {
             Ok(file) => {
@@ -6228,9 +6228,9 @@ impl App {
                 // It takes the first digit that no other has.
                 let taken: Vec<usize> = self.spaces.iter().filter_map(|space| space.key).collect();
                 self.spaces[self.space].key = (1..=9).find(|key| !taken.contains(key));
-                self.toast(format!("Saved as @{name} in {}", short_dir(&file)));
+                self.toast(format!("Saved @{name}  ·  {}", short_dir(&file)));
             }
-            Err(error) => self.toast(format!("Could not save it: {error}")),
+            Err(error) => self.toast(format!("Not saved · {error}")),
         }
     }
 
@@ -6300,10 +6300,10 @@ impl App {
             return self.toast("This one is open");
         }
         let Some(id) = self.spaces.get(which).and_then(|space| space.spot.as_ref()).map(|spot| spot.id.clone()) else {
-            return self.toast("Only sessions can be forgotten here");
+            return self.toast("Not a session");
         };
         if let Err(error) = sessions::forget(&id) {
-            return self.toast(format!("Not forgotten: {error}"));
+            return self.toast(format!("Not forgotten · {error}"));
         }
         self.spaces.remove(which);
         if self.space > which {
@@ -6515,7 +6515,7 @@ impl App {
             let listed = files::relist(&self.options.paths, &self.options.listing);
             self.take_listing(listed, true);
         }
-        self.toast(if on { "Watching for new files" } else { "No longer watching" });
+        self.toast(if on { "Watching" } else { "Not watching" });
     }
 
     /// Brings the list up to date with `listed`, the files now in the
@@ -6545,7 +6545,7 @@ impl App {
         let gone = if gone.len() == total.len() && fresh.is_empty() { HashSet::new() } else { gone };
         if fresh.is_empty() && gone.is_empty() {
             if !watching {
-                self.toast("Refreshed: nothing new");
+                self.toast("Nothing new");
             }
             return;
         }
@@ -6634,7 +6634,7 @@ impl App {
             eprintln!("jog: refreshed: {}, {} files now", parts.join(", "), self.total());
         }
         if taking != Taking::Adopting {
-            self.toast(format!("{}: {}", if watching { "Watch" } else { "Refreshed" }, parts.join(", ")));
+            self.toast(format!("{}  ·  {}", if watching { "Watch" } else { "Refreshed" }, parts.join("  ·  ")));
         }
         self.request();
         self.refresh();
@@ -6933,7 +6933,7 @@ impl App {
                 _ => palette.field.string().chars().skip(1).collect(),
             };
             match ids.is_empty() {
-                true => self.toast("There are none of those to run it on"),
+                true => self.toast("None to run it on"),
                 false => self.run_shell_on(&template, ids, true),
             }
             return self.redraw();
@@ -7141,7 +7141,7 @@ impl App {
             }
         });
         let label = commands::SORT.iter().flatten().find(|item| item.command == Command::SortBy(sort)).map_or("", |item| item.label);
-        self.toast(format!("Sorted: {}{}", label.to_lowercase(), if reversed { ", reversed" } else { "" }));
+        self.toast(format!("Sorted  ·  {}{}", label.to_lowercase(), if reversed { ", reversed" } else { "" }));
     }
 
     fn grid_key(&mut self, key: Key<&str>, event_loop: &ActiveEventLoop) {
@@ -8537,7 +8537,7 @@ impl App {
         let mut top_left: Vec<Vec<(String, u32)>> = Vec::new();
         // Said all the while, so that nothing done is taken for done.
         if self.options.dry_run {
-            top_left.push(vec![("Dry run: nothing is changed, only said in the terminal".to_string(), MARK_COLOR)]);
+            top_left.push(vec![("Dry run  ·  nothing changes".to_string(), MARK_COLOR)]);
         }
         if let Some((typed, all)) = self.filter.as_ref().filter(|_| self.show_info) {
             let found = format!("{} {typed}", commands::icons::SEARCH);
@@ -8752,7 +8752,7 @@ impl App {
         }
         let toast: Vec<String> = self.toast.iter().map(|(message, _)| message.clone()).collect();
         let error: Vec<String> = match (&self.error, &self.shown) {
-            (Some(reason), None) if viewing => vec![format!("Cannot show {}", self.name()), reason.clone()],
+            (Some(reason), None) if viewing => vec![format!("Not shown · {}", self.name()), reason.clone()],
             _ => Vec::new(),
         };
 
@@ -8932,7 +8932,7 @@ impl App {
             let files = if count == 1 { self.name_of(prompt.id) } else { format!("{count} files") };
             let (icon, title, hint) = match prompt.kind {
                 PromptKind::Rename => (commands::icons::PENCIL, "Rename".to_string(), "Enter to rename  ·  a path moves it  ·  Tab completes"),
-                PromptKind::SaveWorkspace => (commands::icons::FOLDER_PLUS, "Save this folder as a workspace named".to_string(), "Enter to add it to the config file"),
+                PromptKind::SaveWorkspace => (commands::icons::FOLDER_PLUS, "Save as workspace".to_string(), "Enter to save to the config"),
                 PromptKind::SectionName { start, end } => (commands::icons::PENCIL, format!("Name {} – {}", clock(start), clock(end)), "Enter to save  ·  empty clears it"),
                 PromptKind::SendTo { moving: true } => (commands::icons::FOLDER_INPUT, format!("Move {files} to"), "Enter to move  ·  Tab completes"),
                 PromptKind::SendTo { moving: false } => (commands::icons::FOLDER_PLUS, format!("Copy {files} to"), "Enter to copy  ·  Tab completes"),
@@ -10632,7 +10632,7 @@ fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &str) {
     let width = columns.iter().map(|(keys, labels, _)| keys + gap + labels).sum::<i32>()
         + 2 * pad * (columns.len() as i32 - 1)
         + 2 * pad;
-    let (title, hint) = ("Keyboard shortcuts", "Type to search.  Esc closes this.  > in the find box lists every command.");
+    let (title, hint) = ("Keyboard shortcuts", "Type to search  ·  Esc to close  ·  > in Ctrl+K lists every command");
     let head = row * 2;
     let height = head + columns.iter().map(|c| c.2).max().unwrap_or(0) * row + row + 2 * pad;
     let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
