@@ -107,34 +107,17 @@ impl App {
         self.open_menu(commands::MARK_MENU, Some(title));
     }
 
-    /// Moves the target files to the trash.
+    /// Moves the target files to the trash, by gio. Like a delete, it is
+    /// not undone here.
     pub(super) fn trash(&mut self, event_loop: &ActiveEventLoop) {
         if self.dry(|app| app.targets().iter().map(|id| format!("move to trash: {}", app.files[*id].display())).collect(), "would move to trash") {
             return;
         }
-        self.trash_ids(self.targets(), false, event_loop);
-    }
-
-    /// Moves these files to the trash. Redo does too, without forgetting
-    /// what else can be redone.
-    pub(super) fn trash_ids(&mut self, ids: Vec<usize>, redoing: bool, event_loop: &ActiveEventLoop) {
-        let (mut removed, mut failed, mut undoable) = (Vec::new(), 0, Vec::new());
-        for id in ids {
+        let (mut removed, mut failed) = (Vec::new(), 0);
+        for id in self.targets() {
             let Some(pos) = self.list.iter().position(|&other| other == id) else { continue };
-            // Into the home trash, noted so that Undo can bring it back;
-            // from another filesystem, by gio, for good.
-            let done = match ops::trash(&self.files[id]) {
-                Ok(Some(trashed)) => {
-                    undoable.push((Moved { id, pos, from: self.files[id].clone(), to: trashed.file.clone() }, trashed));
-                    true
-                }
-                Ok(None) => std::process::Command::new("gio").arg("trash").arg("--").arg(&self.files[id]).status().is_ok_and(|s| s.success()),
-                Err(error) => {
-                    eprintln!("jog: cannot trash {}: {error}", self.files[id].display());
-                    false
-                }
-            };
-            if done {
+            let status = std::process::Command::new("gio").arg("trash").arg("--").arg(&self.files[id]).status();
+            if status.is_ok_and(|s| s.success()) {
                 println!("[trash] {}", self.files[id].display());
                 removed.push((id, pos));
             } else {
@@ -145,15 +128,7 @@ impl App {
         if failed > 0 {
             summary.push_str(&format!("  ·  {failed} failed"));
         }
-        if undoable.is_empty() {
-            self.toast(summary);
-        } else {
-            self.toast_with(summary, vec![("Undo".into(), ToastLink::Undo)]);
-            match redoing {
-                true => self.undo.push(Undo::Trashed(undoable)),
-                false => self.did(Undo::Trashed(undoable)),
-            }
-        }
+        self.toast(summary);
         if !removed.is_empty() {
             self.drop_from_list(&removed, event_loop);
         }

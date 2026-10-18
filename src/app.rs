@@ -277,19 +277,14 @@ enum Undo {
     Created(Vec<PathBuf>),
     Moved(Vec<Moved>),
     Renamed { id: usize, from: PathBuf, to: PathBuf },
-    /// Files put in the home trash, each with its place in the list.
-    Trashed(Vec<(Moved, ops::Trashed)>),
 }
 
-/// What Undo took back, as Redo does it again.
+/// What Undo took back, as Redo does it again. A delete, or files made
+/// and then undone, which are deleted, are not among them.
 enum Redo {
-    /// Files made and then undone, waiting in the trash.
-    Created(Vec<ops::Trashed>),
     /// Files moved, moved back: to be moved again.
     Moved(Vec<Moved>),
     Renamed { id: usize, from: PathBuf, to: PathBuf },
-    /// Files trashed, brought back: to be trashed again.
-    Trashed(Vec<usize>),
 }
 
 /// What a toast offers to be clicked: to undo what it tells of, or to go

@@ -270,24 +270,10 @@ impl App {
         match self.undo.pop() {
             None => self.toast("Nothing to undo"),
             Some(Undo::Created(paths)) => {
-                // Into the trash, where Redo finds them again; one on
-                // another filesystem is removed outright.
-                let (mut removed, mut kept) = (0, Vec::new());
+                // Deleted: there is nothing of them for Redo to bring back.
+                let removed = paths.iter().filter(|path| std::fs::remove_file(path).is_ok()).count();
                 for path in &paths {
-                    let gone = match ops::trash(path) {
-                        Ok(Some(trashed)) => {
-                            kept.push(trashed);
-                            true
-                        }
-                        _ => std::fs::remove_file(path).is_ok(),
-                    };
-                    if gone {
-                        println!("[undo] removed {}", path.display());
-                        removed += 1;
-                    }
-                }
-                if !kept.is_empty() {
-                    self.redo.push(Redo::Created(kept));
+                    println!("[undo] removed {}", path.display());
                 }
                 self.toast(format!("Undone  ·  {removed} removed"));
                 // Those the list had taken in leave it.
@@ -322,31 +308,6 @@ impl App {
                 self.request();
                 self.refresh();
             }
-            Some(Undo::Trashed(trashed)) => {
-                let mut back = Vec::new();
-                for (item, from_trash) in &trashed {
-                    match ops::untrash(from_trash) {
-                        Ok(()) => {
-                            println!("[undo] {} -> {}", from_trash.file.display(), item.from.display());
-                            self.put_back(item);
-                            back.push(item.id);
-                        }
-                        Err(error) => eprintln!("jog: cannot bring {} back: {error}", item.from.display()),
-                    }
-                }
-                // On the first one brought back.
-                if let Some(pos) = back.first().and_then(|id| self.list.iter().position(|other| other == id)) {
-                    self.pos = pos;
-                    self.error = None;
-                    self.reset_view();
-                }
-                self.toast(format!("Undone  ·  {} restored", back.len()));
-                if !back.is_empty() {
-                    self.redo.push(Redo::Trashed(back));
-                }
-                self.request();
-                self.refresh();
-            }
             Some(Undo::Renamed { id, from, to }) => {
                 if ops::move_file(&to, &from).is_ok() {
                     println!("[undo] {} -> {}", to.display(), from.display());
@@ -372,20 +333,6 @@ impl App {
     pub(super) fn redo(&mut self, event_loop: &ActiveEventLoop) {
         match self.redo.pop() {
             None => self.toast("Nothing to redo"),
-            Some(Redo::Created(trashed)) => {
-                let mut paths = Vec::new();
-                for trashed in &trashed {
-                    match ops::untrash(trashed) {
-                        Ok(()) => paths.push(trashed.from.clone()),
-                        Err(error) => eprintln!("jog: cannot bring {} back: {error}", trashed.from.display()),
-                    }
-                }
-                self.adopt_created(&paths);
-                self.toast(format!("Redone  ·  {} back", paths.len()));
-                if !paths.is_empty() {
-                    self.undo.push(Undo::Created(paths));
-                }
-            }
             Some(Redo::Moved(moved)) => {
                 let (mut gone, mut again) = (Vec::new(), Vec::new());
                 for item in moved {
@@ -413,7 +360,6 @@ impl App {
                     self.toast("Not redone");
                 }
             }
-            Some(Redo::Trashed(ids)) => self.trash_ids(ids, true, event_loop),
         }
     }
 
