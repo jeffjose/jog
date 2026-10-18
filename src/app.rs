@@ -853,7 +853,7 @@ struct Prompt {
 }
 
 /// What a box for typing into is for.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum PromptKind {
     /// A new name for file `id`.
     Rename,
@@ -4127,6 +4127,9 @@ impl App {
         let Some(prompt) = &mut self.prompt else { return };
         match key {
             Key::Named(NamedKey::Escape) => self.prompt = None,
+            // Tab finishes a folder's name, from what is typed before the
+            // cursor: as far as the folders it could be agree.
+            Key::Named(NamedKey::Tab) => self.complete_prompt(),
             Key::Named(NamedKey::Enter) => match prompt.kind {
                 PromptKind::Rename => self.finish_rename(),
                 PromptKind::SaveWorkspace => {
@@ -4154,6 +4157,64 @@ impl App {
             key => drop(prompt.field.key(key, self.modifiers)),
         }
         self.redraw();
+    }
+
+    /// Tab in a box for a path: finishes a folder's name from what is
+    /// typed before the cursor, as far as the folders it could be agree.
+    fn complete_prompt(&mut self) {
+        let Some(prompt) = &self.prompt else { return };
+        let base = match prompt.kind {
+            PromptKind::Rename => self.files[prompt.id].parent().map(Path::to_path_buf).unwrap_or_default(),
+            PromptKind::SendTo { .. } => PathBuf::new(),
+            PromptKind::SaveWorkspace => return,
+        };
+        let before: String = prompt.field.text[..prompt.field.cursor].iter().collect();
+        if before.starts_with('@') {
+            return;
+        }
+        let Some(done) = complete_folder(&base, &before) else { return self.toast("No folder by that start") };
+        let Some(prompt) = &mut self.prompt else { return };
+        let after = prompt.field.text.split_off(prompt.field.cursor);
+        prompt.field.cursor = done.chars().count();
+        prompt.field.text = done.chars().chain(after).collect();
+        prompt.field.anchor = None;
+    }
+
+    /// What Enter would do with what is typed so far, when it is more than
+    /// a new name: where a file would go, and whether that folder is to
+    /// be made or a file of that name is there.
+    fn prompt_hint(&self, prompt: &Prompt) -> Option<String> {
+        let typed = prompt.field.string();
+        let typed = typed.trim();
+        match prompt.kind {
+            PromptKind::Rename => {
+                let from = &self.files[prompt.id];
+                let to = ops::rename_target(from, typed)?;
+                let here = from.parent().and_then(|dir| dir.canonicalize().ok());
+                let dir = to.parent()?;
+                let name = to.file_name()?.to_string_lossy();
+                let there = to.exists() && to != from.canonicalize().unwrap_or_default();
+                let mut hint = match Some(dir) == here.as_deref() {
+                    true if !there => return None,
+                    true => String::new(),
+                    false => format!("Moves to {}/{name}", short_dir(dir)),
+                };
+                if !dir.exists() {
+                    hint.push_str(", a new folder");
+                }
+                if there {
+                    hint.push_str(&format!("{}{name} is already there, choose another name", if hint.is_empty() { "" } else { ", but " }));
+                    return Some(hint);
+                }
+                Some(format!("{hint}. Enter to go ahead"))
+            }
+            PromptKind::SendTo { .. } if !typed.is_empty() && !typed.starts_with('@') => {
+                let dir = crate::options::expand_home(typed);
+                let shown = short_dir(&dir.canonicalize().unwrap_or_else(|_| dir.clone()));
+                Some(if dir.is_dir() { format!("Into {shown}. Enter to go ahead") } else { format!("Into {shown}, a new folder. Enter to go ahead") })
+            }
+            _ => None,
+        }
     }
 
     /// With `--dry-run`, says what would have been done, a line for each
@@ -8744,12 +8805,14 @@ impl App {
             let count = self.targets().len();
             let files = if count == 1 { self.name_of(prompt.id) } else { format!("{count} files") };
             let (icon, title, hint) = match prompt.kind {
-                PromptKind::Rename => (commands::icons::PENCIL, "Rename".to_string(), "Enter to rename, a path to move it"),
+                PromptKind::Rename => (commands::icons::PENCIL, "Rename".to_string(), "Enter to rename, a path to move it, Tab to finish a folder"),
                 PromptKind::SaveWorkspace => (commands::icons::FOLDER_PLUS, "Save this folder as a workspace named".to_string(), "Enter to add it to the config file"),
                 PromptKind::SendTo { moving: true } => (commands::icons::FOLDER_INPUT, format!("Move {files} to"), "Enter to move, the folder is made if need be"),
                 PromptKind::SendTo { moving: false } => (commands::icons::FOLDER_PLUS, format!("Copy {files} to"), "Enter to copy, the folder is made if need be"),
             };
-            draw_prompt(canvas, &mut text, icon, &title, &prompt.field, hint, px);
+            // What Enter would do, as it is typed.
+            let hint = self.prompt_hint(prompt).unwrap_or_else(|| hint.to_string());
+            draw_prompt(canvas, &mut text, icon, &title, &prompt.field, &hint, px);
         }
         if self.convert_panel.is_some() {
             self.draw_convert_panel(canvas, &mut text, px);
@@ -9990,6 +10053,39 @@ fn short_error(path: &Path, error: &str) -> String {
     }
 }
 
+/// `typed` with the folder name it ends in finished, as far as the
+/// folders there that start so agree, and a `/` after it when only one
+/// does. A relative path is taken from `base`. None when no folder fits.
+fn complete_folder(base: &Path, typed: &str) -> Option<String> {
+    let (lead, start) = typed.rsplit_once('/').map_or(("", typed), |(lead, start)| (lead, start));
+    let lead = if typed.contains('/') { format!("{lead}/") } else { String::new() };
+    let dir = match lead.as_str() {
+        "" => base.to_path_buf(),
+        _ if lead.starts_with('/') || lead.starts_with('~') => crate::options::expand_home(&lead),
+        _ => base.join(&lead),
+    };
+    let dir = if dir.as_os_str().is_empty() { PathBuf::from(".") } else { dir };
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(start) && (start.starts_with('.') || !name.starts_with('.')))
+        .collect();
+    names.sort();
+    let first = names.first()?;
+    if names.len() == 1 {
+        return Some(format!("{lead}{first}/"));
+    }
+    // As far as they all agree.
+    let mut common = first.clone();
+    for name in &names[1..] {
+        let agree = common.chars().zip(name.chars()).take_while(|(a, b)| a == b).count();
+        common = common.chars().take(agree).collect();
+    }
+    Some(format!("{lead}{common}"))
+}
+
 fn short_dir(path: &Path) -> String {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let shown = match home.as_ref().and_then(|home| path.strip_prefix(home).ok()) {
@@ -10331,7 +10427,8 @@ fn draw_prompt(canvas: &mut Canvas, text: &mut Text, icon: &str, title: &str, fi
     let line_height = Text::line_height(px);
     let small = (px * 5 / 6).max(11);
     let heading = format!("{icon}  {title}");
-    let widest = text.width(&typed, px).max(text.width(&heading, px)).max(text.width(hint, small));
+    let hint = format!("{hint}   Esc to cancel");
+    let widest = text.width(&typed, px).max(text.width(&heading, px)).max(text.width(&hint, small));
     let width = (widest + 5 * pad).max(px as i32 * 32).min(canvas.width);
     let field_height = line_height + pad;
     let height = 2 * line_height + field_height + 7 * pad / 2;
@@ -10351,7 +10448,6 @@ fn draw_prompt(canvas: &mut Canvas, text: &mut Text, icon: &str, title: &str, fi
     let cursor = text_left + text.width(&before_cursor, px);
     canvas.fill(cursor, text_top, (px as i32 / 10).max(2), line_height, TEXT_COLOR);
 
-    let hint = format!("{hint}   Esc to cancel");
     text.draw(canvas, left + 3 * pad / 2, field_top + field_height + pad / 2, small, DIM_TEXT_COLOR, &hint);
 }
 
