@@ -24,6 +24,8 @@ const BUDGET: usize = 1536 << 20;
 const PATIENCE: Duration = Duration::from_secs(5);
 /// How long the back player is kept with nothing to do before it goes.
 const IDLE: Duration = Duration::from_secs(3);
+/// Said while a step back waits on the frames.
+const FETCHING: &str = "Fetching frames…";
 
 /// Frames, oldest first, each with its time.
 type Frames = VecDeque<(f64, Vec<u32>)>;
@@ -253,6 +255,10 @@ impl App {
         }
         (back.frames, back.filling) = (frames, false);
         let pending = std::mem::take(&mut back.pending);
+        // The word that they were being fetched goes with them.
+        if self.toast.as_ref().is_some_and(|(said, _)| said == FETCHING) {
+            self.toast = None;
+        }
         for _ in 0..pending.unsigned_abs() {
             if !self.back_step(pending > 0) {
                 break;
@@ -281,6 +287,7 @@ impl App {
                 back.pending = 0;
                 return false;
             }
+            self.toast(FETCHING);
             return true;
         }
         if back.frames.is_empty() {
