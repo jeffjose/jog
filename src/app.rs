@@ -3463,7 +3463,7 @@ impl App {
                     return;
                 }
                 match std::fs::copy(self.path(), &copy) {
-                    Ok(_) => self.toast(format!("Saved {copy}")),
+                    Ok(_) => self.made(PathBuf::from(&copy), format!("Saved {copy}")),
                     Err(error) => self.toast(format!("Not saved · {error}")),
                 }
             }
@@ -4144,6 +4144,14 @@ impl App {
         self.undo.push(Undo::Created(done.created));
     }
 
+    /// A file jog has just made, a frame or a copy: it joins the list, is
+    /// undone by Undo, and the toast that says so goes to it on a click.
+    fn made(&mut self, path: PathBuf, said: String) {
+        self.adopt_created(std::slice::from_ref(&path));
+        self.toast_with(said, vec![("Show".into(), ToastLink::Show(path.clone())), ("Undo".into(), ToastLink::Undo)]);
+        self.undo.push(Undo::Created(vec![path]));
+    }
+
     /// Files just made, by a convert or a saved section, put in the list
     /// right after the file each was made from: the one in the same folder
     /// whose name starts its name.
@@ -4337,7 +4345,8 @@ impl App {
         match to.exists() {
             true => {
                 println!("[frame] {}", to.display());
-                self.toast(format!("{}  Saved {}", commands::icons::CAMERA, to.file_name().unwrap_or_default().to_string_lossy()));
+                let said = format!("{}  {}", commands::icons::CAMERA, to.file_name().unwrap_or_default().to_string_lossy());
+                self.made(to, said);
             }
             false => self.toast(format!("Not saved · {}", to.display())),
         }
