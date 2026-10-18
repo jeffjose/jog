@@ -244,8 +244,9 @@ pub enum Event {
     Scenes(scenes::Found),
     /// Word from the thread playing the grid's trailer.
     Trailer(Note),
-    /// The files of a workspace not yet gone to, listed for the overview.
-    SpaceListed(usize, Vec<PathBuf>),
+    /// The files of a workspace not yet gone to, listed for the overview:
+    /// the workspace by the paths it is of, its place having maybe moved.
+    SpaceListed(Vec<PathBuf>, Vec<PathBuf>),
     /// What a video says about its HDR, read on another thread.
     HdrInfo(usize, Option<Arc<hdrmeta::Info>>),
 }
@@ -1529,10 +1530,10 @@ impl App {
         // be listed, and landed in where it was left, when it is gone to.
         if let Some((latest, others)) = options.sessions.split_first() {
             spaces[space].name = sessions::title(latest);
-            spaces[space].caption = Some(sessions::caption(latest));
+            spaces[space].caption = Some(sessions::caption(latest, options.all_sessions));
             spaces.extend(others.iter().map(|session| Space {
                 name: sessions::title(session),
-                caption: Some(sessions::caption(session)),
+                caption: Some(sessions::caption(session, options.all_sessions)),
                 paths: session.paths.clone(),
                 recursive: session.recursive,
                 sort: session.sort,
@@ -6269,7 +6270,8 @@ impl App {
             }
             let listing = files::Listing { recursive: space.recursive, sort: space.sort, reverse: space.reverse, filelist: space.filelist.clone(), ..files::Listing::default() };
             let (paths, proxy) = (space.paths.clone(), self.proxy.clone());
-            std::thread::spawn(move || drop(proxy.send_event(Event::SpaceListed(which, files::collect(&paths, &listing).files))));
+            let key = paths.clone();
+            std::thread::spawn(move || drop(proxy.send_event(Event::SpaceListed(key, files::collect(&paths, &listing).files))));
         }
         self.sync_video();
         self.request();
@@ -6289,6 +6291,31 @@ impl App {
         }
     }
 
+    /// Forgets a session in the overview, and takes its card away. The one
+    /// open stays: it would be kept again on quitting.
+    fn forget_session(&mut self, which: usize) {
+        if which == self.space {
+            return self.toast("This one is open");
+        }
+        let Some(id) = self.spaces.get(which).and_then(|space| space.spot.as_ref()).map(|spot| spot.id.clone()) else {
+            return self.toast("Only sessions can be forgotten here");
+        };
+        if let Err(error) = sessions::forget(&id) {
+            return self.toast(format!("Not forgotten: {error}"));
+        }
+        self.spaces.remove(which);
+        if self.space > which {
+            self.space -= 1;
+        }
+        if let Some(overview) = &mut self.overview {
+            overview.cursor = overview.cursor.min(self.spaces.len() - 1);
+            overview.tick = 0;
+        }
+        self.toast(format!("Forgot {id}"));
+        self.request();
+        self.redraw();
+    }
+
     /// Handles a key in the overview. Returns whether it was one of its.
     fn overview_key(&mut self, key: Key<&str>) -> bool {
         let columns = self.overview_layout().0;
@@ -6302,6 +6329,12 @@ impl App {
             Key::Named(NamedKey::Enter | NamedKey::Space) => {
                 let picked = overview.cursor;
                 self.leave_overview(Some(picked));
+                return true;
+            }
+            // Delete forgets the session picked out.
+            Key::Named(NamedKey::Delete | NamedKey::Backspace) => {
+                let picked = overview.cursor;
+                self.forget_session(picked);
                 return true;
             }
             // A digit goes straight to that workspace.
@@ -6432,7 +6465,10 @@ impl App {
             let about_left = left + (width - text.width(&about, px)) / 2;
             text.draw(canvas, about_left, name_top + line * 5 / 4, px, DIM_TEXT_COLOR, &about);
         }
-        let hint = "Arrows or the pointer to look, Enter or a click to open, Esc to close";
+        let hint = match what {
+            "Sessions" => "Enter to open  ·  Delete to forget  ·  Esc to close",
+            _ => "Enter to open  ·  Esc to close",
+        };
         let small = (px * 5 / 6).max(11);
         let hint_left = (canvas.width - text.width(hint, small)) / 2;
         text.draw(canvas, hint_left, canvas.height - Text::line_height(small) - pad, small, DIM_TEXT_COLOR, hint);
@@ -10912,7 +10948,8 @@ impl ApplicationHandler<Event> for App {
                 self.hdr_infos.insert(id, info);
                 self.redraw();
             }
-            Event::SpaceListed(which, found) => {
+            Event::SpaceListed(paths, found) => {
+                let Some(which) = self.spaces.iter().position(|space| space.paths == paths && space.kept.is_none()) else { return };
                 // For the overview: what an unvisited workspace holds.
                 let list = self.ids_for(found);
                 if which != self.space && self.spaces[which].kept.is_none() && !list.is_empty() {

@@ -218,11 +218,37 @@ pub fn title(session: &Session) -> String {
     names.join(", ")
 }
 
-/// Where a session was left, to go under its title: when, how far
-/// through, and the file.
-pub fn caption(session: &Session) -> String {
+/// Where a session was left, to go under its title: the folder it was of
+/// when sessions of any folder are shown, when, how far through, the
+/// file and its id.
+pub fn caption(session: &Session, folder: bool) -> String {
     let name = session.file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    format!("{}   {} of {}   {name}   {}", ago(session), session.pos + 1, session.total, session.id)
+    let told = format!("{}  ·  {} of {}  ·  {name}  ·  {}", ago(session), session.pos + 1, session.total, session.id);
+    if !folder {
+        return told;
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let shown = match home.as_ref().and_then(|home| session.cwd.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => session.cwd.display().to_string(),
+    };
+    // The last two folders say where well enough.
+    let parts: Vec<&str> = shown.split('/').filter(|part| !part.is_empty()).collect();
+    let shown = match parts.len() > 2 {
+        true => format!("…/{}", parts[parts.len() - 2..].join("/")),
+        false => shown,
+    };
+    format!("{shown}  ·  {told}")
+}
+
+/// Forgets the session with this id.
+pub fn forget(id: &str) -> std::io::Result<()> {
+    let Some(file) = file() else { return Ok(()) };
+    let text: String = load().into_iter().filter(|session| session.id != id).map(|session| render(&session) + "\n").collect();
+    let partial = file.with_extension("new");
+    std::fs::write(&partial, text)?;
+    std::fs::rename(&partial, &file)
 }
 
 #[cfg(test)]
@@ -258,7 +284,11 @@ mod tests {
 
     #[test]
     fn a_session_is_captioned_with_its_id() {
-        let told = caption(&session("/home/me", now()));
-        assert_eq!(told, "just now   23 of 300   a b.mp4   k3x9q2ab");
+        let told = caption(&session("/home/me", now()), false);
+        assert_eq!(told, "just now  ·  23 of 300  ·  a b.mp4  ·  k3x9q2ab");
+        let told = caption(&session("/srv/me", now()), true);
+        assert_eq!(told, "/srv/me  ·  just now  ·  23 of 300  ·  a b.mp4  ·  k3x9q2ab");
+        let told = caption(&session("/srv/a/b/c", now()), true);
+        assert!(told.starts_with("…/b/c  ·  "));
     }
 }
