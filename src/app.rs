@@ -57,6 +57,8 @@ const ZOOM_STEP: f64 = 1.25;
 const THUMB_RADIUS: i64 = 24;
 /// How long after the last zoom or pan step the image is redrawn smoothly.
 const SETTLE: Duration = Duration::from_millis(150);
+/// How often the session is kept while jog runs.
+const SESSION_EVERY: Duration = Duration::from_secs(60);
 /// Sources up to this many pixels are cheap enough to always scale smoothly.
 const SMOOTH_ALWAYS: usize = 12_000_000;
 /// Magnification of the source frame from which scaling stops being smoothed.
@@ -906,6 +908,9 @@ pub struct App {
     jumps_back: Vec<usize>,
     /// The file marked last, where a Shift+click run of marks starts.
     mark_anchor: Option<usize>,
+    /// When the session is next kept, so that a crash or a kill loses
+    /// little: every minute while jog runs.
+    session_due: Instant,
     jumps_forward: Vec<usize>,
     travelling: bool,
     /// The folder last typed to copy or move files into.
@@ -1591,6 +1596,7 @@ impl App {
             messages: Vec::new(),
             jumps_back: Vec::new(),
             mark_anchor: None,
+            session_due: Instant::now() + SESSION_EVERY,
             jumps_forward: Vec::new(),
             travelling: false,
             last_folder: None,
@@ -11533,8 +11539,17 @@ impl ApplicationHandler<Event> for App {
         if self.back_due.is_some_and(|due| due <= now) {
             self.fill_back();
         }
+        // The session kept now and then, not only on quitting; a
+        // remembered video position too.
+        if self.session_due <= now {
+            self.session_due = now + SESSION_EVERY;
+            if self.snapshot.is_none() && self.bench.is_none() {
+                self.remember_position();
+                self.save_session();
+            }
+        }
         let flicker_due = self.tend_flicker(now);
-        let deadlines = [flicker_due, self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due, self.back_due];
+        let deadlines = [Some(self.session_due), flicker_due, self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due, self.back_due];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
