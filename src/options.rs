@@ -94,6 +94,8 @@ Slideshow and actions:
                              several to choose from they are shown, to be
                              picked with the arrows or a click; each shows its id
       --continue             pick up the latest session of this folder, unasked
+      --all                  with --resume or --continue, the sessions of every
+                             folder, not only this one's; alone, --resume --all
       --resume ID            the session with that id, whichever folder it is
                              of; the start of an id will do when it is enough
                              to tell it by
@@ -331,6 +333,8 @@ pub struct Options {
     /// picked up was.
     pub session: bool,
     pub continue_latest: bool,
+    /// With --all: the sessions of every folder, not only this one's.
+    pub all_sessions: bool,
     pub sessions: Vec<crate::sessions::Session>,
     pub begin_at: Option<f64>,
     /// The id of the session picked up, which it keeps when kept again.
@@ -517,7 +521,7 @@ fn is_switch(name: &str) -> bool {
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "random",
         "newest", "oldest",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
-        "debug", "verbose", "watch", "positions", "no-positions", "resume", "continue", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
+        "debug", "verbose", "watch", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
     switches.contains(&name)
 }
@@ -585,6 +589,7 @@ fn parse_with(
         resume: true,
         session: false,
         continue_latest: false,
+        all_sessions: false,
         sessions: Vec::new(),
         begin_at: None,
         session_id: None,
@@ -796,6 +801,8 @@ fn apply(
         "no-positions" => options.resume = false,
         "resume" => options.session = true,
         "continue" => (options.session, options.continue_latest) = (true, true),
+        // Alone, it is --resume --all.
+        "all" => (options.session, options.all_sessions) = (true, true),
         "action" => options.actions[0] = Some(value()?),
         other => {
             let slot = other.strip_prefix("action").and_then(|n| n.parse::<usize>().ok());
@@ -1114,6 +1121,10 @@ mod tests {
         assert!(resumed.session && resumed.continue_latest);
         let resume = parse_args(&["--resume"]).unwrap();
         assert!(resume.session && !resume.continue_latest);
+        let everywhere = parse_args(&["--continue", "--all"]).unwrap();
+        assert!(everywhere.continue_latest && everywhere.all_sessions);
+        let alone = parse_args(&["--all"]).unwrap();
+        assert!(alone.session && alone.all_sessions && !alone.continue_latest);
         let latest = parse_args(&["--latest"]).unwrap();
         assert!(!latest.session, "a sort, not a session");
         assert_eq!(latest.listing.sort, Some(Sort::Newest));

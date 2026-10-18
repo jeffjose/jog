@@ -75,9 +75,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
         let named = by_id.flatten();
-        let found = named.clone().map_or_else(|| sessions::here(&cwd), |session| vec![session]);
+        // With --all, every folder's sessions, not only this one's.
+        let all = || if options.all_sessions { sessions::everywhere() } else { sessions::here(&cwd) };
+        let found = named.clone().map_or_else(all, |session| vec![session]);
         let Some(latest) = found.first() else {
-            eprintln!("jog: there is no session of this folder to resume");
+            match options.all_sessions {
+                true => eprintln!("jog: there is no session to resume"),
+                false => eprintln!("jog: there is no session of this folder to resume (--all for any folder's)"),
+            }
             return ExitCode::FAILURE;
         };
         // The latest is opened either way; with others to choose from,

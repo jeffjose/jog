@@ -113,6 +113,13 @@ fn load() -> Vec<Session> {
 }
 
 /// The sessions of jog started in `cwd`, the latest first.
+/// Every session kept, whichever folder it is of, the latest first.
+pub fn everywhere() -> Vec<Session> {
+    let mut found = load();
+    found.sort_by_key(|session| std::cmp::Reverse(session.when));
+    found
+}
+
 pub fn here(cwd: &Path) -> Vec<Session> {
     let mut found: Vec<Session> = load().into_iter().filter(|session| session.cwd == cwd).collect();
     found.sort_by_key(|session| std::cmp::Reverse(session.when));
