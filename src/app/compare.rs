@@ -9,8 +9,55 @@ use winit::keyboard::{Key, NamedKey};
 use super::convert_panel::{cut, draw_region, in_rect, shown_region, verdict, ZOOMS};
 use super::*;
 
+/// Where two pictures of a size differ: black where they agree, brighter
+/// the more they differ, scaled so that the larger differences show
+/// whatever their size. With how much of the picture differs at all, and
+/// by how much at most, out of 255.
+#[derive(Clone, Debug)]
+pub struct Delta {
+    pub image: Arc<RgbImage>,
+    pub changed: f64,
+    pub most: u8,
+}
+
+impl Delta {
+    /// The difference of two pictures of a size: of each pixel, the most
+    /// any of its channels differs.
+    fn of(a: &RgbImage, b: &RgbImage) -> Delta {
+        use rayon::prelude::*;
+        let (w, h) = a.dimensions();
+        let raw: Vec<u8> = a.as_raw().par_chunks(3).zip(b.as_raw().par_chunks(3)).map(|(p, q)| (0..3).map(|c| p[c].abs_diff(q[c])).max().unwrap_or(0)).collect();
+        let mut counts = [0u64; 256];
+        for value in &raw {
+            counts[*value as usize] += 1;
+        }
+        let total = raw.len().max(1) as u64;
+        // Differences of a step or two are noise in the encoding of most
+        // pictures; more than that is a change.
+        let changed = counts[3..].iter().sum::<u64>() as f64 / total as f64;
+        let most = counts.iter().rposition(|count| *count > 0).unwrap_or(0) as u8;
+        // The brightest is the 99.9th centile, so one stray pixel does not
+        // leave the rest too dark to see.
+        let mut seen = 0;
+        let top = (0..256).rev().find(|value| {
+            seen += counts[*value];
+            seen * 1000 > total
+        });
+        let top = top.unwrap_or(1).max(4) as u32;
+        let pixels: Vec<u8> = raw.par_iter().flat_map_iter(|value| {
+            let level = (u32::from(*value) * 255 / top).min(255) as u8;
+            [level; 3]
+        }).collect();
+        let image = RgbImage::from_raw(w, h, pixels).unwrap_or_else(|| RgbImage::new(w, h));
+        Delta { image: Arc::new(image), changed, most }
+    }
+}
+
 pub struct Compare {
     ticket: u64,
+    /// Showing where the two differ, rather than one beside the other.
+    showing_delta: bool,
+    delta: Option<Delta>,
     /// The two, the first on the left of the divider.
     ids: [usize; 2],
     images: Option<[Arc<RgbImage>; 2]>,
@@ -58,12 +105,16 @@ impl App {
             let both = images.as_ref().ok().cloned();
             let _ = proxy.send_event(Event::CompareLoaded(ticket, images));
             if let Some([a, b]) = both {
+                // Where they differ first, being quick; then the score.
+                if a.dimensions() == b.dimensions() {
+                    let _ = proxy.send_event(Event::CompareDelta(ticket, Delta::of(&a, &b)));
+                }
                 let (reference, other) = if first_original { (&a, &b) } else { (&b, &a) };
                 let score = (a.dimensions() == b.dimensions()).then(|| convert::score(reference, other)).flatten();
                 let _ = proxy.send_event(Event::CompareScore(ticket, score));
             }
         });
-        self.compare = Some(Compare { ticket, ids, images: None, failed: None, score: None, original, zoom: 0, center: (0.5, 0.5), place: [0; 4] });
+        self.compare = Some(Compare { ticket, showing_delta: false, delta: None, ids, images: None, failed: None, score: None, original, zoom: 0, center: (0.5, 0.5), place: [0; 4] });
         self.menu = None;
         self.redraw();
     }
@@ -84,10 +135,23 @@ impl App {
         }
     }
 
+    pub(super) fn compare_delta(&mut self, ticket: u64, delta: Delta) {
+        if let Some(compare) = self.compare.as_mut().filter(|compare| compare.ticket == ticket) {
+            compare.delta = Some(delta);
+            self.redraw();
+        }
+    }
+
     pub(super) fn compare_key(&mut self, key: Key<&str>) {
         let Some(compare) = &mut self.compare else { return };
         match key {
             Key::Named(NamedKey::Escape) | Key::Character("q") => self.compare = None,
+            // Where they differ, and back.
+            Key::Character("d") => match compare.delta.is_some() {
+                true => compare.showing_delta = !compare.showing_delta,
+                false if compare.images.as_ref().is_some_and(|[a, b]| a.dimensions() != b.dimensions()) => return self.toast("Different sizes: no difference"),
+                false => return self.toast("Working out the difference…"),
+            },
             // The other way round: the second on the left.
             Key::Named(NamedKey::Tab) => {
                 compare.ids.swap(0, 1);
@@ -147,7 +211,16 @@ impl App {
 
         // The two, the second from the divider on.
         let mut dims = [None, None];
-        if let Some(images) = &compare.images {
+        let delta = compare.delta.as_ref().filter(|_| compare.showing_delta);
+        if let (Some(images), Some(delta)) = (&compare.images, delta) {
+            // Where they differ, bright on black, over the whole.
+            dims = [Some(images[0].dimensions()), Some(images[1].dimensions())];
+            let size = (f64::from(delta.image.width()), f64::from(delta.image.height()));
+            let (shown, dest) = shown_region(size, place, compare.zoom, compare.center);
+            if let Some(frame) = cut(&delta.image, shown) {
+                draw_region(canvas, &frame, dest, compare.zoom);
+            }
+        } else if let Some(images) = &compare.images {
             dims = [Some(images[0].dimensions()), Some(images[1].dimensions())];
             let size = (f64::from(images[0].width()), f64::from(images[0].height()));
             let (shown, dest) = shown_region(size, place, compare.zoom, compare.center);
@@ -183,7 +256,11 @@ impl App {
         let y = place[1] + place[3] + pad;
         let (original, other) = if compare.original == compare.ids[0] { (&names[0], &names[1]) } else { (&names[1], &names[0]) };
         let verdict_words = match (&compare.score, dims) {
-            (Some(Some(score)), _) => format!("SSIMULACRA2 {score:.1}, {}: {other} against {original}, the larger file", verdict(*score)),
+            _ if delta.is_some() => {
+                let delta = delta.map_or((0.0, 0), |delta| (delta.changed, delta.most));
+                format!("Difference  ·  {:.1}% of pixels changed  ·  most {}/255", delta.0 * 100.0, delta.1)
+            }
+            (Some(Some(score)), _) => format!("SSIMULACRA2 {score:.1}  ·  {}  ·  {other} vs {original}", verdict(*score)),
             (_, [Some(a), Some(b)]) if a != b => "Different sizes: no score".to_string(),
             (Some(None), _) => "No score".to_string(),
             (None, _) if compare.images.is_some() => "Scoring…".to_string(),
@@ -194,7 +271,8 @@ impl App {
             0 => "whole picture".to_string(),
             z => format!("{}%", z * 100),
         };
-        let keys = format!("{zoom_words}   click to look there   wheel or z zoom   Tab swap   Esc close");
+        let difference = if compare.showing_delta { "d side by side" } else { "d difference" };
+        let keys = format!("{zoom_words}  ·  click to look closer  ·  z zoom  ·  {difference}  ·  Tab swap  ·  Esc close");
         text.draw(canvas, pad, y + line, small, DIM_TEXT_COLOR, &keys);
         if let Some(compare) = &mut self.compare {
             compare.place = place;

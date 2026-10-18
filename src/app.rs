@@ -230,6 +230,8 @@ pub enum Event {
     /// Two pictures to compare, decoded; and how near the second is.
     CompareLoaded(u64, Result<[Arc<image::RgbImage>; 2], String>),
     CompareScore(u64, Option<f64>),
+    /// Where two pictures of a size differ, as a picture of its own.
+    CompareDelta(u64, compare::Delta),
     /// File details read on another thread, for the info and EXIF overlays.
     Meta(usize, Meta),
     /// The font, loaded on another thread while the first image decodes.
@@ -10927,6 +10929,7 @@ impl ApplicationHandler<Event> for App {
             Event::BackFrames(ticket, frames, took) => self.back_frames(ticket, frames, took),
             Event::CompareLoaded(ticket, images) => self.compare_loaded(ticket, images),
             Event::CompareScore(ticket, score) => self.compare_score(ticket, score),
+            Event::CompareDelta(ticket, delta) => self.compare_delta(ticket, delta),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {
                 self.spare = spare.ok().map(|player| Spare { player, id: None, from: 0.0 });
