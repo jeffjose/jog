@@ -45,6 +45,8 @@ use crate::ui::{self, Canvas, Text};
 
 mod convert_panel;
 use convert_panel::{ConvertPanel, PanelSource};
+mod section;
+use section::{Edge, Section};
 use crate::view::{Layout, View, Zoom};
 use crate::x11;
 
@@ -1122,6 +1124,9 @@ pub struct App {
     triage_buttons: RefCell<Vec<(Command, [i32; 4])>>,
     /// The Convert panel, when it is up.
     convert_panel: Option<ConvertPanel>,
+    /// The section marked in each video, by file: still there when the
+    /// video is come back to.
+    sections: HashMap<usize, Section>,
     /// Which of them the pointer is over.
     triage_over: Option<usize>,
     list_search: Option<TextField>,
@@ -1191,6 +1196,8 @@ enum Drag {
     Pan,
     /// Dragging along the seek bar.
     Scrub,
+    /// Dragging an end of the section along the seek bar.
+    Section(Edge),
     Zoom { start_x: f64, start_scale: f64, anchor: (f64, f64), moved: bool },
     /// Dragging along the bar under the grid, through its pages.
     Pages,
@@ -1622,6 +1629,7 @@ impl App {
             verdicts: RefCell::new(HashMap::new()),
             triage_buttons: RefCell::new(Vec::new()),
             convert_panel: None,
+            sections: HashMap::new(),
             triage_over: None,
             list_search: None,
             list_cursor: None,
@@ -2600,6 +2608,9 @@ impl App {
         if let Some(player) = &self.player {
             player.set("loop-file", if self.looping == Looping::File { "inf" } else { "no" });
         }
+        // The section of this video, or none: a video gone on to does not
+        // loop the one before's.
+        self.apply_section_loop();
     }
 
     /// Handles the keys that mean something else while a video plays.
@@ -2608,6 +2619,10 @@ impl App {
         let modifiers = self.modifiers;
         if self.player.is_none() || modifiers.alt_key() {
             return false;
+        }
+        // Escape unmarks a section before it does anything else.
+        if key == Key::Named(NamedKey::Escape) && self.section().is_some() {
+            return self.clear_section();
         }
         // With the scenes up, the arrows go from one of them to the next.
         if self.scenes_shown() && !modifiers.control_key() && !modifiers.shift_key() {
@@ -3099,6 +3114,11 @@ impl App {
             RotateLeft => self.transform(Transform::CCW),
             Flip => self.transform(Transform::FLIP),
             Mirror => self.transform(Transform::MIRROR),
+            SectionStart => self.mark_edge(Edge::A),
+            SectionEnd => self.mark_edge(Edge::B),
+            SectionClear => {
+                self.clear_section();
+            }
             ToggleAntialias => {
                 self.antialias = !self.antialias;
                 self.toast(if self.antialias { "Smooth scaling on" } else { "Smooth scaling off" });
@@ -6998,6 +7018,11 @@ impl App {
                 self.request_preview(fraction);
                 self.seek_to(fraction, false);
             }
+            Some(Drag::Section(edge)) => {
+                let edge = *edge;
+                let bar = self.seek_bar();
+                self.drag_edge(edge, (x - f64::from(bar.x)) / f64::from(bar.width));
+            }
             // Over a video the bottom of the window belongs to the seek bar,
             // so the filmstrip does not also open there; `t` still pins it.
             None if self.video.is_some() => {
@@ -7166,6 +7191,9 @@ impl App {
                     self.execute(command, event_loop);
                 } else if bar.on_symbol(x, y) {
                     self.video_action(VideoAction::Pause);
+                } else if let Some(edge) = self.section_edge_at(&bar, x) {
+                    // An end of the section is taken hold of, to move it.
+                    self.drag = Some(Drag::Section(edge));
                 } else if bar.on_track(x) {
                     // Click to jump there; keep the button down to scrub.
                     self.seek_to(self.hover.unwrap_or(0.0), self.precise);
@@ -7267,8 +7295,10 @@ impl App {
             }
             (MouseButton::Left | MouseButton::Middle, false) => {
                 self.end_hold(false);
-                if let Some(Drag::Zoom { moved: false, .. }) = self.drag.take() {
-                    self.execute(Command::ZoomActual, event_loop);
+                match self.drag.take() {
+                    Some(Drag::Zoom { moved: false, .. }) => self.execute(Command::ZoomActual, event_loop),
+                    Some(Drag::Section(edge)) => self.drop_edge(edge),
+                    _ => {}
                 }
             }
             // On a row of the file list, the menu is of that file.
@@ -7430,6 +7460,12 @@ impl App {
                     if name == "Click" {
                         self.mouse_button(MouseButton::Left, true, event_loop);
                         self.mouse_button(MouseButton::Left, false, event_loop);
+                        continue;
+                    }
+                    // `{Press}` and `{Release}`, with moves between them,
+                    // drag.
+                    if name == "Press" || name == "Release" {
+                        self.mouse_button(MouseButton::Left, name == "Press", event_loop);
                         continue;
                     }
                     match name {
@@ -8144,6 +8180,7 @@ impl App {
                     canvas.fill(at - 1, top, 2, thickness, 0x000000);
                 }
             }
+            self.draw_section(canvas, &bar, top, thickness, length, &mut labels, px);
             let handle = unit * 5 / 4;
             canvas.pill(bar.x + done - handle / 2, bar.middle - handle / 2, handle, handle, TEXT_COLOR, 256, handle);
             let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));

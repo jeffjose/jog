@@ -203,6 +203,8 @@ where they were left unless --no-positions is given. While one is up:
   PgUp / PgDn                seek about 1 minute pointer at the bottom: seek bar with previews
   Shift+Left / Shift+Right   step one frame      Up / Down     volume (m mutes)
   b                          back to the start of the video
+  A  B (with Shift)          mark the start / end of a section, which loops;
+                             its ends drag on the seek bar; Esc clears it
   Space or the mouse button held down: twice the speed, until let go
   l                          loop: this video, then the whole list, then off
   T                          scenes of this video along the bottom: Left / Right
