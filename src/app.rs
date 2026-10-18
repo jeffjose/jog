@@ -861,6 +861,8 @@ enum PromptKind {
     SaveWorkspace,
     /// A folder to move the target files into, or to copy them into.
     SendTo { moving: bool },
+    /// A name for the kept section of the video on view with these ends.
+    SectionName { start: f64, end: f64 },
 }
 
 pub struct App {
@@ -1170,7 +1172,11 @@ pub struct App {
     /// they are wanted; each video's own chapters, read from the player;
     /// and the frames for the Sections tab's cells.
     strip_tab: StripTab,
-    kept_sections: Option<HashMap<PathBuf, Vec<(f64, f64)>>>,
+    kept_sections: Option<section::KeptSections>,
+    /// The first cell in view of a Sections tab too long for the window,
+    /// and the entry a right click there was on.
+    entry_first: usize,
+    entry_target: Option<usize>,
     chapters: HashMap<usize, Vec<(f64, String)>>,
     entry_frames: HashMap<usize, EntryFrames>,
     section_finder: Option<scenes::Finder>,
@@ -1691,6 +1697,8 @@ impl App {
             sections: HashMap::new(),
             strip_tab: StripTab::Scenes,
             kept_sections: None,
+            entry_first: 0,
+            entry_target: None,
             chapters: HashMap::new(),
             entry_frames: HashMap::new(),
             section_finder: None,
@@ -3251,6 +3259,8 @@ impl App {
             }
             SaveSection(clip) => self.save_section(clip),
             KeepSection => self.keep_section(),
+            RenameSection => self.ask_section_name(),
+            ForgetSection => self.forget_section(),
             ToggleAntialias => {
                 self.antialias = !self.antialias;
                 self.toast(if self.antialias { "Smooth scaling on" } else { "Smooth scaling off" });
@@ -4146,6 +4156,11 @@ impl App {
                     self.prompt = None;
                     self.save_space(&typed);
                 }
+                PromptKind::SectionName { start, end } => {
+                    let typed = prompt.field.string();
+                    self.prompt = None;
+                    self.name_section(start, end, &typed);
+                }
                 PromptKind::SendTo { moving } => {
                     let typed = prompt.field.string().trim().to_string();
                     self.prompt = None;
@@ -4175,7 +4190,7 @@ impl App {
         let base = match prompt.kind {
             PromptKind::Rename => self.files[prompt.id].parent().map(Path::to_path_buf).unwrap_or_default(),
             PromptKind::SendTo { .. } => PathBuf::new(),
-            PromptKind::SaveWorkspace => return,
+            PromptKind::SaveWorkspace | PromptKind::SectionName { .. } => return,
         };
         let before: String = prompt.field.text[..prompt.field.cursor].iter().collect();
         if before.starts_with('@') {
@@ -7385,6 +7400,16 @@ impl App {
         // whatever it asked are.
         if pressed && self.menu.is_none() && self.prompt.is_none() && self.confirm.is_none() {
             self.row_target = None;
+            self.entry_target = None;
+        }
+        // A right click on a kept section in the Sections tab: what can be
+        // done with it.
+        if button == MouseButton::Right && pressed && self.menu.is_none() && self.prompt.is_none() && self.confirm.is_none() {
+            if let Some(index) = self.entry_at(x, y).filter(|index| self.entries().get(*index).is_some_and(|entry| entry.kept)) {
+                self.entry_target = Some(index);
+                self.open_menu(commands::SECTION_MENU, None);
+                return self.redraw();
+            }
         }
         if self.help {
             self.help = !pressed;
@@ -7690,6 +7715,10 @@ impl App {
             }
             self.request();
             return self.redraw();
+        }
+        // Over the Sections tab it scrolls a row too long for the window.
+        if self.over_entries(self.mouse.1) {
+            return self.scroll_entries(-(lines.round() as i64).clamp(-3, 3));
         }
         // Over the filmstrip it moves the strip along, to look at what is
         // further off without leaving the file on view. A click goes there.
@@ -8814,6 +8843,7 @@ impl App {
             let (icon, title, hint) = match prompt.kind {
                 PromptKind::Rename => (commands::icons::PENCIL, "Rename".to_string(), "Enter to rename  ·  a path moves it  ·  Tab completes"),
                 PromptKind::SaveWorkspace => (commands::icons::FOLDER_PLUS, "Save this folder as a workspace named".to_string(), "Enter to add it to the config file"),
+                PromptKind::SectionName { start, end } => (commands::icons::PENCIL, format!("Name {} – {}", clock(start), clock(end)), "Enter to save  ·  empty clears it"),
                 PromptKind::SendTo { moving: true } => (commands::icons::FOLDER_INPUT, format!("Move {files} to"), "Enter to move  ·  Tab completes"),
                 PromptKind::SendTo { moving: false } => (commands::icons::FOLDER_PLUS, format!("Copy {files} to"), "Enter to copy  ·  Tab completes"),
             };

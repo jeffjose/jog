@@ -22,8 +22,24 @@ pub enum StripTab {
 pub struct Entry {
     pub start: f64,
     pub end: f64,
-    /// The chapter's title; none for a section kept.
+    /// The chapter's title, or the name a kept section was given.
     pub title: Option<String>,
+    /// A section kept, which can be renamed or removed; not a chapter.
+    pub kept: bool,
+}
+
+/// A section kept: its ends, and the name it was given, if any.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Kept {
+    pub a: f64,
+    pub b: f64,
+    pub name: Option<String>,
+}
+
+impl Kept {
+    fn is(&self, a: f64, b: f64) -> bool {
+        (self.a - a).abs() < 0.05 && (self.b - b).abs() < 0.05
+    }
 }
 
 /// The frames of the entries of a video, for the cells of the tab.
@@ -33,33 +49,37 @@ pub struct EntryFrames {
     frames: Vec<Option<Arc<Frame>>>,
 }
 
-/// Where the sections kept are written: a line each, start, end and the
-/// video's path, by tabs.
+/// Where the sections kept are written: a line each, start, end, the
+/// video's path and the name given, if any, by tabs.
 fn kept_path() -> Option<PathBuf> {
     crate::positions::state_dir().map(|dir| dir.join("sections"))
 }
 
-fn read_kept() -> HashMap<PathBuf, Vec<(f64, f64)>> {
+pub(super) type KeptSections = HashMap<PathBuf, Vec<Kept>>;
+
+fn read_kept() -> KeptSections {
     let text = kept_path().and_then(|path| std::fs::read_to_string(path).ok()).unwrap_or_default();
-    let mut kept: HashMap<PathBuf, Vec<(f64, f64)>> = HashMap::new();
+    let mut kept = KeptSections::new();
     for line in text.lines() {
-        let mut parts = line.splitn(3, '\t');
+        let mut parts = line.splitn(4, '\t');
         let (Some(a), Some(b), Some(path)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        let name = parts.next().filter(|name| !name.is_empty()).map(str::to_string);
         if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
-            kept.entry(PathBuf::from(path)).or_default().push((a, b));
+            kept.entry(PathBuf::from(path)).or_default().push(Kept { a, b, name });
         }
     }
     kept
 }
 
-fn write_kept(kept: &HashMap<PathBuf, Vec<(f64, f64)>>) -> std::io::Result<()> {
+fn write_kept(kept: &KeptSections) -> std::io::Result<()> {
     let path = kept_path().ok_or_else(|| std::io::Error::other("no folder to keep it in"))?;
     let mut paths: Vec<&PathBuf> = kept.keys().collect();
     paths.sort();
     let mut text = String::new();
     for video in paths {
-        for (a, b) in &kept[video] {
-            text.push_str(&format!("{a:.3}\t{b:.3}\t{}\n", video.display()));
+        for Kept { a, b, name } in &kept[video] {
+            let name = name.as_deref().unwrap_or_default().replace(['\t', '\n'], " ");
+            text.push_str(&format!("{a:.3}\t{b:.3}\t{}\t{name}\n", video.display()));
         }
     }
     if let Some(dir) = path.parent() {
@@ -267,13 +287,12 @@ impl App {
         let path = self.files[video.id].clone();
         let kept = self.kept_sections.get_or_insert_with(read_kept);
         let list = kept.entry(path).or_default();
-        let same = |(x, y): &(f64, f64)| (x - a).abs() < 0.05 && (y - b).abs() < 0.05;
-        let forgetting = list.iter().any(same);
+        let forgetting = list.iter().any(|kept| kept.is(a, b));
         match forgetting {
-            true => list.retain(|span| !same(span)),
+            true => list.retain(|kept| !kept.is(a, b)),
             false => {
-                list.push((a, b));
-                list.sort_by(|x, y| x.0.total_cmp(&y.0));
+                list.push(Kept { a, b, name: None });
+                list.sort_by(|x, y| x.a.total_cmp(&y.a));
             }
         }
         let result = write_kept(kept);
@@ -289,11 +308,69 @@ impl App {
     fn keep_quietly(&mut self, path: &Path, a: f64, b: f64) {
         let kept = self.kept_sections.get_or_insert_with(read_kept);
         let list = kept.entry(path.to_path_buf()).or_default();
-        if !list.iter().any(|(x, y)| (x - a).abs() < 0.05 && (y - b).abs() < 0.05) {
-            list.push((a, b));
-            list.sort_by(|x, y| x.0.total_cmp(&y.0));
+        if !list.iter().any(|kept| kept.is(a, b)) {
+            list.push(Kept { a, b, name: None });
+            list.sort_by(|x, y| x.a.total_cmp(&y.a));
             let _ = write_kept(kept);
         }
+    }
+
+    /// The kept section a menu or command is about: the one right-clicked
+    /// in the Sections tab, else the one marked. A chapter is not one.
+    fn target_entry(&mut self) -> Option<Entry> {
+        let entries = self.entries();
+        let marked = self.section().and_then(|section| section.span());
+        let found = match self.entry_target {
+            Some(index) => entries.get(index).cloned(),
+            None => marked.and_then(|(a, b)| entries.into_iter().find(|entry| (entry.start - a).abs() < 0.05 && (entry.end - b).abs() < 0.05)),
+        };
+        found.filter(|entry| entry.kept)
+    }
+
+    /// Removes a kept section from the Sections tab.
+    pub(super) fn forget_section(&mut self) {
+        let (Some(entry), Some(video)) = (self.target_entry(), &self.video) else { return self.toast("No kept section here") };
+        let path = self.files[video.id].clone();
+        let kept = self.kept_sections.get_or_insert_with(read_kept);
+        if let Some(list) = kept.get_mut(&path) {
+            list.retain(|kept| !kept.is(entry.start, entry.end));
+        }
+        match write_kept(kept) {
+            Ok(()) => self.toast(format!("Removed {} – {}", clock(entry.start), clock(entry.end))),
+            Err(error) => self.toast(format!("Not removed: {error}")),
+        }
+        self.entry_target = None;
+        // The tab goes with the last of them.
+        if self.entries().is_empty() {
+            self.strip_tab = StripTab::Scenes;
+        }
+        self.redraw();
+    }
+
+    /// Opens the box to name a kept section.
+    pub(super) fn ask_section_name(&mut self) {
+        let (Some(entry), Some(video)) = (self.target_entry(), &self.video) else { return self.toast("No kept section here") };
+        let id = video.id;
+        let text: Vec<char> = entry.title.unwrap_or_default().chars().collect();
+        let kind = PromptKind::SectionName { start: entry.start, end: entry.end };
+        self.prompt = Some(Prompt { id, kind, field: TextField::new(text.clone(), text.len()) });
+        self.menu = None;
+        self.redraw();
+    }
+
+    /// Gives a kept section the name typed; nothing typed takes it away.
+    pub(super) fn name_section(&mut self, start: f64, end: f64, typed: &str) {
+        let Some(video) = &self.video else { return };
+        let path = self.files[video.id].clone();
+        let kept = self.kept_sections.get_or_insert_with(read_kept);
+        if let Some(found) = kept.get_mut(&path).and_then(|list| list.iter_mut().find(|kept| kept.is(start, end))) {
+            found.name = Some(typed.trim().to_string()).filter(|name| !name.is_empty());
+        }
+        if let Err(error) = write_kept(kept) {
+            self.toast(format!("Not saved: {error}"));
+        }
+        self.entry_target = None;
+        self.redraw();
     }
 
     /// The sections kept and the chapters of the video on view, in order.
@@ -302,7 +379,8 @@ impl App {
         let id = video.id;
         let Some((_, length)) = self.video_time() else { return Vec::new() };
         let path = self.files[id].clone();
-        let mut entries: Vec<Entry> = self.kept_sections.get_or_insert_with(read_kept).get(&path).into_iter().flatten().map(|(a, b)| Entry { start: *a, end: *b, title: None }).collect();
+        let kept = self.kept_sections.get_or_insert_with(read_kept).get(&path).into_iter().flatten();
+        let mut entries: Vec<Entry> = kept.map(|kept| Entry { start: kept.a, end: kept.b, title: kept.name.clone(), kept: true }).collect();
         // The file's chapters, read from the player once a video, when it
         // has the file open: each is a wait on it, not to be made a frame
         // until then.
@@ -324,7 +402,7 @@ impl App {
         let chapters = self.chapters.get(&id).cloned().unwrap_or_default();
         for (index, (time, title)) in chapters.iter().enumerate() {
             let end = chapters.get(index + 1).map_or(length, |(next, _)| *next);
-            entries.push(Entry { start: *time, end, title: Some(title.clone()) });
+            entries.push(Entry { start: *time, end, title: Some(title.clone()), kept: false });
         }
         entries.sort_by(|x, y| x.start.total_cmp(&y.start));
         entries
@@ -368,23 +446,64 @@ impl App {
         self.redraw();
     }
 
-    /// Where the cell of an entry stands, its row centred as the scenes'.
-    fn entry_left(strip: &Strip, index: usize, count: usize, window_width: i32) -> i32 {
-        let row = count as i32 * strip.pitch() - strip.pad;
-        (window_width - row).max(strip.pad * 12) / 2 + index as i32 * strip.pitch()
+    /// How many cells fit across, clear of the tabs at the left.
+    fn entries_across(strip: &Strip, window_width: i32) -> usize {
+        ((window_width - strip.pad * 24 + strip.pad) / strip.pitch()).max(1) as usize
+    }
+
+    /// Where the cell of an entry stands: the row centred as the scenes'
+    /// when it fits, else from the first one scrolled to.
+    fn entry_left(&self, strip: &Strip, index: usize, count: usize, window_width: i32) -> i32 {
+        if count <= Self::entries_across(strip, window_width) {
+            let row = count as i32 * strip.pitch() - strip.pad;
+            return (window_width - row).max(strip.pad * 12) / 2 + index as i32 * strip.pitch();
+        }
+        strip.pad * 12 + (index as i32 - self.entry_first as i32) * strip.pitch()
+    }
+
+    /// Whether a cell standing at `left` is drawn: clear of the tabs and
+    /// whole within the window.
+    fn entry_in_view(&self, strip: &Strip, left: i32, window_width: i32) -> bool {
+        left >= strip.pad * 12 && left + strip.cell_w <= window_width
+    }
+
+    /// Scrolls the Sections tab by cells, as far as there are more.
+    pub(super) fn scroll_entries(&mut self, by: i64) {
+        let (width, height) = self.window_size();
+        let count = self.entries().len();
+        let furthest = count.saturating_sub(Self::entries_across(&Strip::for_height(height), width as i32));
+        self.entry_first = (self.entry_first as i64 + by).clamp(0, furthest as i64) as usize;
+        self.redraw();
+    }
+
+    /// Scrolls so that an entry's cell is in view.
+    fn show_entry(&mut self, index: usize) {
+        let (width, height) = self.window_size();
+        let across = Self::entries_across(&Strip::for_height(height), width as i32);
+        if index < self.entry_first {
+            self.entry_first = index;
+        } else if index >= self.entry_first + across {
+            self.entry_first = index + 1 - across;
+        }
+    }
+
+    /// Whether the pointer is over the Sections tab's cells.
+    pub(super) fn over_entries(&self, y: f64) -> bool {
+        let (_, height) = self.window_size();
+        self.strip_tab == StripTab::Sections && self.scenes_shown() && y >= f64::from(Strip::for_height(height).top)
     }
 
     /// The entry whose cell a window position is on.
     pub(super) fn entry_at(&mut self, x: f64, y: f64) -> Option<usize> {
         let (width, height) = self.window_size();
         let strip = Strip::for_height(height);
-        if self.strip_tab != StripTab::Sections || !self.scenes_shown() || y < f64::from(strip.top) {
+        if !self.over_entries(y) {
             return None;
         }
         let count = self.entries().len();
         (0..count).find(|&index| {
-            let left = Self::entry_left(&strip, index, count, width as i32);
-            (left..left + strip.cell_w).contains(&(x as i32))
+            let left = self.entry_left(&strip, index, count, width as i32);
+            self.entry_in_view(&strip, left, width as i32) && (left..left + strip.cell_w).contains(&(x as i32))
         })
     }
 
@@ -433,6 +552,7 @@ impl App {
         let (Some(entry), Some(video)) = (entries.get(index), &self.video) else { return };
         let Some((_, length)) = self.video_time() else { return };
         self.sections.insert(video.id, Section { a: Some(entry.start), b: Some(entry.end) });
+        self.show_entry(index);
         self.apply_loop();
         self.seek_to(entry.start / length, true);
         self.say_section();
@@ -462,23 +582,19 @@ impl App {
         canvas.shade(0, strip.top, canvas.width, strip.height, 64);
         let entries = self.entries();
         self.want_entry_frames(&entries);
+        // Scrolled no further than the last cells fill the row.
+        let furthest = entries.len().saturating_sub(Self::entries_across(&strip, canvas.width));
+        self.entry_first = self.entry_first.min(furthest);
+        let (mx, my) = self.mouse;
+        let over = self.entry_at(mx, my);
         let id = self.video.as_ref().map(|video| video.id);
         let frames = id.and_then(|id| self.entry_frames.get(&id));
         let marked = self.section().and_then(|section| section.span());
-        let over = {
-            let (mx, my) = self.mouse;
-            let (width, _) = (canvas.width, 0);
-            let count = entries.len();
-            (my >= f64::from(strip.top)).then(|| (0..count).find(|&index| {
-                let left = Self::entry_left(&strip, index, count, width);
-                (left..left + strip.cell_w).contains(&(mx as i32))
-            })).flatten()
-        };
         let top = strip.top + strip.pad;
         let (round, edge) = ((strip.pad * 2 / 3).max(3), (strip.pad / 4).max(2));
         for (index, entry) in entries.iter().enumerate() {
-            let left = Self::entry_left(&strip, index, entries.len(), canvas.width);
-            if left + strip.cell_w < 0 || left > canvas.width {
+            let left = self.entry_left(&strip, index, entries.len(), canvas.width);
+            if !self.entry_in_view(&strip, left, canvas.width) {
                 continue;
             }
             let frame = frames.filter(|had| had.starts.get(index) == Some(&entry.start)).and_then(|had| had.frames.get(index)).and_then(Option::as_ref);
@@ -520,9 +636,20 @@ impl App {
         }
         let small = (px * 3 / 4).max(10);
         let (top, pad, line) = (strip.top + strip.pad, (small as i32 / 4).max(2), Text::line_height(small));
+        // Arrows at the ends of a row that runs on past them.
+        let middle = top + (strip.cell_h - Text::line_height(px)) / 2;
+        let across = Self::entries_across(strip, canvas.width);
+        if entries.len() > across {
+            if self.entry_first > 0 {
+                text.draw(canvas, strip.pad * 12 - strip.pad * 3 / 2, middle, px, TEXT_COLOR, "‹");
+            }
+            if self.entry_first + across < entries.len() {
+                text.draw(canvas, canvas.width - strip.pad * 2, middle, px, TEXT_COLOR, "›");
+            }
+        }
         for (index, entry) in entries.iter().enumerate() {
-            let left = Self::entry_left(strip, index, entries.len(), canvas.width);
-            if left + strip.cell_w < 0 || left > canvas.width {
+            let left = self.entry_left(strip, index, entries.len(), canvas.width);
+            if !self.entry_in_view(strip, left, canvas.width) {
                 continue;
             }
             let span = format!("{} – {}", clock(entry.start), clock(entry.end));

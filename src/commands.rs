@@ -39,6 +39,11 @@ pub enum Command {
     SaveSection(Clip),
     /// Keep the section, for the Sections tab; or forget it, kept.
     KeepSection,
+    /// Name a kept section: the one right-clicked in the Sections tab, or
+    /// the one marked.
+    RenameSection,
+    /// Remove a kept section from the Sections tab.
+    ForgetSection,
     Flip,
     Mirror,
     ToggleAntialias,
@@ -501,6 +506,8 @@ pub fn command_icon(command: Command) -> &'static str {
         SectionClear => X,
         SaveSection(_) => FILM,
         KeepSection => PIN,
+        RenameSection => PENCIL,
+        ForgetSection => X,
         SpeedUp => CHEVRONS_RIGHT,
         SpeedDown => CHEVRONS_LEFT,
         SpeedReset => GAUGE,
@@ -601,6 +608,8 @@ const PLAYBACK: &[Option<MenuItem>] = &[
     video_item("Section ends here", "Shift+B", Command::SectionEnd),
     video_item("Clear the section", "Esc", Command::SectionClear),
     video_item("Keep the section (or forget it)", "", Command::KeepSection),
+    video_item("Rename the kept section", "", Command::RenameSection),
+    video_item("Remove the kept section", "", Command::ForgetSection),
     video_item("Save the section (quick)", "", Command::SaveSection(Clip::Quick)),
     video_item("Save the section as MP4 (H.264, exact)", "", Command::SaveSection(Clip::Exact(Target::new(Codec::H264, Container::Mp4)))),
     video_item("Save the section as MP4 (HEVC, exact)", "", Command::SaveSection(Clip::Exact(Target::new(Codec::Hevc, Container::Mp4)))),
@@ -863,6 +872,12 @@ pub const GRID_AROUND_MENU: &[Option<MenuItem>] = &[
     None,
     item("Close the grid", "g", Command::ToggleGrid),
     item("Quit", "q", Command::Quit),
+];
+
+/// A right click on a kept section in the Sections tab.
+pub const SECTION_MENU: &[Option<MenuItem>] = &[
+    item("Rename", "", Command::RenameSection),
+    item("Remove", "", Command::ForgetSection),
 ];
 
 /// The `X` menu: what can be done with the marked images.
