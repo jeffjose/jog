@@ -37,6 +37,7 @@ File list:
   -S, --sort ORDER           name, filename, dirname, newest (or latest),
                              oldest, largest or smallest; or random, as -z
       --newest  --oldest     the same as --sort=newest, --sort=oldest
+      --latest               the same as --newest
   -n, --reverse              reverse the order
   -z, --random               shuffle the list (also --sort=random)
       --start-at FILE        start at this file
@@ -92,7 +93,7 @@ Slideshow and actions:
                              last quit, of those started in this folder. With
                              several to choose from they are shown, to be
                              picked with the arrows or a click; each shows its id
-      --latest               pick up the latest session of this folder, unasked
+      --continue             pick up the latest session of this folder, unasked
       --resume ID            the session with that id, whichever folder it is
                              of; the start of an id will do when it is enough
                              to tell it by
@@ -324,11 +325,12 @@ pub struct Options {
     pub workspace: Option<usize>,
     /// Whether videos pick up where they were left.
     pub resume: bool,
-    /// Whether to pick up a session of this folder, or the latest of them
-    /// unasked; and, set by `main` once it has looked, the ones there are
-    /// to choose from and how far into its video the one picked up was.
+    /// Whether to pick up a session of this folder, or (`--continue`) the
+    /// latest of them unasked; and, set by `main` once it has looked, the
+    /// ones there are to choose from and how far into its video the one
+    /// picked up was.
     pub session: bool,
-    pub latest: bool,
+    pub continue_latest: bool,
     pub sessions: Vec<crate::sessions::Session>,
     pub begin_at: Option<f64>,
     /// The id of the session picked up, which it keeps when kept again.
@@ -515,7 +517,7 @@ fn is_switch(name: &str) -> bool {
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "random",
         "newest", "oldest",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
-        "debug", "verbose", "watch", "positions", "no-positions", "resume", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
+        "debug", "verbose", "watch", "positions", "no-positions", "resume", "continue", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
     switches.contains(&name)
 }
@@ -582,7 +584,7 @@ fn parse_with(
         workspace: None,
         resume: true,
         session: false,
-        latest: false,
+        continue_latest: false,
         sessions: Vec::new(),
         begin_at: None,
         session_id: None,
@@ -697,9 +699,8 @@ fn apply(
             "random" | "shuffle" | "shuffled" => options.listing.randomize = true,
             order => options.listing.sort = Some(parse_sort(order)?),
         },
-        // Short ways to say the orders most asked for. Not --latest, which
-        // picks up the latest session.
-        "newest" => options.listing.sort = Some(Sort::Newest),
+        // Short ways to say the orders most asked for.
+        "newest" | "latest" => options.listing.sort = Some(Sort::Newest),
         "oldest" => options.listing.sort = Some(Sort::Oldest),
         "random" => options.listing.randomize = true,
         "reverse" => options.listing.reverse = true,
@@ -794,7 +795,7 @@ fn apply(
         "positions" => options.resume = true,
         "no-positions" => options.resume = false,
         "resume" => options.session = true,
-        "latest" => (options.session, options.latest) = (true, true),
+        "continue" => (options.session, options.continue_latest) = (true, true),
         "action" => options.actions[0] = Some(value()?),
         other => {
             let slot = other.strip_prefix("action").and_then(|n| n.parse::<usize>().ok());
@@ -1072,7 +1073,7 @@ mod tests {
         assert!(parse_args(&["--randomize"]).is_err(), "--random now");
         assert_eq!(parse_args(&["--newest"]).unwrap().listing.sort, Some(Sort::Newest));
         assert_eq!(parse_args(&["--oldest"]).unwrap().listing.sort, Some(Sort::Oldest));
-        assert!(parse_args(&["--latest"]).unwrap().session, "still the latest session");
+        assert_eq!(parse_args(&["--latest"]).unwrap().listing.sort, Some(Sort::Newest));
         assert_eq!(parse_args(&["--sort", "newest"]).unwrap().listing.sort, Some(Sort::Newest));
         assert_eq!(options.paths, [PathBuf::from("a.jpg"), PathBuf::from("dir")]);
 
@@ -1108,11 +1109,14 @@ mod tests {
     }
 
     #[test]
-    fn latest_picks_up_a_session_by_itself() {
-        let latest = parse_args(&["--latest"]).unwrap();
-        assert!(latest.session && latest.latest);
+    fn continue_picks_up_the_latest_session_and_latest_sorts() {
+        let resumed = parse_args(&["--continue"]).unwrap();
+        assert!(resumed.session && resumed.continue_latest);
         let resume = parse_args(&["--resume"]).unwrap();
-        assert!(resume.session && !resume.latest);
+        assert!(resume.session && !resume.continue_latest);
+        let latest = parse_args(&["--latest"]).unwrap();
+        assert!(!latest.session, "a sort, not a session");
+        assert_eq!(latest.listing.sort, Some(Sort::Newest));
         assert!(parse_args(&["--sessions"]).is_err());
     }
 

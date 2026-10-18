@@ -94,7 +94,7 @@ fn main() -> ExitCode {
         // is kept again on quitting.
         options.session_id = Some(latest.id.clone());
         cwd = latest.cwd.clone();
-        if !options.latest && found.len() > 1 {
+        if !options.continue_latest && found.len() > 1 {
             options.sessions = found;
         }
     }
