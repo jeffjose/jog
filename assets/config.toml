@@ -61,8 +61,8 @@
 # reverse = false
 #   true    the order backwards
 
-# randomize = false
-#   true    shuffle the list
+# random = false
+#   true    shuffle the list (or sort = "random")
 
 # watch = false
 #   true    pick up files as they come and go, without being asked (W)

@@ -93,8 +93,6 @@ const STORIES_KEPT: usize = 4;
 const WATCH_EVERY: Duration = Duration::from_secs(1);
 /// The playback speeds that `[` and `]` step through.
 const SPEEDS: [f64; 9] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
-/// Seconds that Page Up and Page Down move through a video.
-const SEEK_JUMP: f64 = 60.0;
 /// How long after a seek the player's reported position cannot be trusted.
 const SEEK_SETTLE: Duration = Duration::from_millis(500);
 /// How close to its length, in seconds, a video counts as at its end.
@@ -2683,8 +2681,9 @@ impl App {
             }
             Key::Named(NamedKey::ArrowRight) => arrow(true),
             Key::Named(NamedKey::ArrowLeft) => arrow(false),
-            Key::Named(NamedKey::PageDown) => VideoAction::Seek(SEEK_JUMP),
-            Key::Named(NamedKey::PageUp) => VideoAction::Seek(-SEEK_JUMP),
+            // Page Down and Up are the next and the file before, as > and
+            // < are; the arrows are for getting about in the video.
+            Key::Named(NamedKey::PageDown | NamedKey::PageUp) => return false,
             Key::Named(NamedKey::ArrowUp) => VideoAction::Volume(5),
             Key::Named(NamedKey::ArrowDown) => VideoAction::Volume(-5),
             _ => return false,
@@ -3389,6 +3388,15 @@ impl App {
                 self.toast(format!("Cleared {count} marks"));
             }
             CopyName => self.copy_text(false),
+            CopyViewedName => {
+                let name = self.name();
+                println!("[copy] {name}");
+                if self.snapshot.is_some() || ops::set_clipboard(&name) {
+                    self.toast(format!("Copied {name}"));
+                } else {
+                    self.toast("No clipboard tool found (xclip, xsel or wl-copy); printed to the terminal");
+                }
+            }
             CopyPath => self.copy_text(true),
             CopyShell => self.copy_for_shell(),
             CopyTo => self.send(false, event_loop),
@@ -8165,7 +8173,8 @@ impl App {
             top_left.push(line);
         }
         if viewing && self.show_info {
-            let mut line = vec![(self.name(), TEXT_COLOR), (format!("   {} / {}", self.pos + 1, self.list.len()), soft)];
+            // The name is there to be clicked, which copies it.
+            let mut line = vec![(format!("{LINK}{}", self.name()), TEXT_COLOR), (format!("   {} / {}", self.pos + 1, self.list.len()), soft)];
             // A video not watched yet says so, until it has been.
             if self.is_new(self.id()) {
                 line.push(("   new".to_string(), accent_soft()));
@@ -8405,6 +8414,10 @@ impl App {
         self.info_buttons = choices
             .into_iter()
             .filter_map(|(name, [x, y, width, height])| {
+                // The file's name, which a click copies.
+                if name == self.name() {
+                    return Some(Button { x, y, width, height, command: Command::CopyViewedName });
+                }
                 let mode = [Hdr::Sdr, Hdr::Full, Hdr::GainMap].into_iter().find(|mode| mode.name() == name)?;
                 Some(Button { x, y, width, height, command: Command::SetHdr(mode) })
             })
@@ -9781,6 +9794,9 @@ const BADGE: char = '\u{1}';
 /// the debug overlay are: the second for the one chosen, filled in.
 const CHOICE: char = '\u{2}';
 const CHOSEN: char = '\u{3}';
+/// Begins a run drawn as it is, but there to be clicked: the file's name
+/// in the info overlay, which copies it.
+const LINK: char = '\u{4}';
 
 /// The colour of a badge for what a picture or video is.
 fn badge_color(name: &str) -> u32 {
@@ -9804,6 +9820,9 @@ fn badge(name: &str) -> (String, u32) {
 /// How wide a run is drawn: a badge or a choice with its ground and the
 /// gap after it.
 fn run_width(text: &mut Text, run: &str, px: u32) -> i32 {
+    if let Some(words) = run.strip_prefix(LINK) {
+        return text.width(words, px);
+    }
     match run.strip_prefix([BADGE, CHOICE, CHOSEN]) {
         Some(name) => text.width(name, (px * 4 / 5).max(10)) + px as i32 * 3 / 2,
         None => text.width(run, px),
@@ -9813,6 +9832,11 @@ fn run_width(text: &mut Text, run: &str, px: u32) -> i32 {
 /// Draws a run, a badge or a choice as one; gives back how wide it was
 /// and, for a choice, where its button is.
 fn draw_run(canvas: &mut Canvas, text: &mut Text, x: i32, y: i32, px: u32, color: u32, run: &str) -> (i32, Option<[i32; 4]>) {
+    if let Some(words) = run.strip_prefix(LINK) {
+        text.draw(canvas, x, y, px, color, words);
+        let width = text.width(words, px);
+        return (width, Some([x, y, width, Text::line_height(px)]));
+    }
     let Some(name) = run.strip_prefix([BADGE, CHOICE, CHOSEN]) else {
         text.draw(canvas, x, y, px, color, run);
         return (text.width(run, px), None);

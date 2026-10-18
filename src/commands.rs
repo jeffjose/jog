@@ -128,6 +128,9 @@ pub enum Command {
     /// Narrow the list to the marked files.
     OnlyMarked,
     CopyName,
+    /// Copy the name of the file on view alone, marks or none: a click on
+    /// it in the info overlay.
+    CopyViewedName,
     CopyPath,
     /// Copy the paths on one line for a shell, each folder's files folded
     /// together with braces.
@@ -225,8 +228,9 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             NamedKey::Backspace => Previous,
             NamedKey::Home => First,
             NamedKey::End => Last,
-            NamedKey::PageDown => JumpForward,
-            NamedKey::PageUp => JumpBack,
+            // As < and >: the file after, the file before.
+            NamedKey::PageDown => Next,
+            NamedKey::PageUp => Previous,
             NamedKey::Delete if modifiers.control_key() => Trash,
             NamedKey::Delete => Remove,
             NamedKey::Enter => Action(0),
@@ -531,7 +535,7 @@ pub fn command_icon(command: Command) -> &'static str {
         Rename => PENCIL,
         Convert(_) | ConvertPanel | ConvertVideo(_) => REPLACE,
         Undo => UNDO,
-        CopyName | SaveFilelist => COPY,
+        CopyName | CopyViewedName | SaveFilelist => COPY,
         CopyPath | CopyShell => CLIPBOARD,
         Reload => REFRESH,
         Remove => MINUS,
@@ -619,8 +623,8 @@ const PLAYBACK: &[Option<MenuItem>] = &[
 const GO: &[Option<MenuItem>] = &[
     item("First file", "Home", Command::First),
     item("Last file", "End", Command::Last),
-    image_item("Forward 5%", "PgDn", Command::JumpForward),
-    image_item("Back 5%", "PgUp", Command::JumpBack),
+    item("Forward 5% of the files", "", Command::JumpForward),
+    item("Back 5% of the files", "", Command::JumpBack),
     item("Next folder", "}", Command::NextDir),
     item("Previous folder", "{", Command::PreviousDir),
     None,
@@ -904,7 +908,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Right  Space  n", "Next file"),
                 ("Left  Backspace  ,", "Previous file"),
                 ("Home  End", "First / last file"),
-                ("PgDn  PgUp", "Jump 5% forward / back"),
+                ("PgDn  PgUp", "Next / previous file, as > and <"),
                 ("}  {", "Next / previous folder"),
                 ("Wheel", "Next / previous file"),
                 ("z", "Shuffle: on to another file, or around this one in the grid, filmstrip or list"),
@@ -948,7 +952,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
             &[
                 ("Space", "Play / pause; held down, or the mouse button held on the picture, twice the speed"),
                 ("Left  Right", "Seek about 5 seconds, on into the next file or back into the one before"),
-                ("PgUp  PgDn", "Seek 1 minute"),
+                ("PgUp  PgDn", "Previous / next file, as < and >"),
                 ("Shift+Left  Shift+Right", "Step one frame"),
                 ("b", "Back to the start"),
                 ("Shift+A  Shift+B", "Mark a section's start / end: it loops; drag its ends on the seek bar, Esc clears it"),

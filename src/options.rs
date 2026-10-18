@@ -35,9 +35,10 @@ Zoom:
 File list:
   -r, --recursive            descend into directories
   -S, --sort ORDER           name, filename, dirname, newest (or latest),
-                             oldest, largest or smallest
+                             oldest, largest or smallest; or random, as -z
+      --newest  --oldest     the same as --sort=newest, --sort=oldest
   -n, --reverse              reverse the order
-  -z, --randomize            shuffle the list
+  -z, --random               shuffle the list (also --sort=random)
       --start-at FILE        start at this file
   -f, --filelist FILE        read paths from FILE, one per line
       --start HOW            what coming back to this folder from another
@@ -149,8 +150,8 @@ Workspaces are folders with names, set in the config file:
   -v, --version              show the version
 
 Keys:
-  > . n Right Space          next image          < , Left Backspace  previous
-  Home / End                 first / last        PgDn / PgUp   jump 5%
+  > . n Right Space PgDn     next image          < , Left Backspace PgUp  previous
+  Home / End                 first / last
   z                          shuffle the rest    { / }         previous / next directory
   Q                          triage: Space keeps a file and x rejects it, each
                              going on to the next; nothing is done to the files.
@@ -202,7 +203,8 @@ Keys:
 Videos (mp4, mkv, webm and so on; needs libmpv) play in place, picking up
 where they were left unless --no-positions is given. While one is up:
   Space                      play / pause        Left / Right  seek about 5 seconds
-  PgUp / PgDn                seek about 1 minute pointer at the bottom: seek bar with previews
+  PgUp / PgDn                previous / next file, as < and >
+  pointer at the bottom      seek bar with previews
   Shift+Left / Shift+Right   step one frame      Up / Down     volume (m mutes)
   b                          back to the start of the video
   A  B (with Shift)          mark the start / end of a section, which loops;
@@ -484,7 +486,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
         'r' => "recursive",
         'S' => "sort",
         'n' => "reverse",
-        'z' => "randomize",
+        'z' => "random",
         'V' => "version-sort",
         'f' => "filelist",
         'D' => "slideshow-delay",
@@ -510,7 +512,8 @@ fn takes_value(name: &str) -> bool {
 fn is_switch(name: &str) -> bool {
     let switches = [
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
-        "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "randomize",
+        "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "random",
+        "newest", "oldest",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
         "debug", "verbose", "watch", "positions", "no-positions", "resume", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
@@ -689,9 +692,17 @@ fn apply(
         "keep-zoom-vp" => options.keep_view = true,
         "force-aliasing" => options.antialias = false,
         "recursive" => options.listing.recursive = true,
-        "sort" => options.listing.sort = Some(parse_sort(&value()?)?),
+        "sort" => match value()?.as_str() {
+            // Random is no order to sort by, but it is what is meant.
+            "random" | "shuffle" | "shuffled" => options.listing.randomize = true,
+            order => options.listing.sort = Some(parse_sort(order)?),
+        },
+        // Short ways to say the orders most asked for. Not --latest, which
+        // picks up the latest session.
+        "newest" => options.listing.sort = Some(Sort::Newest),
+        "oldest" => options.listing.sort = Some(Sort::Oldest),
+        "random" => options.listing.randomize = true,
         "reverse" => options.listing.reverse = true,
-        "randomize" => options.listing.randomize = true,
         "start-at" => options.listing.start_at = Some(value()?.into()),
         "filter" => options.filter = Some(value()?),
         "start" => options.start = Some(parse_start(&value()?)?),
@@ -1054,6 +1065,14 @@ mod tests {
         assert_eq!(options.listing.sort, Some(Sort::Newest));
         // The latest first is the newest first, by either word.
         assert_eq!(parse_args(&["--sort=latest"]).unwrap().listing.sort, Some(Sort::Newest));
+        // Random is said as a sort too, and the usual orders have flags.
+        for random in [&["--sort=random"][..], &["--sort", "shuffle"], &["--random"], &["-z"]] {
+            assert!(parse_args(random).unwrap().listing.randomize, "{random:?}");
+        }
+        assert!(parse_args(&["--randomize"]).is_err(), "--random now");
+        assert_eq!(parse_args(&["--newest"]).unwrap().listing.sort, Some(Sort::Newest));
+        assert_eq!(parse_args(&["--oldest"]).unwrap().listing.sort, Some(Sort::Oldest));
+        assert!(parse_args(&["--latest"]).unwrap().session, "still the latest session");
         assert_eq!(parse_args(&["--sort", "newest"]).unwrap().listing.sort, Some(Sort::Newest));
         assert_eq!(options.paths, [PathBuf::from("a.jpg"), PathBuf::from("dir")]);
 
