@@ -16,6 +16,8 @@ pub struct Inspection {
     /// The first video frame's side data: what the bitstream carries
     /// that the container may not, HDR10 values written by the encoder.
     first_frame: Value,
+    /// Its boxes or elements.
+    tree: Result<Vec<crate::boxes::Node>, String>,
 }
 
 impl Inspection {
@@ -40,7 +42,7 @@ impl Inspection {
             .ok()
             .and_then(|output| serde_json::from_slice(&output.stdout).ok())
             .unwrap_or(Value::Null);
-        Ok(Inspection { probe, hdr: crate::hdrmeta::read(path), first_frame })
+        Ok(Inspection { probe, hdr: crate::hdrmeta::read(path), first_frame, tree: crate::boxes::read(path) })
     }
 
     fn streams(&self) -> &[Value] {
@@ -82,7 +84,9 @@ impl Inspection {
 }
 
 /// The tabs, in order.
-const TABS: [&str; 4] = ["Summary", "Streams", "HDR", "Tags · chapters"];
+const TABS: [&str; 5] = ["Summary", "Streams", "HDR", "Structure", "Tags · chapters"];
+/// The tab of the boxes or elements the file is made of.
+const STRUCTURE: usize = 3;
 
 /// A card of label and value rows, under a heading.
 struct Card {
@@ -113,6 +117,8 @@ enum Hit {
     Close,
     /// A scene of the HDR chart, or a chapter: that time in the video.
     Seek(f64),
+    /// A box or element of the Structure tab, by where it is in the tree.
+    Node(Vec<usize>),
 }
 
 pub struct Inspector {
@@ -123,6 +129,11 @@ pub struct Inspector {
     content_h: i32,
     view_h: i32,
     found: Option<Result<Inspection, String>>,
+    /// The Structure tab: the boxes opened and the one picked out, each by
+    /// where it is in the tree; and whether to scroll to the one picked.
+    open: HashSet<Vec<usize>>,
+    selected: Vec<usize>,
+    follow: bool,
     drawn: Vec<(Hit, [i32; 4])>,
 }
 
@@ -187,13 +198,25 @@ impl App {
         std::thread::spawn(move || {
             let _ = proxy.send_event(Event::Inspected(id, Inspection::read(&path)));
         });
-        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, drawn: Vec::new() });
+        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new() });
         self.menu = None;
         self.redraw();
     }
 
     pub(super) fn inspected(&mut self, id: usize, found: Result<Inspection, String>) {
         if let Some(inspector) = self.inspector.as_mut().filter(|inspector| inspector.id == id) {
+            // The tree opens on what holds the tracks: moov, or Segment and
+            // its Tracks.
+            if let Some(Ok(nodes)) = found.as_ref().ok().map(|found| found.tree.as_ref()) {
+                for (at, node) in nodes.iter().enumerate() {
+                    if matches!(node.name.as_str(), "moov" | "Segment") {
+                        inspector.open.insert(vec![at]);
+                        if let Some(tracks) = node.children.iter().position(|child| child.name == "Tracks" || child.name == "trak") {
+                            inspector.open.insert(vec![at, tracks]);
+                        }
+                    }
+                }
+            }
             inspector.found = Some(found);
             self.redraw();
         }
@@ -202,6 +225,52 @@ impl App {
     pub(super) fn inspector_key(&mut self, key: Key<&str>) {
         let (step, shift) = (Text::line_height(ui_px(self.window_size().1)) * 3, self.modifiers.shift_key());
         let Some(inspector) = &mut self.inspector else { return };
+        // In the Structure tab the arrows go about the tree.
+        if inspector.tab == STRUCTURE {
+            let nodes = inspector.found.as_ref().and_then(|found| found.as_ref().ok()).and_then(|found| found.tree.as_ref().ok());
+            let visible = nodes.map(|nodes| visible_nodes(nodes, &inspector.open)).unwrap_or_default();
+            let at = visible.iter().position(|(path, _)| *path == inspector.selected);
+            let has_children = |path: &[usize]| nodes.and_then(|nodes| node_at(nodes, path)).is_some_and(|node| !node.children.is_empty());
+            let handled = match key {
+                Key::Named(NamedKey::ArrowDown) => {
+                    if let Some((path, _)) = visible.get(at.map_or(0, |at| (at + 1).min(visible.len() - 1))) {
+                        inspector.selected = path.clone();
+                    }
+                    true
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    if let Some((path, _)) = visible.get(at.map_or(0, |at| at.saturating_sub(1))) {
+                        inspector.selected = path.clone();
+                    }
+                    true
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    if has_children(&inspector.selected) {
+                        inspector.open.insert(inspector.selected.clone());
+                    }
+                    true
+                }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    // Closes it, or goes up to the one it is in.
+                    if !inspector.open.remove(&inspector.selected) && inspector.selected.len() > 1 {
+                        inspector.selected.pop();
+                    }
+                    true
+                }
+                Key::Named(NamedKey::Enter) => {
+                    let path = inspector.selected.clone();
+                    if !inspector.open.remove(&path) && has_children(&path) {
+                        inspector.open.insert(path);
+                    }
+                    true
+                }
+                _ => false,
+            };
+            if handled {
+                inspector.follow = true;
+                return self.redraw();
+            }
+        }
         match key {
             Key::Named(NamedKey::Escape | NamedKey::F3) | Key::Character("q") => self.inspector = None,
             Key::Named(NamedKey::Tab | NamedKey::ArrowRight) if !shift => (inspector.tab, inspector.scroll) = ((inspector.tab + 1) % TABS.len(), 0),
@@ -210,7 +279,7 @@ impl App {
             Key::Named(NamedKey::ArrowUp) => inspector.scroll -= step,
             Key::Named(NamedKey::PageDown) => inspector.scroll += inspector.view_h * 4 / 5,
             Key::Named(NamedKey::PageUp) => inspector.scroll -= inspector.view_h * 4 / 5,
-            Key::Character(digit @ ("1" | "2" | "3" | "4")) => (inspector.tab, inspector.scroll) = (digit.parse::<usize>().unwrap_or(1) - 1, 0),
+            Key::Character(digit @ ("1" | "2" | "3" | "4" | "5")) => (inspector.tab, inspector.scroll) = (digit.parse::<usize>().unwrap_or(1) - 1, 0),
             Key::Character("c") => return self.inspector_hit(Hit::CopyAll),
             _ => return,
         }
@@ -266,6 +335,16 @@ impl App {
                 match json {
                     Some(json) => copy(self, json, "everything as JSON".to_string()),
                     None => self.toast("Still reading…"),
+                }
+            }
+            Hit::Node(path) => {
+                if let Some(inspector) = &mut self.inspector {
+                    // A click on the one picked opens or closes it.
+                    if inspector.selected == path && !inspector.open.remove(&path) {
+                        inspector.open.insert(path);
+                    } else {
+                        inspector.selected = path;
+                    }
                 }
             }
             Hit::Seek(at) => {
@@ -417,6 +496,7 @@ impl App {
                 }
                 vec![signal, statics, dynamic]
             }
+            STRUCTURE => Vec::new(),
             _ => {
                 let mut cards = Vec::new();
                 let mut file_tags = Card::new("File tags");
@@ -526,7 +606,11 @@ impl App {
                     if inspector.tab == 2 {
                         content_h = self.draw_scene_chart(&mut sub, text, px, found, inner_w, content_h - inspector.scroll, offset, &mut drawn) + inspector.scroll;
                     }
-                    if inspector.tab == 3 {
+                    if inspector.tab == STRUCTURE {
+                        let tree = TreeState { open: &inspector.open, selected: &inspector.selected, follow: &mut inspector.follow, scroll: &mut inspector.scroll, view_h: inspector.view_h };
+                        content_h = self.draw_structure(&mut sub, text, px, found, tree, inner_w, offset, mouse, &mut drawn);
+                    }
+                    if inspector.tab == 4 {
                         content_h = self.draw_chapters(&mut sub, text, px, found, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll;
                     }
                 }
@@ -540,7 +624,7 @@ impl App {
         if content_h - inspector.scroll > inspector.view_h {
             canvas.fill(inner, view_bottom - 1, inner_w, 1, MENU_EDGE_COLOR);
         }
-        let keys = "Tab or 1–4 tab  ·  ↑↓ scroll  ·  click a value to copy it  ·  c copy all as JSON  ·  Esc close";
+        let keys = if inspector.tab == STRUCTURE { "↑↓ boxes  ·  → open  ·  ← close  ·  click a value to copy it  ·  Tab next tab  ·  c copy all as JSON  ·  Esc close" } else { "Tab or 1–5 tab  ·  ↑↓ scroll  ·  click a value to copy it  ·  c copy all as JSON  ·  Esc close" };
         text.draw(canvas, inner, top + height - pad - small_line, small, DIM_TEXT_COLOR, keys);
         self.inspector = Some(inspector);
     }
@@ -684,4 +768,173 @@ fn hdr_scenes(hdr: &crate::hdrmeta::Info) -> Vec<(f64, f64, f64)> {
         }
     }
     scenes
+}
+
+/// The boxes that show in the Structure tab: each top one, and the
+/// children of those opened, in order, with how deep each is.
+fn visible_nodes(nodes: &[crate::boxes::Node], open: &HashSet<Vec<usize>>) -> Vec<(Vec<usize>, usize)> {
+    fn walk(nodes: &[crate::boxes::Node], open: &HashSet<Vec<usize>>, path: &mut Vec<usize>, out: &mut Vec<(Vec<usize>, usize)>) {
+        for (at, node) in nodes.iter().enumerate() {
+            path.push(at);
+            out.push((path.clone(), path.len() - 1));
+            if open.contains(path) {
+                walk(&node.children, open, path, out);
+            }
+            path.pop();
+        }
+    }
+    let mut out = Vec::new();
+    walk(nodes, open, &mut Vec::new(), &mut out);
+    out
+}
+
+/// The box at a place in the tree.
+fn node_at<'a>(nodes: &'a [crate::boxes::Node], path: &[usize]) -> Option<&'a crate::boxes::Node> {
+    let (first, rest) = path.split_first()?;
+    let node = nodes.get(*first)?;
+    if rest.is_empty() { Some(node) } else { node_at(&node.children, rest) }
+}
+
+/// A byte count as the tree shows it: 32 B, 1.2 KB, 812 MB.
+fn bytes_words(size: u64) -> String {
+    if size < 1024 { format!("{size} B") } else { meta::human_size(size) }
+}
+
+impl App {
+    /// The Structure tab: the tree down the left, scrolled; the box picked
+    /// out on the right, its fields and its first bytes. Returns how tall
+    /// the tree is.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_structure(&self, sub: &mut Canvas, text: &mut Text, px: u32, found: &Inspection, inspector: TreeState, inner_w: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
+        let pad = px as i32;
+        let line = Text::line_height(px);
+        let small = (px * 5 / 6).max(11);
+        let small_line = Text::line_height(small);
+        let x = pad * 3 / 2;
+        let nodes = match &found.tree {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                text.draw(sub, x, pad, px, DIM_TEXT_COLOR, &format!("Not readable · {error}"));
+                return 0;
+            }
+        };
+        let tree_w = (inner_w * 9 / 20).max(px as i32 * 22);
+        let row_h = line + pad / 5;
+        let visible = visible_nodes(nodes, inspector.open);
+        // Keep the one picked out in view after a key.
+        if *inspector.follow {
+            *inspector.follow = false;
+            if let Some(at) = visible.iter().position(|(path, _)| path == inspector.selected) {
+                let top = at as i32 * row_h;
+                if top < *inspector.scroll {
+                    *inspector.scroll = top;
+                } else if top + row_h > *inspector.scroll + inspector.view_h {
+                    *inspector.scroll = top + row_h - inspector.view_h;
+                }
+            }
+        }
+        let size_x = x + tree_w - pad / 2;
+        for (row, (path, depth)) in visible.iter().enumerate() {
+            let y = row as i32 * row_h - *inspector.scroll;
+            if y + row_h < 0 || y > inspector.view_h {
+                continue;
+            }
+            let Some(node) = node_at(nodes, path) else { continue };
+            let picked = path == inspector.selected;
+            let place = [x + offset.0, y + offset.1, tree_w, row_h];
+            let hovered = (place[0]..place[0] + place[2]).contains(&mouse.0) && (place[1]..place[1] + place[3]).contains(&mouse.1);
+            if picked || hovered {
+                sub.round_fill(x, y, tree_w, row_h, pad / 4, if picked { accent() } else { 0x3A3A40 }, 256);
+            }
+            let fg = if picked { on_accent() } else { TEXT_COLOR };
+            let dim = if picked { on_accent() } else { DIM_TEXT_COLOR };
+            let nx = x + pad / 2 + *depth as i32 * pad;
+            // A triangle for one that holds others: down when open.
+            if !node.children.is_empty() {
+                let s = (pad / 2) | 1;
+                let (tx, ty) = (nx + pad / 6, y + (line - s) / 2);
+                for i in 0..=s / 2 {
+                    match inspector.open.contains(path) {
+                        true => sub.fill(tx + i, ty + s / 4 + i, s - 2 * i, 1, dim),
+                        false => sub.fill(tx + s / 4 + i, ty + i, 1, s - 2 * i, dim),
+                    }
+                }
+            }
+            let name_x = nx + pad;
+            // A run folded into one line says how many more.
+            let shown_name = if node.more > 0 { format!("{}  ×{} more", node.name, node.more) } else { node.name.clone() };
+            text.draw(sub, name_x, y, px, fg, &shown_name);
+            let size = bytes_words(node.size);
+            let sw = text.width(&size, small);
+            text.draw(sub, size_x - sw, y + (line - small_line) / 2, small, dim, &size);
+            let about_x = name_x + text.width(&shown_name, px) + pad / 2;
+            let room = size_x - sw - pad - about_x;
+            if room > pad * 3 && !node.about.is_empty() {
+                let about = clipped(text, node.about, room, small);
+                text.draw(sub, about_x, y + (line - small_line) / 2, small, dim, &about);
+            }
+            drawn.push((Hit::Node(path.clone()), place));
+        }
+
+        // The box picked out: its name, what it is, where, its fields and
+        // its first bytes. It stays where it is as the tree scrolls.
+        let Some(node) = node_at(nodes, inspector.selected) else { return visible.len() as i32 * row_h };
+        let (dx, dw) = (x + tree_w + pad, inner_w - tree_w - pad);
+        let mut y = 0;
+        let fields_h = node.fields.len() as i32 * (line + pad / 4);
+        let hex_rows = node.bytes.len().div_ceil(16) as i32;
+        let card_h = pad + line + small_line + pad / 2 + fields_h + pad + hex_rows * (small_line + pad / 6) + pad;
+        sub.round_fill(dx, y, dw, card_h.min(inspector.view_h), pad / 2, 0x26262B, 256);
+        y += pad;
+        text.draw(sub, dx + pad, y, px, TEXT_COLOR, &node.name);
+        let about = if node.about.is_empty() { String::new() } else { format!("  ·  {}", node.about) };
+        let name_w = text.width(&node.name, px);
+        let about = clipped(text, &about, dw - 3 * pad - name_w, small);
+        text.draw(sub, dx + pad + name_w, y + (line - small_line) / 2, small, DIM_TEXT_COLOR, &about);
+        y += line;
+        let place = format!("at byte {}  ·  {} long  ·  {} inside", node.offset, bytes_words(node.size), node.children.len());
+        text.draw(sub, dx + pad, y, small, DIM_TEXT_COLOR, &place);
+        y += small_line + pad / 2;
+        let name_w = node.fields.iter().map(|(name, _, _)| text.width(name, small)).max().unwrap_or(0).min(dw / 2);
+        for (name, value, means) in &node.fields {
+            let name = clipped(text, name, name_w, small);
+            text.draw(sub, dx + pad, y + (line - small_line) / 2, small, DIM_TEXT_COLOR, &name);
+            let vx = dx + pad + name_w + pad;
+            let shown = clipped(text, value, dw / 4, px);
+            let vw = text.width(&shown, px);
+            let place = [vx - pad / 4 + offset.0, y + offset.1, vw + pad / 2, line];
+            if (place[0]..place[0] + place[2]).contains(&mouse.0) && (place[1]..place[1] + place[3]).contains(&mouse.1) {
+                sub.round_fill(vx - pad / 4, y, vw + pad / 2, line, pad / 4, 0x3A3A40, 256);
+            }
+            text.draw(sub, vx, y, px, TEXT_COLOR, &shown);
+            drawn.push((Hit::Copy(value.clone()), place));
+            if !means.is_empty() {
+                let mx = vx + vw + pad;
+                let means = clipped(text, means, dx + dw - pad - mx, small);
+                text.draw(sub, mx, y + (line - small_line) / 2, small, DIM_TEXT_COLOR, &means);
+            }
+            y += line + pad / 4;
+        }
+        y += pad / 2;
+        for (row, chunk) in node.bytes.chunks(16).enumerate() {
+            let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02X}")).collect();
+            let ascii: String = chunk.iter().map(|b| if b.is_ascii_graphic() { *b as char } else { '.' }).collect();
+            let words = format!("{:08X}  {}  {ascii}", node.offset + row as u64 * 16, hex.join(" "));
+            let words = clipped(text, &words, dw - 2 * pad, small);
+            text.draw(sub, dx + pad, y, small, if row == 0 { TEXT_COLOR } else { DIM_TEXT_COLOR }, &words);
+            y += small_line + pad / 6;
+        }
+        visible.len() as i32 * row_h
+    }
+}
+
+/// What the Structure tab needs of the inspector while it draws: which
+/// boxes are open and picked out, and the scroll, which it moves to keep
+/// the one picked out in view.
+struct TreeState<'a> {
+    open: &'a HashSet<Vec<usize>>,
+    selected: &'a Vec<usize>,
+    follow: &'a mut bool,
+    scroll: &'a mut i32,
+    view_h: i32,
 }

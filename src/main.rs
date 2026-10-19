@@ -1,4 +1,5 @@
 mod app;
+mod boxes;
 mod commands;
 mod convert;
 mod decode;
