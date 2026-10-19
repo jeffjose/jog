@@ -421,6 +421,8 @@ struct Video {
     /// How many subtitle and audio tracks it has, once that has been
     /// asked: not while it starts, when asking waits on the player.
     tracks: Option<(usize, usize)>,
+    /// The audio and subtitles playing, in words, for the info overlay.
+    track_words: Option<String>,
     /// When it first showed, and whether it has been counted as watched.
     shown_at: Option<Instant>,
     watched: bool,

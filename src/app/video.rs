@@ -261,7 +261,7 @@ impl App {
             // Until the player reports for itself, this is where it is.
             // One counted from the end has to wait for the length.
             let seeking = from.filter(|seconds| *seconds >= 0.0).map(|seconds| (started, seconds));
-            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, held, tracks: None, shown_at: None, watched: false, to_end: None });
+            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, held, tracks: None, track_words: None, shown_at: None, watched: false, to_end: None });
             self.perf.video_lines = None;
             self.apply_video_view();
         }
@@ -426,6 +426,7 @@ impl App {
         let asked = video.tracks.is_none() && video.shown_at.is_some_and(|at| at.elapsed() >= TRACKS_AFTER);
         if asked {
             video.tracks = Some((tracks_of(player, "sub").len(), tracks_of(player, "audio").len()));
+            video.track_words = tracks::playing_words(&tracks::track_list(player), self.subtitles);
         }
         let (id, showing) = (video.id, video.showing);
         if (showing && (changed || video_started.is_some())) || asked {

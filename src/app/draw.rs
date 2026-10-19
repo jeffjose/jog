@@ -453,6 +453,14 @@ impl App {
                 true => {
                     badges.extend(self.codec_name());
                     badges.extend(self.hdr_badges());
+                    // How many tracks there are to pick from, when more than one.
+                    let (subs, audio) = self.video.as_ref().and_then(|video| video.tracks).unwrap_or((0, 0));
+                    if audio > 1 {
+                        badges.push(format!("{audio} audio"));
+                    }
+                    if subs > 0 {
+                        badges.push(format!("{subs} subs"));
+                    }
                 }
                 false => {
                     badges.extend(self.format_of(self.id()));
@@ -470,6 +478,10 @@ impl App {
             // The dimensions, to be clicked, which copies them.
             let (dims, rest) = self.info_line();
             let mut details = vec![(rest, dim)];
+            // Which audio and subtitles are playing.
+            if let Some(words) = self.video.as_ref().and_then(|video| video.track_words.clone()) {
+                details.push((format!("   {words}"), dim));
+            }
             if let Some(dims) = dims {
                 details.insert(0, (format!("{LINK}{dims}"), dim));
             }

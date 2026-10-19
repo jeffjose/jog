@@ -412,6 +412,15 @@ impl App {
         let memory = self.track_memory.get_or_insert_with(read_memory);
         memory.insert(path, choice);
         write_memory(memory);
+        // The info overlay's words for them: from the picker, which knows
+        // what was just picked; otherwise asked of the player again soon.
+        let words = self.track_picker.as_ref().map(|picker| playing_words(&picker.tracks, self.subtitles));
+        if let Some(video) = &mut self.video {
+            match words {
+                Some(words) => video.track_words = words,
+                None => video.tracks = None,
+            }
+        }
     }
 
     /// The tracks and timing kept for a video, as a player is told them
@@ -567,4 +576,19 @@ impl App {
 
 fn in_place((x, y): (i32, i32), [left, top, w, h]: [i32; 4]) -> bool {
     (left..left + w).contains(&x) && (top..top + h).contains(&y)
+}
+
+/// The audio and subtitles playing, in words: "Korean · Opus 2.0  ·
+/// CC Korean". None for a video with one track and no subtitles.
+pub fn playing_words(tracks: &[TrackInfo], subtitles: bool) -> Option<String> {
+    let audio_count = tracks.iter().filter(|t| t.kind == TrackKind::Audio).count();
+    let sub_count = tracks.iter().filter(|t| t.kind == TrackKind::Sub).count();
+    if audio_count < 2 && sub_count == 0 {
+        return None;
+    }
+    let audio = tracks.iter().find(|t| t.kind == TrackKind::Audio && t.selected);
+    let sub = tracks.iter().find(|t| t.kind == TrackKind::Sub && t.selected).filter(|_| subtitles);
+    let audio = audio.map_or("No sound".to_string(), |t| format!("{}  {}", track_label(t), track_codec(t)));
+    let sub = sub.map_or("CC off".to_string(), |t| format!("CC {}", track_label(t)));
+    Some(format!("{audio}   ·   {sub}"))
 }
