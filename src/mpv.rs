@@ -168,9 +168,6 @@ pub struct Player {
     /// for, to turn or mirror it: see `set_filter`.
     hlg: Cell<bool>,
     view_filter: RefCell<String>,
-    /// Whether frames are converted by zimg, for HDR or wide color: see
-    /// `needs_zimg`.
-    zimg: Cell<bool>,
     /// The tracks and delays the next file opened starts with, when one
     /// was chosen for it: audio, subtitles ("no" for none), then the
     /// subtitle and audio delays in seconds.
@@ -207,15 +204,6 @@ enum Known {
     Flag(bool),
     Number(f64),
     Text(String),
-}
-
-/// Whether a video's frames need zimg to come out right: an HDR transfer
-/// curve, or primaries wider than an SDR screen's, which swscale passes
-/// through unconverted, washed out. Not known yet counts as SDR.
-fn needs_zimg(gamma: Option<&str>, primaries: Option<&str>) -> bool {
-    let sdr_gamma = ["bt.1886", "srgb", "gamma2.2", "gamma2.4", "gamma2.8", "linear", "auto"];
-    let sdr_primaries = ["bt.709", "bt.601-525", "bt.601-625", "bt.470m", "auto"];
-    gamma.is_some_and(|gamma| !sdr_gamma.contains(&gamma)) || primaries.is_some_and(|primaries| !sdr_primaries.contains(&primaries))
 }
 
 fn watched(property: &str) -> Option<usize> {
@@ -295,15 +283,6 @@ impl Player {
                 // the other until the player gives up a fifth of a second
                 // later: a pause after every seek.
                 ("video-latency-hacks", "yes"),
-                // Each frame is converted to the window's pixels on the
-                // CPU. zimg, the usual, took six cores for a 4K video at
-                // 60 fps; swscale's bicubic in its fast mode takes a third
-                // of that, a quarter for 1080p shown at 4K, and looks the
-                // same. zimg is turned back on for HDR and wide color,
-                // which swscale cannot convert: see `needs_zimg`.
-                ("sws-allow-zimg", "no"),
-                ("sws-scaler", "bicubic"),
-                ("sws-fast", "yes"),
             ];
             // A preview only ever shows single frames near where it is asked
             // to look, so it trades accuracy and picture quality for speed.
@@ -359,7 +338,7 @@ impl Player {
             }
             let known = Mutex::new(vec![None; WATCHED.len()]);
             let watching = matches!(role, Role::Playback { .. });
-            Ok(Player { api, handle, render, known, watching, hlg: Cell::new(false), view_filter: RefCell::new(String::new()), zimg: Cell::new(false), next_tracks: RefCell::new(None), _wake: wake, _library: library })
+            Ok(Player { api, handle, render, known, watching, hlg: Cell::new(false), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), _wake: wake, _library: library })
         }
     }
 
@@ -597,26 +576,6 @@ impl Player {
                         }
                     }
                     let mut known = self.known.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if matches!(WATCHED[index].0, "video-params/gamma" | "video-params/primaries") {
-                        let text = |name| match known.get(watched(name)?)?.as_ref()? {
-                            Known::Text(text) => Some(text.clone()),
-                            _ => None,
-                        };
-                        let mut gamma = text("video-params/gamma");
-                        let mut primaries = text("video-params/primaries");
-                        let now = match &value {
-                            Some(Known::Text(text)) => Some(text.clone()),
-                            _ => None,
-                        };
-                        match WATCHED[index].0 {
-                            "video-params/gamma" => gamma = now,
-                            _ => primaries = now,
-                        }
-                        let zimg = needs_zimg(gamma.as_deref(), primaries.as_deref());
-                        if zimg != self.zimg.replace(zimg) {
-                            self.set("sws-allow-zimg", if zimg { "yes" } else { "no" });
-                        }
-                    }
                     // Told of again with the same value, as it is on a
                     // file being opened, nothing has changed.
                     if known[index] != value {
