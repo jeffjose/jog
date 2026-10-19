@@ -79,6 +79,8 @@ pub enum Command {
     TrackPicker,
     /// What the file is made of: its streams, HDR, tags and chapters.
     Inspect,
+    /// Keep, order, tag, add and take out a video's tracks.
+    EditTracks,
     SubtitlesLarger,
     SubtitlesSmaller,
     /// Put the debug overlay's figures on the clipboard, plainly or as JSON.
@@ -544,6 +546,7 @@ pub fn command_icon(command: Command) -> &'static str {
         CycleSubtitles => CAPTIONS,
         CycleAudio | TrackPicker => AUDIO_LINES,
         Inspect => EYE,
+        EditTracks => AUDIO_LINES,
         SubtitlesLarger | SubtitlesSmaller => A_LARGE_SMALL,
         ZoomIn | GridLarger => ZOOM_IN,
         ZoomOut | GridSmaller => ZOOM_OUT,
@@ -670,6 +673,7 @@ const PLAYBACK: &[Option<MenuItem>] = &[
     video_item("Smaller subtitles", "", Command::SubtitlesSmaller),
     video_item("Next audio track", "J", Command::CycleAudio),
     video_item("Audio and subtitles…", "Ctrl+J", Command::TrackPicker),
+    video_item("Edit tracks…", "", Command::EditTracks),
 ];
 
 /// Getting about the list further than one file at a time.

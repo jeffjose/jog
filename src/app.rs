@@ -60,6 +60,7 @@ mod refresh;
 mod scenes_strip;
 mod scripted;
 mod inspect;
+mod track_editor;
 mod tracks;
 mod triaging;
 mod video;
@@ -254,6 +255,9 @@ pub enum Event {
     CompareDelta(u64, compare::Delta),
     /// What a file was found to be made of, for the inspector.
     Inspected(usize, Result<inspect::Inspection, String>),
+    /// The tracks editor's file written, or why not; and whether it took
+    /// the original's place.
+    TracksWritten(Result<PathBuf, String>, bool),
     /// File details read on another thread, for the info and EXIF overlays.
     Meta(usize, Meta),
     /// The font, loaded on another thread while the first image decodes.
@@ -902,6 +906,10 @@ enum PromptKind {
     SectionName { start: f64, end: f64 },
     /// A size for the Convert panel to fit the picture under.
     FitSize,
+    /// The tracks editor's: a track's language, its title, a file to add.
+    TrackLanguage(usize),
+    TrackTitle(usize),
+    TrackFile,
 }
 
 pub struct App {
@@ -1228,6 +1236,8 @@ pub struct App {
     track_picker: Option<tracks::TrackPicker>,
     /// The inspector (F3), of what a file is made of.
     inspector: Option<inspect::Inspector>,
+    /// The tracks editor: a video's streams to keep, order and tag.
+    track_editor: Option<track_editor::TrackEditor>,
     track_memory: Option<HashMap<PathBuf, tracks::TrackChoice>>,
     /// The section marked in each video, by file: still there when the
     /// video is come back to.
@@ -1771,6 +1781,7 @@ impl App {
             convert_panel: None,
             track_picker: None,
             inspector: None,
+            track_editor: None,
             track_memory: None,
             sections: HashMap::new(),
             marked_sections: None,
@@ -2756,6 +2767,7 @@ impl App {
             CycleAudio => self.cycle_audio(),
             TrackPicker => self.open_track_picker(),
             Inspect => self.open_inspector(),
+            EditTracks => self.open_track_editor(),
             SubtitlesLarger => self.size_subtitles(true),
             SubtitlesSmaller => self.size_subtitles(false),
             ClearFilter => self.clear_filter(false),
@@ -3780,6 +3792,7 @@ impl ApplicationHandler<Event> for App {
             Event::CompareScore(ticket, score) => self.compare_score(ticket, score),
             Event::CompareDelta(ticket, delta) => self.compare_delta(ticket, delta),
             Event::Inspected(id, found) => self.inspected(id, found),
+            Event::TracksWritten(result, replaced) => self.tracks_written(result, replaced),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {
                 self.spare = spare.ok().map(|player| Spare { player, id: None, from: 0.0 });

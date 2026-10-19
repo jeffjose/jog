@@ -604,6 +604,11 @@ impl App {
                     self.prompt = None;
                     self.save_space(&typed);
                 }
+                PromptKind::TrackLanguage(_) | PromptKind::TrackTitle(_) | PromptKind::TrackFile => {
+                    let (kind, typed) = (prompt.kind, prompt.field.string());
+                    self.prompt = None;
+                    self.track_prompt_done(kind, &typed);
+                }
                 PromptKind::FitSize => {
                     let typed = prompt.field.string();
                     self.prompt = None;
@@ -643,7 +648,8 @@ impl App {
         let base = match prompt.kind {
             PromptKind::Rename => self.files[prompt.id].parent().map(Path::to_path_buf).unwrap_or_default(),
             PromptKind::SendTo { .. } => PathBuf::new(),
-            PromptKind::SaveWorkspace | PromptKind::SectionName { .. } | PromptKind::FitSize => return,
+            PromptKind::TrackFile => PathBuf::new(),
+            PromptKind::SaveWorkspace | PromptKind::SectionName { .. } | PromptKind::FitSize | PromptKind::TrackLanguage(_) | PromptKind::TrackTitle(_) => return,
         };
         let before: String = prompt.field.text[..prompt.field.cursor].iter().collect();
         if before.starts_with('@') {

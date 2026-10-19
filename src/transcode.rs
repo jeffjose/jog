@@ -708,6 +708,14 @@ fn size(path: &Path) -> u64 {
     std::fs::metadata(path).map_or(0, |meta| meta.len())
 }
 
+/// Writes `output` from `input` with ffmpeg as `args` say, which may name
+/// further inputs and map streams from any of them: the tracks editor's
+/// remux. Saying how far along it is out of `seconds`, called off as any
+/// encode is, and written under another name until it is done.
+pub fn remux(input: &Path, args: &[String], muxer: &str, output: &Path, seconds: f64, progress: impl FnMut(f64)) -> Result<PathBuf, String> {
+    run(input, &[], args, muxer, output, seconds, progress)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

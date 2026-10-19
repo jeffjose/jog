@@ -39,6 +39,9 @@ impl App {
         if self.compare.is_some() {
             return self.compare_key(key);
         }
+        if self.track_editor.is_some() {
+            return self.track_editor_key(key);
+        }
         if self.inspector.is_some() {
             return self.inspector_key(key);
         }
@@ -349,6 +352,12 @@ impl App {
         if self.compare.is_some() {
             if button == MouseButton::Left && pressed {
                 self.compare_click(x, y);
+            }
+            return;
+        }
+        if self.track_editor.is_some() {
+            if button == MouseButton::Left && pressed {
+                self.track_editor_click(x, y);
             }
             return;
         }

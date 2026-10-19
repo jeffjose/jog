@@ -315,6 +315,10 @@ impl App {
                 self.pick_row(at);
             }
             Key::Character("j") if self.modifiers.control_key() => self.track_picker = None,
+            Key::Character("e") => {
+                self.open_track_editor();
+                return true;
+            }
             _ => return false,
         }
         self.redraw();
@@ -570,7 +574,7 @@ impl App {
             y += row_h;
         }
         y += pad / 2;
-        text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, "↑↓ pick  ·  Enter use  ·  Shift+↑↓ timing ±0.1 s  ·  Esc close");
+        text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, "↑↓ pick  ·  Enter use  ·  Shift+↑↓ timing ±0.1 s  ·  e edit tracks  ·  Esc close");
     }
 }
 

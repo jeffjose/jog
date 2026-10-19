@@ -659,7 +659,7 @@ impl App {
         let blocks = [&exif, &actions, &toast, &error, &footer, &time];
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty() && top_left.is_empty() && debug.is_empty();
         let panel = if viewing { self.list_panel() } else { None };
-        let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some() || self.compare.is_some() || self.track_picker.is_some() || self.inspector.is_some();
+        let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some() || self.compare.is_some() || self.track_picker.is_some() || self.inspector.is_some() || self.track_editor.is_some();
         // The filmstrip has words of its own: the lengths of its videos.
         let boxes = boxes || self.palette.is_some() || strip.is_some() || scene_strip.is_some() || self.overview.is_some() || self.triage_on;
         if nothing_to_write && !boxes && !self.help {
@@ -836,6 +836,9 @@ impl App {
         if self.track_picker.is_some() {
             self.draw_track_picker(canvas, &mut text, px);
         }
+        if self.track_editor.is_some() {
+            self.draw_track_editor(canvas, &mut text, px);
+        }
         if self.inspector.is_some() {
             self.draw_inspector(canvas, &mut text, px);
         }
@@ -848,6 +851,9 @@ impl App {
                 PromptKind::SaveWorkspace => (commands::icons::FOLDER_PLUS, "Save as workspace".to_string(), "Enter to save to the config"),
                 PromptKind::SectionName { start, end } => (commands::icons::PENCIL, format!("Name {} – {}", clock(start), clock(end)), "Enter to save  ·  empty clears it"),
                 PromptKind::FitSize => (commands::icons::REPLACE, "Fit under".to_string(), "500 KB, 1.2 MB  ·  Enter to fit"),
+                PromptKind::TrackLanguage(_) => (commands::icons::PENCIL, "Language".to_string(), "eng, kor, fre…  ·  Enter to set"),
+                PromptKind::TrackTitle(_) => (commands::icons::PENCIL, "Title".to_string(), "Enter to set  ·  empty clears it"),
+                PromptKind::TrackFile => (commands::icons::FOLDER_PLUS, "Add a subtitle or audio file".to_string(), "a path, then +0.5 to move it later  ·  Tab completes"),
                 PromptKind::SendTo { moving: true } => (commands::icons::FOLDER_INPUT, format!("Move {files} to"), "Enter to move  ·  Tab completes"),
                 PromptKind::SendTo { moving: false } => (commands::icons::FOLDER_PLUS, format!("Copy {files} to"), "Enter to copy  ·  Tab completes"),
             };
