@@ -9,7 +9,13 @@
 //! Leaving them, by playing, seeking or anything but stepping, puts the
 //! main player on the very frame shown, so that nothing jumps.
 
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc;
+
+/// The job the back player is wanted on, by its ticket; 0 for none. Once
+/// the video plays again, or another pause comes, the one it is on is not
+/// wanted, and it stops at once rather than decode on beside playback.
+static WANTED: AtomicU64 = AtomicU64::new(0);
 
 use super::*;
 
@@ -67,6 +73,10 @@ pub struct BackFrames {
 /// The back player's thread: fetches what it is asked, the latest ask
 /// first, and sends the frames back when they are all there.
 fn worker(jobs: mpsc::Receiver<Job>, proxy: EventLoopProxy<Event>) {
+    // Below the main player: it decodes beside playback only when there
+    // is time to spare. Threads the player starts take this on.
+    // SAFETY: a plain system call on the calling thread.
+    unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
     let (wake_tx, wake) = mpsc::channel::<Signal>();
     let Ok(player) = Player::new(Role::Playback { silent: true }, move |signal| {
         let _ = wake_tx.send(signal);
@@ -108,6 +118,10 @@ fn worker(jobs: mpsc::Receiver<Job>, proxy: EventLoopProxy<Event>) {
         let mut frames: Frames = VecDeque::new();
         let mut finished = false;
         while !finished {
+            // Not wanted any more: the video plays again.
+            if WANTED.load(AtomicOrdering::Relaxed) != job.ticket {
+                break;
+            }
             // A newer ask: this one is dropped for it.
             if let Ok(later) = jobs.try_recv() {
                 next = Some(later);
@@ -158,6 +172,7 @@ impl App {
     /// playing again should not wait for.
     pub(super) fn drop_back(&mut self) {
         self.back_due = None;
+        WANTED.store(0, AtomicOrdering::Relaxed);
         if let Some(back) = self.back.take() {
             std::thread::spawn(move || {
                 drop(back);
@@ -215,6 +230,10 @@ impl App {
         }
         let id = video.id;
         let job = Job { ticket, path: self.files[id].clone(), anchor, size, view: view.clone(), sid, half_frame, most };
+        // The frames of a pause before this one go, off this thread; then
+        // this job is the one wanted, before the worker can look.
+        self.drop_back();
+        WANTED.store(ticket, AtomicOrdering::Relaxed);
         let proxy = self.proxy.clone();
         // To the worker there is, or, it having gone for want of work, to a
         // new one.
@@ -234,8 +253,6 @@ impl App {
             }
             self.back_jobs = Some(jobs);
         }
-        // The frames of a pause before this one go, off this thread.
-        self.drop_back();
         self.back = Some(BackFrames { ticket, id, anchor, size, view, frames: VecDeque::new(), filling: true, shown: None, pending: 0, half_frame });
     }
 
