@@ -59,6 +59,7 @@ mod palette;
 mod refresh;
 mod scenes_strip;
 mod scripted;
+mod tracks;
 mod triaging;
 mod video;
 mod workspaces;
@@ -1217,6 +1218,10 @@ pub struct App {
     triage_buttons: RefCell<Vec<(Command, [i32; 4])>>,
     /// The Convert panel, when it is up.
     convert_panel: Option<ConvertPanel>,
+    /// The picker of a video's tracks (Ctrl+J), and the tracks and timing
+    /// kept for each video, read once.
+    track_picker: Option<tracks::TrackPicker>,
+    track_memory: Option<HashMap<PathBuf, tracks::TrackChoice>>,
     /// The section marked in each video, by file: still there when the
     /// video is come back to.
     sections: HashMap<usize, Section>,
@@ -1757,6 +1762,8 @@ impl App {
             verdicts: RefCell::new(HashMap::new()),
             triage_buttons: RefCell::new(Vec::new()),
             convert_panel: None,
+            track_picker: None,
+            track_memory: None,
             sections: HashMap::new(),
             marked_sections: None,
             strip_tab: StripTab::Scenes,
@@ -2739,6 +2746,7 @@ impl App {
             ToggleScenes => self.cycle_strip(),
             CycleSubtitles => self.cycle_subtitles(),
             CycleAudio => self.cycle_audio(),
+            TrackPicker => self.open_track_picker(),
             SubtitlesLarger => self.size_subtitles(true),
             SubtitlesSmaller => self.size_subtitles(false),
             ClearFilter => self.clear_filter(false),
@@ -3766,6 +3774,7 @@ impl ApplicationHandler<Event> for App {
             Event::Spare(spare) => {
                 self.spare = spare.ok().map(|player| Spare { player, id: None, from: 0.0 });
                 self.apply_subtitles();
+                self.apply_track_prefs();
                 // As for the first: it may have queued events unheard.
                 self.spare_signal(Signal::Events);
                 self.preload_video();

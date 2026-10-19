@@ -75,6 +75,8 @@ pub enum Command {
     CycleSubtitles,
     /// Step through a video's audio tracks.
     CycleAudio,
+    /// The picker of a video's audio and subtitle tracks.
+    TrackPicker,
     SubtitlesLarger,
     SubtitlesSmaller,
     /// Put the debug overlay's figures on the clipboard, plainly or as JSON.
@@ -330,6 +332,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "l" => CycleLoop,
             "T" => ToggleScenes,
             "H" => CycleHdr,
+            "j" if modifiers.control_key() => TrackPicker,
             "j" => CycleSubtitles,
             "J" => CycleAudio,
             "b" => Restart,
@@ -536,7 +539,7 @@ pub fn command_icon(command: Command) -> &'static str {
         TogglePrecise => SCAN,
         ToggleScenes => CLAPPERBOARD,
         CycleSubtitles => CAPTIONS,
-        CycleAudio => AUDIO_LINES,
+        CycleAudio | TrackPicker => AUDIO_LINES,
         SubtitlesLarger | SubtitlesSmaller => A_LARGE_SMALL,
         ZoomIn | GridLarger => ZOOM_IN,
         ZoomOut | GridSmaller => ZOOM_OUT,
@@ -662,6 +665,7 @@ const PLAYBACK: &[Option<MenuItem>] = &[
     video_item("Larger subtitles", "", Command::SubtitlesLarger),
     video_item("Smaller subtitles", "", Command::SubtitlesSmaller),
     video_item("Next audio track", "J", Command::CycleAudio),
+    video_item("Audio and subtitles…", "Ctrl+J", Command::TrackPicker),
 ];
 
 /// Getting about the list further than one file at a time.

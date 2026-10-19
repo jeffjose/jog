@@ -29,6 +29,10 @@ impl App {
         if self.prompt.is_some() {
             return self.prompt_key(key, event_loop);
         }
+        // The track picker takes the keys it knows; the rest work as ever.
+        if self.track_picker.is_some() && self.picker_key(&key) {
+            return;
+        }
         if self.convert_panel.is_some() {
             return self.panel_key(key, event_loop);
         }
@@ -327,6 +331,10 @@ impl App {
                 }
                 self.redraw();
             }
+            return;
+        }
+        // The track picker takes a click on it, and closes on one elsewhere.
+        if self.track_picker.is_some() && button == MouseButton::Left && pressed && self.picker_click(x, y) {
             return;
         }
         if self.convert_panel.is_some() {

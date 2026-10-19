@@ -174,6 +174,7 @@ impl App {
                 player.set("mute", if self.muted { "yes" } else { "no" });
                 self.player = Some(player);
                 self.apply_subtitles();
+                self.apply_track_prefs();
                 *self.video_view_sent.borrow_mut() = None;
                 // A video may already be waiting for it.
                 self.sync_video();
@@ -220,6 +221,8 @@ impl App {
         let from = carried.or_else(|| self.resume_from(id));
         let mut held = false;
         let speed = self.playing_speed().to_string();
+        // The tracks and timing kept for it, told before it opens.
+        let kept = self.kept_tracks(id);
         if let Some(player) = &mut self.player {
             let started = Instant::now();
             // Seeking one that is held somewhere else takes longer than
@@ -246,6 +249,9 @@ impl App {
                     held = true;
                 }
                 None => {
+                    if let Some((aid, sid, sub_delay, audio_delay)) = &kept {
+                        player.choose_next(aid, sid, *sub_delay, *audio_delay);
+                    }
                     player.play(&self.files[id], from, paused);
                     if self.options.debug {
                         eprintln!("jog: {:>7.1?} video asked for", started.elapsed());
@@ -292,7 +298,11 @@ impl App {
         }
         let from = self.resume_from(next);
         let start = from.unwrap_or(0.0);
+        let kept = self.kept_tracks(next);
         let Some(spare) = self.spare.as_mut().filter(|spare| spare.id != Some(next) || spare.from != start) else { return };
+        if let Some((aid, sid, sub_delay, audio_delay)) = &kept {
+            spare.player.choose_next(aid, sid, *sub_delay, *audio_delay);
+        }
         spare.player.hold(&self.files[next], from);
         (spare.id, spare.from) = (Some(next), start);
     }
@@ -582,6 +592,7 @@ impl App {
             player.set("sid", &track.id.to_string());
         }
         self.subtitles = next.is_some();
+        self.remember_tracks();
         self.apply_subtitles();
         self.toast(match next {
             Some(track) => format!("{}  {}", commands::icons::CAPTIONS, track.name),
@@ -598,7 +609,9 @@ impl App {
         }
         let at = tracks.iter().position(|track| track.selected).map_or(0, |at| (at + 1) % tracks.len());
         player.set("aid", &tracks[at].id.to_string());
-        self.toast(format!("{}  {}  ·  {} of {}", commands::icons::AUDIO_LINES, tracks[at].name, at + 1, tracks.len()));
+        let said = format!("{}  {}  ·  {} of {}", commands::icons::AUDIO_LINES, tracks[at].name, at + 1, tracks.len());
+        self.remember_tracks();
+        self.toast(said);
     }
 
     /// Makes subtitles a step larger or smaller.
@@ -637,7 +650,11 @@ impl App {
         if !files::is_video(&self.files[before]) || before == self.id() {
             return;
         }
+        let kept = self.kept_tracks(before);
         let Some(spare) = self.spare.as_mut().filter(|spare| spare.id != Some(before) || spare.from != -SEEK_STEP) else { return };
+        if let Some((aid, sid, sub_delay, audio_delay)) = &kept {
+            spare.player.choose_next(aid, sid, *sub_delay, *audio_delay);
+        }
         spare.player.hold(&self.files[before], Some(-SEEK_STEP));
         (spare.id, spare.from) = (Some(before), -SEEK_STEP);
     }

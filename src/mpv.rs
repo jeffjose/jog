@@ -164,6 +164,10 @@ pub struct Player {
     /// for, to turn or mirror it: see `set_filter`.
     hlg: Cell<bool>,
     view_filter: RefCell<String>,
+    /// The tracks and delays the next file opened starts with, when one
+    /// was chosen for it: audio, subtitles ("no" for none), then the
+    /// subtitle and audio delays in seconds.
+    next_tracks: RefCell<Option<(String, String, f64, f64)>>,
     /// Handed to mpv as callback context, so it must not move.
     _wake: Box<Wake>,
     /// Keeps the function pointers in `api` valid. Dropped last.
@@ -330,7 +334,7 @@ impl Player {
             }
             let known = Mutex::new(vec![None; WATCHED.len()]);
             let watching = matches!(role, Role::Playback { .. });
-            Ok(Player { api, handle, render, known, watching, hlg: Cell::new(false), view_filter: RefCell::new(String::new()), _wake: wake, _library: library })
+            Ok(Player { api, handle, render, known, watching, hlg: Cell::new(false), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), _wake: wake, _library: library })
         }
     }
 
@@ -402,11 +406,21 @@ impl Player {
         self.command_later(&arguments);
     }
 
+    /// The tracks and delays the next file opened is to start with, as
+    /// kept for it from before; otherwise it gets those the player would
+    /// pick by itself.
+    pub fn choose_next(&self, aid: &str, sid: &str, sub_delay: f64, audio_delay: f64) {
+        *self.next_tracks.borrow_mut() = Some((aid.to_string(), sid.to_string(), sub_delay, audio_delay));
+    }
+
     /// A track chosen for one file is not the choice for the next, which
-    /// gets the ones the player would pick by itself.
+    /// gets the ones chosen for it, or those the player would pick itself.
     fn pick_tracks(&self) {
-        self.set("aid", "auto");
-        self.set("sid", "auto");
+        let (aid, sid, sub_delay, audio_delay) = self.next_tracks.take().unwrap_or_else(|| ("auto".into(), "auto".into(), 0.0, 0.0));
+        self.set("aid", &aid);
+        self.set("sid", &sid);
+        self.set("sub-delay", &format!("{sub_delay:.3}"));
+        self.set("audio-delay", &format!("{audio_delay:.3}"));
     }
 
     /// Whether the file has been opened and its frame is there to be shown.

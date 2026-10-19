@@ -647,7 +647,7 @@ impl App {
         let blocks = [&exif, &actions, &toast, &error, &footer, &time];
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty() && top_left.is_empty() && debug.is_empty();
         let panel = if viewing { self.list_panel() } else { None };
-        let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some() || self.compare.is_some();
+        let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some() || self.compare.is_some() || self.track_picker.is_some();
         // The filmstrip has words of its own: the lengths of its videos.
         let boxes = boxes || self.palette.is_some() || strip.is_some() || scene_strip.is_some() || self.overview.is_some() || self.triage_on;
         if nothing_to_write && !boxes && !self.help {
@@ -820,6 +820,9 @@ impl App {
         }
         if self.compare.is_some() {
             self.draw_compare(canvas, &mut text, px);
+        }
+        if self.track_picker.is_some() {
+            self.draw_track_picker(canvas, &mut text, px);
         }
         // Over the panels, which a box can be opened from.
         if let Some(prompt) = &self.prompt {
