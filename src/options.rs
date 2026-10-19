@@ -125,6 +125,8 @@ where they were left unless --no-positions is given.
   T                          scenes of this video along the bottom: Left / Right
                              then go from scene to scene, and a click plays one
   j / J                      next subtitles, or none / next audio track
+  Ctrl+J                     every audio and subtitle track to pick from; Shift+↑↓
+                             moves their timing; kept per video. e edits them
   Ctrl+Left / Ctrl+Right, or , . < > n           previous / next file
   Seeking past the end of a video starts the next file, and seeking back
   past its start carries on into the one before, as though they lay end to end."),
@@ -177,6 +179,16 @@ Workspaces are folders with names, set in the config file:
   up where it was left. Marks are kept. --start says the same of what is
   opened by its path, which otherwise resumes. In the box for
   a folder to copy or move into, @pictures means that workspace."),
+    ("tracks", "Tracks and the inspector", "
+  Ctrl+J                     the audio and subtitle tracks, to pick from; what is
+                             picked, and its timing, kept for each video
+  e in Ctrl+J                keep, drop, order, tag and flag the tracks, add a
+                             subtitle or audio file, take one out to a file; s
+                             stereo, n even loudness, b burn subtitles in. Writes
+                             a new file, copied not encoded unless asked
+  F3                         inspect: the file's streams, HDR scene by scene, its
+                             boxes or elements, tags and chapters; for a picture
+                             its EXIF, color profile, Ultra HDR gain map and XMP"),
     ("debug", "Debugging", "
       --benchmark            step, zoom and page through the files by itself,
                              timing each, print the figures and quit

@@ -1033,6 +1033,8 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("T", "Scenes of this video along the bottom; Left / Right then go by scene"),
                 ("S", "Save the frame on view as a picture"),
                 ("j  J", "Next subtitles, or none / next audio track"),
+                ("Ctrl+J", "Pick audio and subtitles; e edits the tracks"),
+                ("F3", "Inspect: streams, HDR, structure, EXIF"),
                 ("Ctrl+Left  Ctrl+Right", "Previous / next file"),
                 ("Pointer at the bottom", "Seek bar with previews"),
                 ("At the end", "The next file plays, unless this one loops"),
