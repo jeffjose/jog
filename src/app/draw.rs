@@ -509,7 +509,11 @@ impl App {
                 if self.speed != 1.0 {
                     line.push((format!("   {}x", self.speed), soft));
                 }
+                // Looped on its own, from its row in the file list, it plays
+                // again whatever the list's loop.
+                let own = self.video.as_ref().is_some_and(|video| self.looped.contains(&video.id));
                 match self.looping {
+                    Looping::Off | Looping::List if own => line.push((format!("   {} this video", commands::icons::REPEAT_1), soft)),
                     Looping::Off => {}
                     Looping::File => line.push((format!("   {} this video", commands::icons::REPEAT_1), soft)),
                     Looping::List => line.push((format!("   {} the list", commands::icons::REPEAT), soft)),
@@ -1309,8 +1313,15 @@ impl App {
     pub(super) fn info_line(&mut self) -> (Option<String>, String) {
         let size = self.current_meta().and_then(|meta| meta.size).map(meta::human_size);
         let Some(native) = self.native() else { return (None, size.unwrap_or_default()) };
+        // A video's frame rate, then how large it is drawn against its own
+        // pixels: "at 141%".
+        let mut line = String::new();
+        let fps = self.video.as_ref().and(self.player.as_ref()).and_then(|player| player.number("container-fps")).filter(|fps| *fps > 0.0);
+        if let Some(fps) = fps {
+            line.push_str(&format!("   {} fps", fps_words(fps)));
+        }
         let percent = self.view.scale(native, self.stage().1) * 100.0;
-        let mut line = format!("   {percent:.0}%");
+        line.push_str(&format!("   at {percent:.0}%"));
         if let Some(size) = size {
             line.push_str(&format!("   {size}"));
         }
@@ -1828,7 +1839,8 @@ impl App {
         buttons.push(Button { x: panel.width - 2 * side - px / 2 - px / 3, y: px / 2, width: side, height: side, command: beside });
         // Then the pin, which stands the list beside the picture and not
         // over it, and the one that moves it to the other side.
-        for (at, command) in [(2, Command::ListPin), (3, Command::ListFlip)] {
+        // And the loop, for the whole list: off, this video, or all of them.
+        for (at, command) in [(2, Command::ListPin), (3, Command::ListFlip), (4, Command::CycleLoop)] {
             buttons.push(Button { x: panel.width - (at + 1) * side - px / 2 - at * px / 3, y: px / 2, width: side, height: side, command });
         }
         // The orders, sharing the width of the row under the heading.
@@ -1846,6 +1858,15 @@ impl App {
         let panel = self.list_panel()?;
         let star = (panel.width - panel.px as i32 * 2..panel.width).contains(&(x as i32 - panel.left));
         self.list_row_at(x, y).filter(|_| star)
+    }
+
+    /// The list position of the video whose loop, just before the star, is
+    /// at a window position.
+    pub(super) fn list_loop_at(&self, x: f64, y: f64) -> Option<usize> {
+        let panel = self.list_panel()?;
+        let room = panel.px as i32 * 2;
+        let on = (panel.width - room * 2..panel.width - room).contains(&(x as i32 - panel.left));
+        self.list_row_at(x, y).filter(|pos| on && files::is_video(&self.files[self.list[*pos]]))
     }
 
     pub(super) fn draw_list(&self, canvas: &mut Canvas, text: &mut Text, panel: &ListPanel) {
@@ -1910,7 +1931,7 @@ impl App {
         for button in &buttons {
             let over = (button.x..button.x + button.width).contains(&mouse.0) && (button.y..button.y + button.height).contains(&mouse.1);
             let on = self.is_checked(button.command);
-            if matches!(button.command, Command::ToggleList | Command::ListSearch | Command::ShowAllHere | Command::ListPin | Command::ListFlip) {
+            if matches!(button.command, Command::ToggleList | Command::ListSearch | Command::ShowAllHere | Command::ListPin | Command::ListFlip | Command::CycleLoop) {
                 // The cross is a round button, as the grid's is.
                 canvas.round_fill(button.x, button.y, button.width, button.height, button.width / 2, if over || on { accent() } else { PLACEHOLDER_COLOR }, 256);
                 let cross = match button.command {
@@ -1918,6 +1939,8 @@ impl App {
                     Command::ShowAllHere => commands::icons::LIST_X,
                     Command::ListPin => commands::icons::PIN,
                     Command::ListFlip => commands::icons::REPLACE,
+                    Command::CycleLoop if self.looping == Looping::File => commands::icons::REPEAT_1,
+                    Command::CycleLoop => commands::icons::REPEAT,
                     _ => commands::icons::X,
                 };
                 let inset = ((button.width - text.width(cross, small)) / 2, (button.height - Text::line_height(small)) / 2);
@@ -1982,6 +2005,18 @@ impl App {
                 let star_left = panel.width - star_room + (star_room - pad - text.width(star, px)) / 2;
                 text.draw(canvas, star_left, line, px, color, star);
             }
+            // Before the star, on a video, its loop: lit on one that plays
+            // again when it ends, and offered on the row under the pointer.
+            let video = files::is_video(&self.files[id]);
+            let loop_room = if video { star_room } else { 0 };
+            let looped = self.looped.contains(&id);
+            if video && (looped || hovered) {
+                let icon = commands::icons::REPEAT_1;
+                let color = if looped && !current { accent_soft() } else if looped { main } else { dim };
+                let icon_left = panel.width - star_room - loop_room + (loop_room - pad - text.width(icon, px)) / 2;
+                text.draw(canvas, icon_left, line, px, color, icon);
+            }
+            let star_room = star_room + loop_room;
             // A video's length sits before it, once it is known.
             let length = self.durations.get(&id).copied().flatten().map(clock).unwrap_or_default();
             let length_width = if length.is_empty() { 0 } else { text.width(&length, px) + pad };

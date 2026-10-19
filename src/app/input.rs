@@ -526,6 +526,10 @@ impl App {
                 } else if let Some(command) = self.list_buttons().iter().find(|button| inside(button)).map(|button| button.command) {
                     // One of the buttons at the head of the file list.
                     self.execute(command, event_loop);
+                } else if let Some(pos) = self.list_loop_at(x, y) {
+                    // The loop before it has that video play again when it
+                    // ends, whatever the list's loop.
+                    self.toggle_file_loop(self.list[pos]);
                 } else if let Some(pos) = self.list_star_at(x, y) {
                     // The star at the end of a row marks that file, or
                     // takes its mark away.

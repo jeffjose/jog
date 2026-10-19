@@ -668,10 +668,32 @@ impl App {
         (spare.id, spare.from) = (Some(before), -SEEK_STEP);
     }
 
-    /// Tells the player whether a video is to play again when it ends.
+    /// Has a video play again whenever it ends, or no longer, whatever the
+    /// list's loop: from the loop on its row in the file list.
+    pub(super) fn toggle_file_loop(&mut self, id: usize) {
+        let looped = !self.looped.remove(&id);
+        if looped {
+            self.looped.insert(id);
+        }
+        // The one playing takes it at once; one at its end plays again.
+        if self.video.as_ref().is_some_and(|video| video.id == id) {
+            self.apply_loop();
+            let ended = self.player.as_ref().is_some_and(|player| player.flag("eof-reached") == Some(true));
+            if looped && ended {
+                self.restart_video();
+            }
+        }
+        let icon = commands::icons::REPEAT_1;
+        let name = self.name_of(id);
+        self.toast(if looped { format!("{icon}  Loop · {name}") } else { format!("Loop off · {name}") });
+    }
+
+    /// Tells the player whether a video is to play again when it ends:
+    /// every one, with the loop on this video, or one looped on its own.
     pub(super) fn apply_loop(&self) {
         if let Some(player) = &self.player {
-            player.set("loop-file", if self.looping == Looping::File { "inf" } else { "no" });
+            let own = self.video.as_ref().is_some_and(|video| self.looped.contains(&video.id));
+            player.set("loop-file", if self.looping == Looping::File || own { "inf" } else { "no" });
         }
         // The section of this video, or none: a video gone on to does not
         // loop the one before's.

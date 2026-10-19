@@ -1215,6 +1215,8 @@ pub struct App {
     /// What a video that has played to its end does, kept from one video
     /// to the next.
     looping: Looping,
+    /// Videos looped on their own, from their row in the file list.
+    looped: HashSet<usize>,
     /// What is being held down over a video, and how strong the loupe is
     /// while `v` is held for one.
     /// Whether the video that was on view plays on in its cell while the
@@ -1795,6 +1797,7 @@ impl App {
             speed: 1.0,
             muted: false,
             looping: Looping::Off,
+            looped: HashSet::new(),
             pip: false,
             pip_live: None,
             pip_in_cell: false,
@@ -3621,6 +3624,15 @@ fn picture_delay(frame: &Frame, index: usize) -> Duration {
     delays.get(index).or(delays.first()).copied().unwrap_or(Duration::from_millis(100))
 }
 
+/// A frame rate as it is usually written: 60, 29.97, 23.976.
+fn fps_words(fps: f64) -> String {
+    if (fps - fps.round()).abs() < 0.005 {
+        return format!("{:.0}", fps);
+    }
+    let words = format!("{fps:.3}");
+    words.trim_end_matches('0').to_string()
+}
+
 /// A playback time as `m:ss`, or `h:mm:ss` from an hour up.
 fn clock(seconds: f64) -> String {
     let total = seconds.max(0.0) as u64;
@@ -4180,6 +4192,14 @@ mod tests {
         field.key(Key::Character("a"), ctrl);
         field.key(Key::Named(NamedKey::Home), plain);
         assert_eq!(field.selection(), None);
+    }
+
+    #[test]
+    fn frame_rates_read_as_usually_written() {
+        assert_eq!(fps_words(60.0), "60");
+        assert_eq!(fps_words(30000.0 / 1001.0), "29.97");
+        assert_eq!(fps_words(24000.0 / 1001.0), "23.976");
+        assert_eq!(fps_words(19001.0 / 317.0), "59.94");
     }
 
     #[test]
