@@ -106,7 +106,7 @@ impl App {
             return;
         }
 
-        let (mut sent, mut skipped, mut failed) = (Vec::new(), 0, 0);
+        let (mut sent, mut skipped) = (Vec::new(), 0);
         for id in self.targets() {
             let from = self.files[id].clone();
             let Some(name) = from.file_name() else { continue };
@@ -115,26 +115,15 @@ impl App {
                 skipped += 1;
                 continue;
             }
-            let result = if moving { ops::move_file(&from, &to) } else { ops::copy_file(&from, &to) };
-            match result {
-                Ok(()) => {
-                    println!("[{}] {} -> {}", if moving { "move" } else { "copy to" }, from.display(), to.display());
-                    let pos = self.list.iter().position(|&other| other == id).unwrap_or(0);
-                    sent.push(Moved { id, pos, from, to });
-                }
-                Err(error) => {
-                    eprintln!("jog: {}: {error}", from.display());
-                    failed += 1;
-                }
-            }
+            let pos = self.list.iter().position(|&other| other == id).unwrap_or(0);
+            sent.push(Moved { id, pos, from, to });
         }
 
+        // Said and shown as done; done on another thread, which says what
+        // failed. Undo is for once it is done.
         let mut summary = format!("{} {} to {}", if moving { "Moved" } else { "Copied" }, sent.len(), dir.display());
         if skipped > 0 {
             summary.push_str(&format!(", {skipped} already there"));
-        }
-        if failed > 0 {
-            summary.push_str(&format!(", {failed} failed"));
         }
         if sent.is_empty() {
             return self.toast(summary);
@@ -143,12 +132,11 @@ impl App {
         if moving {
             let removed: Vec<(usize, usize)> = sent.iter().map(|moved| (moved.id, moved.pos)).collect();
             self.drop_from_list(&removed, event_loop);
-            self.did(Undo::Moved(sent));
         } else {
             // The marked images have been dealt with; start a fresh selection.
             self.marks.clear();
-            self.did(Undo::Created(sent.into_iter().map(|copy| copy.to).collect()));
         }
+        self.file_work(if moving { Work::Move } else { Work::Copy }, sent);
     }
 
     /// Takes files that are gone out of the list, given as `(id, position)`.
@@ -267,6 +255,10 @@ impl App {
         if !self.undo.is_empty() && self.dry(|_| vec!["undo the last copy, move, rename or convert".to_string()], "would undo") {
             return;
         }
+        // What is being moved is not on the list to undo until it is done.
+        if filework::busy() {
+            return self.toast("Still moving · one moment");
+        }
         match self.undo.pop() {
             None => self.toast("Nothing to undo"),
             Some(Undo::Created(paths)) => {
@@ -286,27 +278,17 @@ impl App {
                 }
             }
             Some(Undo::Moved(moved)) => {
-                let (viewing, total) = (self.id(), moved.len());
-                let mut restored = 0;
-                let mut again = Vec::new();
-                // In their original order, so each lands where it was.
-                for item in moved {
-                    if ops::move_file(&item.to, &item.from).is_ok() {
-                        println!("[undo] {} -> {}", item.to.display(), item.from.display());
-                        self.put_back(&item);
-                        again.push(item);
-                        restored += 1;
-                    } else {
-                        eprintln!("jog: cannot move {} back", item.to.display());
-                    }
+                let viewing = self.id();
+                // In their original order, so each lands where it was;
+                // put back at once, moved back on another thread.
+                for item in &moved {
+                    self.put_back(item);
                 }
                 self.pos = self.list.iter().position(|&id| id == viewing).unwrap_or(self.pos);
-                if !again.is_empty() {
-                    self.redo.push(Redo::Moved(again));
-                }
-                self.toast(format!("Undone  ·  {restored} of {total} moved back"));
+                self.toast(format!("Undone  ·  {} moved back", moved.len()));
                 self.request();
                 self.refresh();
+                self.file_work(Work::MoveBack, moved);
             }
             Some(Undo::Renamed { id, from, to }) => {
                 if ops::move_file(&to, &from).is_ok() {
@@ -331,23 +313,23 @@ impl App {
 
     /// Does again what Undo last took back.
     pub(super) fn redo(&mut self, event_loop: &ActiveEventLoop) {
+        if filework::busy() {
+            return self.toast("Still moving · one moment");
+        }
         match self.redo.pop() {
             None => self.toast("Nothing to redo"),
             Some(Redo::Moved(moved)) => {
                 let (mut gone, mut again) = (Vec::new(), Vec::new());
                 for item in moved {
                     let Some(pos) = self.list.iter().position(|&id| id == item.id) else { continue };
-                    if ops::move_file(&item.from, &item.to).is_ok() {
-                        println!("[redo] {} -> {}", item.from.display(), item.to.display());
-                        gone.push((item.id, pos));
-                        again.push(Moved { pos, ..item });
-                    }
+                    gone.push((item.id, pos));
+                    again.push(Moved { pos, ..item });
                 }
                 self.toast(format!("Redone  ·  {} moved", again.len()));
                 if !gone.is_empty() {
                     self.drop_from_list(&gone, event_loop);
-                    self.undo.push(Undo::Moved(again));
                 }
+                self.file_work(Work::MoveAgain, again);
             }
             Some(Redo::Renamed { id, from, to }) => {
                 if ops::move_file(&from, &to).is_ok() {
@@ -715,18 +697,11 @@ impl App {
     /// or else beside the video.
     pub(super) fn save_frame(&mut self) {
         // A frame kept from before a pause is on show: the main player is
-        // put on it, and given a moment to get there, so that the frame
-        // saved is that one, at the video's own size.
+        // put on it, and the frame saved once it is there, so that it is
+        // that one, at the video's own size.
         let kept_at = self.back_shown().map(|(at, _)| at);
-        if let Some(at) = kept_at {
+        if kept_at.is_some() {
             self.leave_back();
-            let asked = Instant::now();
-            while let Some(player) = self.player.as_ref().filter(|_| asked.elapsed() < Duration::from_secs(3)) {
-                if player.number_now("time-pos").is_some_and(|now| (now - at).abs() < 0.008) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
         }
         // Named for the frame it is: the one kept, by its own time, the
         // player's word for where it is lagging until its events are read.
@@ -745,16 +720,75 @@ impl App {
         if let Err(error) = std::fs::create_dir_all(&dir) {
             return self.toast(format!("Not usable · {error}"));
         }
-        // The player writes it, and says nothing of how that went.
+        // Said at once; encoding a 4K frame as PNG takes seconds, which the
+        // player does on a thread of its own, and tells of when it is done.
+        let said = format!("{}  {}", commands::icons::CAMERA, to.file_name().unwrap_or_default().to_string_lossy());
+        self.toast(said.clone());
+        self.frame_tag += 1;
+        let saving = FrameSave { tag: self.frame_tag, to, said, at: kept_at, asked: Instant::now() };
+        match kept_at {
+            Some(_) => self.frame_waiting = Some(saving),
+            None => self.write_frame(saving),
+        }
+    }
+
+    /// Has the player write the frame it is on.
+    fn write_frame(&mut self, saving: FrameSave) {
         let Some(player) = &self.player else { return };
-        player.command(&[b"screenshot-to-file", to.as_os_str().as_encoded_bytes(), b"video"]);
-        match to.exists() {
-            true => {
-                println!("[frame] {}", to.display());
-                let said = format!("{}  {}", commands::icons::CAMERA, to.file_name().unwrap_or_default().to_string_lossy());
-                self.made(to, said);
+        player.command_tagged(saving.tag, &[b"screenshot-to-file", saving.to.as_os_str().as_encoded_bytes(), b"video"]);
+        self.frames_saving.push(saving);
+    }
+
+    /// Waits for frames still being written, for quitting: the player
+    /// stopped partway leaves an empty file.
+    pub(super) fn finish_frames(&mut self) {
+        if let Some(saving) = self.frame_waiting.take() {
+            self.write_frame(saving);
+        }
+        let until = Instant::now() + Duration::from_secs(15);
+        while !self.frames_saving.is_empty() && Instant::now() < until {
+            let Some(player) = &self.player else { return };
+            for event in player.events() {
+                if let PlayerEvent::Replied(tag, _) = event {
+                    self.frames_saving.retain(|saving| saving.tag != tag);
+                }
             }
-            false => self.toast(format!("Not saved · {}", to.display())),
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// A frame to be saved once the player is on it: saved when it is, or
+    /// after a while in any case.
+    pub(super) fn tend_frame_save(&mut self) {
+        let Some(saving) = &self.frame_waiting else { return };
+        let there = self.player.as_ref().and_then(|player| player.number("time-pos")).zip(saving.at).is_some_and(|(now, at)| (now - at).abs() < 0.008);
+        if there || saving.asked.elapsed() > Duration::from_secs(3) {
+            let saving = self.frame_waiting.take().expect("checked above");
+            self.write_frame(saving);
+        }
+    }
+
+    /// The player is done writing a frame: it is put in the list, or its
+    /// failure said.
+    pub(super) fn frame_saved(&mut self, tag: u64, ok: bool) {
+        let Some(found) = self.frames_saving.iter().position(|saving| saving.tag == tag) else { return };
+        let saving = self.frames_saving.remove(found);
+        if self.options.debug {
+            eprintln!("jog: {:>7.1?} frame saved", saving.asked.elapsed());
+        }
+        match ok && saving.to.exists() {
+            true => {
+                println!("[frame] {}", saving.to.display());
+                // Its words still up: now with Show and Undo to click.
+                // Otherwise something else has been said since.
+                if self.toast.as_ref().is_some_and(|(words, _)| *words == saving.said) {
+                    self.made(saving.to, saving.said);
+                } else {
+                    self.adopt_created(std::slice::from_ref(&saving.to));
+                    self.did(Undo::Created(vec![saving.to]));
+                }
+            }
+            false => self.toast(format!("Not saved · {}", short_dir(saving.to.parent().unwrap_or(Path::new("."))))),
         }
     }
 

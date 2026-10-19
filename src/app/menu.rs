@@ -113,25 +113,19 @@ impl App {
         if self.dry(|app| app.targets().iter().map(|id| format!("move to trash: {}", app.files[*id].display())).collect(), "would move to trash") {
             return;
         }
-        let (mut removed, mut failed) = (Vec::new(), 0);
+        // Out of the list at once; gio, a process a file, on another thread,
+        // and what it could not trash comes back.
+        let mut items = Vec::new();
         for id in self.targets() {
             let Some(pos) = self.list.iter().position(|&other| other == id) else { continue };
-            let status = std::process::Command::new("gio").arg("trash").arg("--").arg(&self.files[id]).status();
-            if status.is_ok_and(|s| s.success()) {
-                println!("[trash] {}", self.files[id].display());
-                removed.push((id, pos));
-            } else {
-                failed += 1;
-            }
+            items.push(Moved { id, pos, from: self.files[id].clone(), to: self.files[id].clone() });
         }
-        let mut summary = format!("Trashed {}", removed.len());
-        if failed > 0 {
-            summary.push_str(&format!("  ·  {failed} failed"));
-        }
-        self.toast(summary);
+        self.toast(format!("Trashed {}", items.len()));
+        let removed: Vec<(usize, usize)> = items.iter().map(|item| (item.id, item.pos)).collect();
         if !removed.is_empty() {
             self.drop_from_list(&removed, event_loop);
         }
+        self.file_work(Work::Trash, items);
     }
 
     pub(super) fn menu_key(&mut self, key: Key<&str>, event_loop: &ActiveEventLoop) {

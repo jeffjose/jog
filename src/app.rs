@@ -48,6 +48,9 @@ use convert_panel::{ConvertPanel, PanelSource};
 mod section;
 use section::{Edge, EntryFrames, Section, StripTab};
 mod back;
+mod hitch;
+mod filework;
+use filework::Work;
 mod compare;
 mod draw;
 use draw::*;
@@ -258,6 +261,8 @@ pub enum Event {
     /// The tracks editor's file written, or why not; and whether it took
     /// the original's place.
     TracksWritten(Result<PathBuf, String>, bool),
+    /// Files moved, copied or trashed on another thread.
+    FilesDone(filework::FilesDone),
     /// File details read on another thread, for the info and EXIF overlays.
     Meta(usize, Meta),
     /// The font, loaded on another thread while the first image decodes.
@@ -450,6 +455,16 @@ struct Scaled {
 /// A cluster of figures in the debug overlay: what it is about, and each
 /// figure's name and value.
 type Group = (&'static str, Vec<(&'static str, String)>);
+
+/// A video frame being saved as a picture: where to, what the toast said,
+/// the kept frame's time when it is one, and when it was asked for.
+struct FrameSave {
+    tag: u64,
+    to: PathBuf,
+    said: String,
+    at: Option<f64>,
+    asked: Instant,
+}
 
 /// The timings behind the debug overlay.
 struct Perf {
@@ -1133,6 +1148,13 @@ pub struct App {
     scope_counts: scopes::Measured,
     scope_cost: Duration,
     perf: Perf,
+    /// Late frames and stalls, told of on the terminal.
+    hitches: hitch::Hitches,
+    /// Frames the player is writing, a frame waiting for the player to
+    /// get to it before it is, and the tag the last was sent with.
+    frames_saving: Vec<FrameSave>,
+    frame_waiting: Option<FrameSave>,
+    frame_tag: u64,
     show_exif: bool,
     show_actions: bool,
     pointer_visible: bool,
@@ -1732,6 +1754,10 @@ impl App {
             scope_counts: scopes::Measured::default(),
             scope_cost: Duration::ZERO,
             perf: Perf::new(),
+            hitches: hitch::Hitches::new(options.hitches),
+            frames_saving: Vec::new(),
+            frame_waiting: None,
+            frame_tag: 0,
             show_exif: options.draw_exif,
             show_actions: options.draw_actions,
             pointer_visible: !options.hide_pointer,
@@ -1901,6 +1927,9 @@ impl App {
         self.remember_position();
         self.save_session();
         self.print_marked();
+        self.hitches.summary();
+        filework::finish();
+        self.finish_frames();
         crate::transcode::abandon();
         let _ = std::io::Write::flush(&mut std::io::stdout());
         std::process::exit(0);
@@ -2650,10 +2679,9 @@ impl App {
                 if self.dry(|app| vec![format!("save a copy: {} -> {copy}", app.path().display())], "would save a copy") {
                     return;
                 }
-                match std::fs::copy(self.path(), &copy) {
-                    Ok(_) => self.made(PathBuf::from(&copy), format!("Saved {copy}")),
-                    Err(error) => self.toast(format!("Not saved · {error}")),
-                }
+                self.toast(format!("Saved {copy}"));
+                let item = Moved { id: self.id(), pos: self.pos, from: self.path().to_path_buf(), to: PathBuf::from(copy) };
+                self.file_work(filework::Work::Save, vec![item]);
             }
             SaveFilelist => {
                 let name = format!("jog_{}_filelist", std::process::id());
@@ -3771,6 +3799,51 @@ impl ApplicationHandler<Event> for App {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
+        let began = Instant::now();
+        let what = hitch::event_name(&event);
+        self.handle_event(event_loop, event);
+        self.hitch_turn(began, what);
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        let began = Instant::now();
+        let what = match &event {
+            WindowEvent::RedrawRequested => "drawing".to_string(),
+            WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                let name = hitch::key_name(event.logical_key.as_ref(), self.modifiers);
+                if !event.repeat {
+                    self.hitches.input(name.clone());
+                }
+                name
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
+                let name = if *button == MouseButton::Right { "right-click" } else { "a click" }.to_string();
+                self.hitches.input(name.clone());
+                name
+            }
+            WindowEvent::MouseWheel { .. } => "the wheel".to_string(),
+            WindowEvent::Resized(_) => "a resize".to_string(),
+            _ => "the window".to_string(),
+        };
+        self.handle_window_event(event_loop, event);
+        self.hitch_turn(began, &what);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let began = Instant::now();
+        self.waiting(event_loop);
+        self.hitch_turn(began, "timers");
+    }
+
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        self.hitches.summary();
+        filework::finish();
+        self.finish_frames();
+    }
+}
+
+impl App {
+    fn handle_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         // A playing video keeps events coming without a pause, and a
         // scripted run's timetable would otherwise wait for the pause.
         let snapshot_due = self.snapshot.as_ref().and_then(|snapshot| snapshot.at);
@@ -3811,6 +3884,7 @@ impl ApplicationHandler<Event> for App {
             Event::CompareDelta(ticket, delta) => self.compare_delta(ticket, delta),
             Event::Inspected(id, found) => self.inspected(id, found),
             Event::TracksWritten(result, replaced) => self.tracks_written(result, replaced),
+            Event::FilesDone(done) => self.files_done(done, event_loop),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {
                 self.spare = spare.ok().map(|player| Spare { player, id: None, from: 0.0 });
@@ -3898,7 +3972,7 @@ impl ApplicationHandler<Event> for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn handle_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => self.leave(event_loop),
             WindowEvent::RedrawRequested => self.draw(),
@@ -3961,8 +4035,9 @@ impl ApplicationHandler<Event> for App {
         }
     }
 
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+    fn waiting(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        self.hitches.flush(Some(now));
         if self.settle_at.is_some_and(|at| at <= now) {
             self.settle_at = None;
             self.redraw();
@@ -4055,7 +4130,7 @@ impl ApplicationHandler<Event> for App {
             }
         }
         let flicker_due = self.tend_flicker(now);
-        let deadlines = [Some(self.session_due), flicker_due, self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due, self.back_due];
+        let deadlines = [Some(self.session_due), flicker_due, self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due, self.back_due, self.hitches.due()];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

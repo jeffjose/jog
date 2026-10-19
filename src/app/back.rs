@@ -9,13 +9,20 @@
 //! Leaving them, by playing, seeking or anything but stepping, puts the
 //! main player on the very frame shown, so that nothing jumps.
 
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc;
 
 /// The job the back player is wanted on, by its ticket; 0 for none. Once
 /// the video plays again, or another pause comes, the one it is on is not
 /// wanted, and it stops at once rather than decode on beside playback.
 static WANTED: AtomicU64 = AtomicU64::new(0);
+/// Whether the back player is decoding, for a hitch to name it.
+static DECODING: AtomicBool = AtomicBool::new(false);
+
+/// Whether frames before a pause are being decoded just now.
+pub(super) fn decoding() -> bool {
+    DECODING.load(AtomicOrdering::Relaxed)
+}
 
 use super::*;
 
@@ -101,6 +108,7 @@ fn worker(jobs: mpsc::Receiver<Job>, proxy: EventLoopProxy<Event>) {
             job = later;
         }
         let started = Instant::now();
+        DECODING.store(true, AtomicOrdering::Relaxed);
         player.hold(&job.path, Some((job.anchor - SPAN).max(0.0)));
         // Drawn as the main player draws it: the same view, filters and
         // subtitles.
@@ -149,6 +157,7 @@ fn worker(jobs: mpsc::Receiver<Job>, proxy: EventLoopProxy<Event>) {
             }
         }
         player.stop();
+        DECODING.store(false, AtomicOrdering::Relaxed);
         if finished {
             let _ = proxy.send_event(Event::BackFrames(job.ticket, frames, started.elapsed()));
         }

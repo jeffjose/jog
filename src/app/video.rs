@@ -338,6 +338,14 @@ impl App {
         // Read the events even when no video is wanted: mpv only signals
         // again once its queue has been emptied.
         let mut events = if let Signal::Events = signal { player.events() } else { Vec::new() };
+        // Frames being saved, done.
+        let replies: Vec<(u64, bool)> = events.iter().filter_map(|event| if let PlayerEvent::Replied(tag, ok) = event { Some((*tag, *ok)) } else { None }).collect();
+        events.retain(|event| !matches!(event, PlayerEvent::Replied(..)));
+        for (tag, ok) in replies {
+            self.frame_saved(tag, ok);
+        }
+        self.tend_frame_save();
+        let Some(player) = &self.player else { return };
         let mut video_started = None;
         // Whether the time along is written anywhere: on the seek bar, in
         // the info line, under the grid, or along the scenes. Elsewhere

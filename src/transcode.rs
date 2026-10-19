@@ -426,6 +426,11 @@ pub fn cancel() -> bool {
     !running.is_empty() || BATCHES.load(std::sync::atomic::Ordering::SeqCst) > 0
 }
 
+/// Whether ffmpeg is encoding, or pictures are being converted.
+pub fn busy() -> bool {
+    !UNFINISHED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty() || BATCHES.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
 /// How many batches of pictures are being converted, which a cancel
 /// stops between one picture and the next.
 static BATCHES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

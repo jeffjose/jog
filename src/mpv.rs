@@ -23,6 +23,7 @@ const FORMAT_STRING: c_int = 1;
 const FORMAT_FLAG: c_int = 3;
 const FORMAT_DOUBLE: c_int = 5;
 const EVENT_NONE: c_int = 0;
+const EVENT_COMMAND_REPLY: c_int = 5;
 const EVENT_START_FILE: c_int = 6;
 const EVENT_END_FILE: c_int = 7;
 const EVENT_PLAYBACK_RESTART: c_int = 21;
@@ -145,6 +146,9 @@ pub enum PlayerEvent {
     Changed,
     /// The time along has moved on, which it does with every frame.
     Moved,
+    /// A command sent with `command_tagged` is done, by its tag: whether
+    /// it worked.
+    Replied(u64, bool),
 }
 
 type Wake = Box<dyn Fn(Signal) + Send + Sync>;
@@ -361,11 +365,17 @@ impl Player {
     /// Queues a command without waiting for the player to get to it, which
     /// can take a while when it is busy seeking or decoding.
     pub fn command_later(&self, arguments: &[&[u8]]) {
+        self.command_tagged(0, arguments);
+    }
+
+    /// As `command_later`, its outcome told of by `PlayerEvent::Replied`
+    /// with this tag, which is not 0.
+    pub fn command_tagged(&self, tag: u64, arguments: &[&[u8]]) {
         let owned: Vec<CString> = arguments.iter().map(c_string).collect();
         let mut pointers: Vec<*const c_char> = owned.iter().map(|argument| argument.as_ptr()).collect();
         pointers.push(ptr::null());
         // SAFETY: as in `command`; mpv copies the strings before returning.
-        unsafe { (self.api.command_async)(self.handle, 0, pointers.as_mut_ptr()) };
+        unsafe { (self.api.command_async)(self.handle, tag, pointers.as_mut_ptr()) };
     }
 
     /// Opens a file in place of whatever was open, without changing whether
@@ -573,6 +583,7 @@ impl Player {
                         events.push(if WATCHED[index].0 == "time-pos" { PlayerEvent::Moved } else { PlayerEvent::Changed });
                     }
                 }
+                EVENT_COMMAND_REPLY if event.reply_userdata != 0 => events.push(PlayerEvent::Replied(event.reply_userdata, event.error >= 0)),
                 EVENT_START_FILE => events.push(PlayerEvent::Started),
                 EVENT_PLAYBACK_RESTART => events.push(PlayerEvent::Showing),
                 EVENT_END_FILE => events.push(PlayerEvent::Ended),

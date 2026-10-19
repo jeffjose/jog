@@ -195,6 +195,9 @@ Workspaces are folders with names, set in the config file:
       --verbose              print each file as it comes up: its place in the
                              list, dimensions, size and how long it took
       --debug                print decode and video start times (also JOG_DEBUG=1)
+      --no-hitches           say nothing of late frames and stalls, which are
+                             otherwise told of with their likely cause
+                             (config: hitches = false)
   -h, --help [TOPIC]         show this help, or one topic of it
   -v, --version              show the version"),
     ("keys", "Keys", "
@@ -370,6 +373,8 @@ pub struct Options {
     pub benchmark: bool,
     pub debug: bool,
     pub verbose: bool,
+    /// Whether a frame late or a stall is told of on the terminal.
+    pub hitches: bool,
     pub watch: bool,
     /// What to narrow the list to from the start, as typed in the find box.
     pub filter: Option<String>,
@@ -584,7 +589,7 @@ fn is_switch(name: &str) -> bool {
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "random",
         "newest", "oldest",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
-        "debug", "verbose", "watch", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
+        "debug", "verbose", "watch", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "hitches", "no-hitches", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
     switches.contains(&name)
 }
@@ -641,6 +646,7 @@ fn parse_with(
         benchmark: false,
         debug: std::env::var_os("JOG_DEBUG").is_some(),
         verbose: false,
+        hitches: true,
         watch: false,
         filter: None,
         start: None,
@@ -863,6 +869,8 @@ fn apply(
         "print-marked" => options.print_marked = true,
         "benchmark" => options.benchmark = true,
         "debug" => options.debug = true,
+        "hitches" => options.hitches = true,
+        "no-hitches" => options.hitches = false,
         "verbose" => options.verbose = true,
         "watch" => options.watch = true,
         "positions" => options.resume = true,
@@ -945,6 +953,7 @@ fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>
                 "auto-zoom" => ("no-auto-zoom", None),
                 "autoplay" => ("no-autoplay", None),
                 "animations" => ("no-animations", None),
+                "hitches" => ("no-hitches", None),
                 "seen" => ("no-seen", None),
                 "subtitles" => ("no-subtitles", None),
                 "grid-titles" => ("no-grid-titles", None),
@@ -1156,6 +1165,8 @@ mod tests {
         assert_eq!(options.output_dir, Some(PathBuf::from("/keep")));
         assert!(options.print_marked);
         assert!(parse_args(&["--debug"]).unwrap().debug);
+        assert!(parse_args(&[]).unwrap().hitches);
+        assert!(!parse_args(&["--no-hitches"]).unwrap().hitches);
         assert!(parse_args(&["--verbose"]).unwrap().verbose);
         assert!(parse_args(&[]).unwrap().resume);
         assert!(!parse_args(&["--no-positions"]).unwrap().resume);

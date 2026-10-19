@@ -106,6 +106,9 @@ impl App {
                 }
             };
             if pressing {
+                if !repeating {
+                    self.hitches.input(hitch::key_name(key.clone(), self.modifiers));
+                }
                 self.key_pressed(key.clone(), repeating, false, event_loop);
             }
             // A key typed is let go again at once.

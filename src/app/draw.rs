@@ -224,6 +224,7 @@ impl App {
             let len = window.0 as usize * window.1 as usize;
             let showing = self.video.as_ref().map(|video| video.id);
             let kept = self.video_kept.get() == Some((window, showing)) && self.video_copy.len() == len;
+            let fresh = size == window && player.frame_waiting();
             let drawn = if size != window {
                 self.video_kept.set(None);
                 self.repainted.set(true);
@@ -237,7 +238,7 @@ impl App {
                     let _ = render::draw_crop(pixels, window.0 as usize, &self.video_scratch, size, whole, at);
                 }
                 drawn
-            } else if player.frame_waiting() {
+            } else if fresh {
                 self.video_render = Some(window);
                 self.video_kept.set(None);
                 self.repainted.set(true);
@@ -265,6 +266,9 @@ impl App {
                 self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
                 if self.options.debug {
                     eprintln!("jog: {:>7.1?} draw  video  overlays {:>7.1?}", self.perf.render, overlays.elapsed());
+                }
+                if fresh {
+                    self.hitch_frame(self.perf.render, overlays.elapsed());
                 }
                 return;
             }
