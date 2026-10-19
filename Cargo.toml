@@ -29,6 +29,7 @@ mozjpeg = { version = "0.10", default-features = false, features = ["parallel"] 
 webp = { version = "0.3.1", default-features = false }
 # How near a converted picture is to the original, for the Convert panel.
 ssimulacra2 = "0.5"
+serde_json = "1"
 
 [profile.release]
 opt-level = 3

@@ -39,6 +39,9 @@ impl App {
         if self.compare.is_some() {
             return self.compare_key(key);
         }
+        if self.inspector.is_some() {
+            return self.inspector_key(key);
+        }
         if self.overview.is_some() && self.palette.is_none() && self.overview_key(key.clone()) {
             return;
         }
@@ -349,6 +352,12 @@ impl App {
             }
             return;
         }
+        if self.inspector.is_some() {
+            if button == MouseButton::Left && pressed {
+                self.inspector_click(x, y);
+            }
+            return;
+        }
         if self.overview.is_some() && self.palette.is_none() {
             // A click on a card goes to that workspace.
             if button == MouseButton::Left && pressed {
@@ -612,6 +621,9 @@ impl App {
         }
         if self.compare.is_some() {
             return self.compare_wheel(lines);
+        }
+        if self.inspector.is_some() {
+            return self.inspector_wheel(lines);
         }
         // In the find box it scrolls the list of matches, and what then
         // lies under the pointer is the one picked out. It does not step

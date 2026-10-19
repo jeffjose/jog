@@ -92,6 +92,7 @@ impl App {
                         "Home" => Key::Named(NamedKey::Home),
                         "End" => Key::Named(NamedKey::End),
                         "F2" => Key::Named(NamedKey::F2),
+                        "F3" => Key::Named(NamedKey::F3),
                         "F5" => Key::Named(NamedKey::F5),
                         // `{Ctrl+k}`: a letter with a modifier held.
                         letter if letter.chars().count() == 1 => Key::Character(letter),

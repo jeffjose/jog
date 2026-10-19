@@ -77,6 +77,8 @@ pub enum Command {
     CycleAudio,
     /// The picker of a video's audio and subtitle tracks.
     TrackPicker,
+    /// What the file is made of: its streams, HDR, tags and chapters.
+    Inspect,
     SubtitlesLarger,
     SubtitlesSmaller,
     /// Put the debug overlay's figures on the clipboard, plainly or as JSON.
@@ -266,6 +268,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             NamedKey::Tab if modifiers.control_key() => NextWorkspace,
             NamedKey::Tab => ToggleMenu,
             NamedKey::F2 => Rename,
+            NamedKey::F3 => Inspect,
             NamedKey::F5 => Reload,
             _ => return None,
         },
@@ -540,6 +543,7 @@ pub fn command_icon(command: Command) -> &'static str {
         ToggleScenes => CLAPPERBOARD,
         CycleSubtitles => CAPTIONS,
         CycleAudio | TrackPicker => AUDIO_LINES,
+        Inspect => EYE,
         SubtitlesLarger | SubtitlesSmaller => A_LARGE_SMALL,
         ZoomIn | GridLarger => ZOOM_IN,
         ZoomOut | GridSmaller => ZOOM_OUT,
@@ -778,6 +782,7 @@ const FILE: &[Option<MenuItem>] = &[
     video_item("Convert to WebM (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::WebM))),
     item("Cancel the encode", "", Command::CancelEncode),
     image_item("Compare with marked", "", Command::Compare),
+    item("Inspect", "F3", Command::Inspect),
     image_item("Save a copy", "S", Command::Save),
     video_item("Save this frame", "S", Command::Save),
     item("Save the file list", "L", Command::SaveFilelist),
