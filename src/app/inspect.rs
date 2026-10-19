@@ -238,6 +238,22 @@ impl App {
         self.redraw();
     }
 
+    /// The inspector, open while another file comes up, goes on to that
+    /// one: on the same tab, when it is the same kind of file.
+    pub(super) fn follow_inspector(&mut self) {
+        let Some(inspector) = &self.inspector else { return };
+        let Some(&id) = self.list.get(self.focus()) else { return };
+        if inspector.id == id {
+            return;
+        }
+        let tab = inspector.tab;
+        let same_kind = inspector.picture == !files::is_video(&self.files[id]);
+        self.open_inspector();
+        if let Some(inspector) = self.inspector.as_mut().filter(|_| same_kind) {
+            inspector.tab = tab;
+        }
+    }
+
     pub(super) fn inspected(&mut self, id: usize, found: Result<Inspection, String>) {
         if let Some(inspector) = self.inspector.as_mut().filter(|inspector| inspector.id == id) {
             // The tree opens on what holds the tracks: moov, or Segment and
@@ -1127,18 +1143,15 @@ impl App {
 }
 
 impl App {
-    /// Tells the player to draw the video clear of the inspector, as a
-    /// picture is laid out beside it; and back across the whole window
-    /// once it closes.
+    /// Tells the player to draw the video in the part of the window the
+    /// picture has, clear of the pinned list and the inspector alike; and
+    /// back across the whole window once neither is there.
     pub(super) fn keep_video_clear(&self) {
         let (width, _) = self.window_size();
-        let want = match self.inspector_room() {
-            Some((room, on_left)) => {
-                let share = f64::from(room) / f64::from(width.max(1));
-                if on_left { (share, 0.0) } else { (0.0, share) }
-            }
-            None => (0.0, 0.0),
-        };
+        let (left, (stage, _)) = self.stage();
+        let whole = f64::from(width.max(1));
+        let right = (width as i32 - left - stage as i32).max(0);
+        let want = if stage >= width { (0.0, 0.0) } else { (f64::from(left.max(0)) / whole, f64::from(right) / whole) };
         if self.video_margins.get() == want {
             return;
         }
@@ -1149,6 +1162,8 @@ impl App {
             // Subtitles in the video, not under the panel beside it.
             player.set("sub-use-margins", if want == (0.0, 0.0) { "yes" } else { "no" });
         }
+        // The zoom and pan are of that part, which has changed.
+        self.apply_video_view();
         self.redraw();
     }
 }

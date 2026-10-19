@@ -2154,6 +2154,7 @@ impl App {
 
     /// Syncs the title and displayed frame with the current image.
     fn refresh(&mut self) {
+        self.follow_inspector();
         let id = self.id();
         if self.perf.id != Some(id) {
             self.perf.id = Some(id);
@@ -2322,8 +2323,13 @@ impl App {
         let (zoom, pan) = match native {
             // In its corner of the grid it is simply all there.
             Some(native) if window.0 > 0 && window.1 > 0 && self.grid.is_none() => {
-                let layout = self.layout_of(native);
-                // mpv's zoom is a power of two on top of filling the window.
+                let mut layout = self.layout_of(native);
+                // The player draws within margins kept for the pinned list
+                // and the inspector: the same part of the window the layout
+                // is in, its zoom and pan measured against that part.
+                let (left, window) = self.stage();
+                layout.x -= left;
+                // mpv's zoom is a power of two on top of filling that part.
                 let filling = fit_size(native, window, true);
                 // Less than a pixel either way is the layout's rounding, and
                 // not passed on: each change has the player's renderer set
