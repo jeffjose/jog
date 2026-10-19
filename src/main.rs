@@ -12,6 +12,7 @@ mod loader;
 mod meta;
 mod mpv;
 mod ops;
+mod picmeta;
 mod options;
 mod positions;
 mod render;

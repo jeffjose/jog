@@ -18,11 +18,18 @@ pub struct Inspection {
     first_frame: Value,
     /// Its boxes or elements.
     tree: Result<Vec<crate::boxes::Node>, String>,
+    /// For a picture, what it carries: EXIF, color profile, XMP, gain map.
+    picture: Option<crate::picmeta::Picture>,
 }
 
 impl Inspection {
-    /// Reads a file with ffprobe, and its HDR metadata with jog's reader.
+    /// Reads a video with ffprobe, its HDR metadata and structure with
+    /// jog's readers; a picture with jog's.
     pub fn read(path: &Path) -> Result<Inspection, String> {
+        if !files::is_video(path) {
+            let picture = crate::picmeta::read(path)?;
+            return Ok(Inspection { probe: Value::Null, hdr: None, first_frame: Value::Null, tree: Err("not a video".into()), picture: Some(picture) });
+        }
         let output = std::process::Command::new("ffprobe")
             .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters"])
             .arg(path)
@@ -42,7 +49,7 @@ impl Inspection {
             .ok()
             .and_then(|output| serde_json::from_slice(&output.stdout).ok())
             .unwrap_or(Value::Null);
-        Ok(Inspection { probe, hdr: crate::hdrmeta::read(path), first_frame, tree: crate::boxes::read(path) })
+        Ok(Inspection { probe, hdr: crate::hdrmeta::read(path), first_frame, tree: crate::boxes::read(path), picture: None })
     }
 
     fn streams(&self) -> &[Value] {
@@ -70,6 +77,13 @@ impl Inspection {
 
     /// Everything as JSON, ffprobe's reading with jog's HDR beside it.
     fn json(&self) -> String {
+        if let Some(picture) = &self.picture {
+            let exif: Vec<Value> = picture.exif.iter().map(|(group, tag, value)| serde_json::json!({ "group": group, "tag": tag, "value": value })).collect();
+            let xmp: serde_json::Map<String, Value> = picture.xmp.iter().map(|(name, value)| (name.clone(), Value::String(value.clone()))).collect();
+            let gain = picture.gain.as_ref().map(|(meta, bytes)| serde_json::json!({ "min": meta.min, "max": meta.max, "gamma": meta.gamma, "offset_sdr": meta.offset_sdr, "offset_hdr": meta.offset_hdr, "capacity_max": meta.capacity_max, "bytes": bytes }));
+            let all = serde_json::json!({ "format": picture.format, "size": picture.size, "bytes": picture.bytes, "icc": picture.icc, "exif": exif, "xmp": xmp, "gain_map": gain });
+            return serde_json::to_string_pretty(&all).unwrap_or_default();
+        }
         let mut all = self.probe.clone();
         if let Some(hdr) = &self.hdr {
             let scenes: Vec<Value> = hdr
@@ -83,10 +97,22 @@ impl Inspection {
     }
 }
 
-/// The tabs, in order.
+/// The tabs, in order: a video's, and a picture's.
 const TABS: [&str; 5] = ["Summary", "Streams", "HDR", "Structure", "Tags · chapters"];
+const PICTURE_TABS: [&str; 4] = ["Summary", "EXIF", "Color · HDR", "XMP"];
 /// The tab of the boxes or elements the file is made of.
 const STRUCTURE: usize = 3;
+
+impl Inspector {
+    fn tabs(&self) -> &'static [&'static str] {
+        if self.picture { &PICTURE_TABS } else { &TABS }
+    }
+
+    /// Whether the Structure tab is the one up.
+    fn on_structure(&self) -> bool {
+        !self.picture && self.tab == STRUCTURE
+    }
+}
 
 /// A card of label and value rows, under a heading.
 struct Card {
@@ -129,6 +155,8 @@ pub struct Inspector {
     content_h: i32,
     view_h: i32,
     found: Option<Result<Inspection, String>>,
+    /// A picture, with its own tabs, rather than a video.
+    picture: bool,
     /// The Structure tab: the boxes opened and the one picked out, each by
     /// where it is in the tree; and whether to scroll to the one picked.
     open: HashSet<Vec<usize>>,
@@ -198,7 +226,7 @@ impl App {
         std::thread::spawn(move || {
             let _ = proxy.send_event(Event::Inspected(id, Inspection::read(&path)));
         });
-        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new() });
+        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new() });
         self.menu = None;
         self.redraw();
     }
@@ -226,7 +254,7 @@ impl App {
         let (step, shift) = (Text::line_height(ui_px(self.window_size().1)) * 3, self.modifiers.shift_key());
         let Some(inspector) = &mut self.inspector else { return };
         // In the Structure tab the arrows go about the tree.
-        if inspector.tab == STRUCTURE {
+        if inspector.on_structure() {
             let nodes = inspector.found.as_ref().and_then(|found| found.as_ref().ok()).and_then(|found| found.tree.as_ref().ok());
             let visible = nodes.map(|nodes| visible_nodes(nodes, &inspector.open)).unwrap_or_default();
             let at = visible.iter().position(|(path, _)| *path == inspector.selected);
@@ -273,13 +301,13 @@ impl App {
         }
         match key {
             Key::Named(NamedKey::Escape | NamedKey::F3) | Key::Character("q") => self.inspector = None,
-            Key::Named(NamedKey::Tab | NamedKey::ArrowRight) if !shift => (inspector.tab, inspector.scroll) = ((inspector.tab + 1) % TABS.len(), 0),
-            Key::Named(NamedKey::Tab | NamedKey::ArrowLeft) => (inspector.tab, inspector.scroll) = ((inspector.tab + TABS.len() - 1) % TABS.len(), 0),
+            Key::Named(NamedKey::Tab | NamedKey::ArrowRight) if !shift => (inspector.tab, inspector.scroll) = ((inspector.tab + 1) % inspector.tabs().len(), 0),
+            Key::Named(NamedKey::Tab | NamedKey::ArrowLeft) => (inspector.tab, inspector.scroll) = ((inspector.tab + inspector.tabs().len() - 1) % inspector.tabs().len(), 0),
             Key::Named(NamedKey::ArrowDown) => inspector.scroll += step,
             Key::Named(NamedKey::ArrowUp) => inspector.scroll -= step,
             Key::Named(NamedKey::PageDown) => inspector.scroll += inspector.view_h * 4 / 5,
             Key::Named(NamedKey::PageUp) => inspector.scroll -= inspector.view_h * 4 / 5,
-            Key::Character(digit @ ("1" | "2" | "3" | "4" | "5")) => (inspector.tab, inspector.scroll) = (digit.parse::<usize>().unwrap_or(1) - 1, 0),
+            Key::Character(digit @ ("1" | "2" | "3" | "4" | "5")) if digit.parse::<usize>().unwrap_or(9) <= inspector.tabs().len() => (inspector.tab, inspector.scroll) = (digit.parse::<usize>().unwrap_or(1) - 1, 0),
             Key::Character("c") => return self.inspector_hit(Hit::CopyAll),
             _ => return,
         }
@@ -361,6 +389,9 @@ impl App {
 
     /// The cards of a tab.
     fn inspector_cards(&self, found: &Inspection, tab: usize) -> Vec<Card> {
+        if let Some(picture) = &found.picture {
+            return picture_cards(picture, tab);
+        }
         let format = &found.probe["format"];
         let tags = |value: &Value, names: &[&str]| names.iter().find_map(|name| value["tags"].as_object()?.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).and_then(|(_, v)| text_of(v)));
         match tab {
@@ -573,7 +604,7 @@ impl App {
         // The tabs.
         let mut x = inner;
         let tab_h = small_line + pad * 2 / 3;
-        for (at, name) in TABS.iter().enumerate() {
+        for (at, name) in inspector.tabs().iter().enumerate() {
             let w = text.width(name, small) + pad * 3 / 2;
             let on = at == inspector.tab;
             let hovered = (x..x + w).contains(&mouse.0) && (y..y + tab_h).contains(&mouse.1);
@@ -603,14 +634,14 @@ impl App {
                     let cards = self.inspector_cards(found, inspector.tab);
                     content_h = self.draw_cards(&mut sub, text, px, &cards, inner_w, offset, mouse, &mut drawn, -inspector.scroll);
                     // The HDR tab: a bar for each HDR10+ scene, its brightest.
-                    if inspector.tab == 2 {
+                    if inspector.tab == 2 && !inspector.picture {
                         content_h = self.draw_scene_chart(&mut sub, text, px, found, inner_w, content_h - inspector.scroll, offset, &mut drawn) + inspector.scroll;
                     }
-                    if inspector.tab == STRUCTURE {
+                    if inspector.on_structure() {
                         let tree = TreeState { open: &inspector.open, selected: &inspector.selected, follow: &mut inspector.follow, scroll: &mut inspector.scroll, view_h: inspector.view_h };
                         content_h = self.draw_structure(&mut sub, text, px, found, tree, inner_w, offset, mouse, &mut drawn);
                     }
-                    if inspector.tab == 4 {
+                    if inspector.tab == 4 && !inspector.picture {
                         content_h = self.draw_chapters(&mut sub, text, px, found, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll;
                     }
                 }
@@ -624,7 +655,7 @@ impl App {
         if content_h - inspector.scroll > inspector.view_h {
             canvas.fill(inner, view_bottom - 1, inner_w, 1, MENU_EDGE_COLOR);
         }
-        let keys = if inspector.tab == STRUCTURE { "↑↓ boxes  ·  → open  ·  ← close  ·  click a value to copy it  ·  Tab next tab  ·  c copy all as JSON  ·  Esc close" } else { "Tab or 1–5 tab  ·  ↑↓ scroll  ·  click a value to copy it  ·  c copy all as JSON  ·  Esc close" };
+        let keys = if inspector.on_structure() { "↑↓ boxes  ·  → open  ·  ← close  ·  click a value to copy it  ·  Tab next tab  ·  c copy all as JSON  ·  Esc close" } else { "Tab or a number for a tab  ·  ↑↓ scroll  ·  click a value to copy it  ·  c copy all as JSON  ·  Esc close" };
         text.draw(canvas, inner, top + height - pad - small_line, small, DIM_TEXT_COLOR, keys);
         self.inspector = Some(inspector);
     }
@@ -937,4 +968,100 @@ struct TreeState<'a> {
     follow: &'a mut bool,
     scroll: &'a mut i32,
     view_h: i32,
+}
+
+/// A picture's cards, by tab: the summary, its EXIF by group, its color
+/// profile and gain map, its XMP.
+fn picture_cards(picture: &crate::picmeta::Picture, tab: usize) -> Vec<Card> {
+    // A field left empty by the camera reads as NaN: not there.
+    let exif = |tag: &str| picture.exif.iter().find(|(_, name, _)| name == tag).map(|(_, _, value)| value.clone()).filter(|value| !value.contains("NaN"));
+    // 1/20.0024 s, as cameras round it: 1/20 s.
+    let exposure = exif("ExposureTime").map(|time| match time.strip_prefix("1/").and_then(|rest| rest.strip_suffix(" s")).and_then(|d| d.parse::<f64>().ok()) {
+        Some(d) => format!("1/{d:.0} s"),
+        None => time,
+    });
+    match tab {
+        0 => {
+            let mut file = Card::new("File");
+            file.row("Format", picture.format.clone());
+            file.row("Size", picture.size.map(|(w, h)| format!("{w} x {h}  ·  {:.1} MP", f64::from(w) * f64::from(h) / 1e6)));
+            file.row("On disk", Some(meta::human_size(picture.bytes)));
+            file.row("Color profile", picture.icc.as_ref().map(|(name, _)| name.clone()));
+            file.row("Ultra HDR", picture.gain.as_ref().map(|(meta, _)| format!("gain map, up to {:.1} stops", meta.max.iter().copied().fold(0.0, f32::max))));
+            let mut shot = Card::new("Taken");
+            shot.row("Camera", [exif("Make"), exif("Model")].into_iter().flatten().reduce(|a, b| format!("{a} {b}")));
+            shot.row("Lens", exif("LensModel"));
+            shot.row("When", exif("DateTimeOriginal").or_else(|| exif("DateTime")));
+            shot.row("Exposure", [exposure, exif("FNumber"), exif("PhotographicSensitivity").map(|iso| format!("ISO {iso}"))].into_iter().flatten().reduce(|a, b| format!("{a}  ·  {b}")));
+            shot.row("Focal length", exif("FocalLength"));
+            shot.row("Software", exif("Software"));
+            shot.row("Where", exif("GPSLatitude").zip(exif("GPSLongitude")).map(|(lat, lon)| format!("{lat}  ·  {lon}")));
+            if shot.rows.is_empty() {
+                shot.row("EXIF", Some("None".into()));
+            }
+            vec![file, shot]
+        }
+        1 => {
+            let mut cards: Vec<Card> = Vec::new();
+            for (group, tag, value) in &picture.exif {
+                if cards.last().is_none_or(|card| card.title != *group) {
+                    cards.push(Card::new(group.clone()));
+                }
+                if let Some(card) = cards.last_mut() {
+                    card.row(tag, Some(value.clone()));
+                }
+            }
+            if cards.is_empty() {
+                let mut none = Card::new("EXIF");
+                none.row("Fields", Some("None".into()));
+                cards.push(none);
+            }
+            cards
+        }
+        2 => {
+            let mut color = Card::new("Color profile");
+            match &picture.icc {
+                Some((name, bytes)) => {
+                    color.row("Name", Some(name.clone()));
+                    color.row("Embedded", Some(meta::human_size(*bytes as u64)));
+                }
+                None => color.row("Profile", Some("None embedded  ·  shown as sRGB".into())),
+            }
+            color.row("EXIF color space", exif("ColorSpace"));
+            let mut gain = Card::new("Ultra HDR gain map");
+            match &picture.gain {
+                Some((meta, bytes)) => {
+                    gain.badges.push("Ultra HDR".into());
+                    let stops = |v: [f32; 3]| if v[0] == v[1] && v[1] == v[2] { format!("{:.2}", v[0]) } else { format!("{:.2}, {:.2}, {:.2}", v[0], v[1], v[2]) };
+                    gain.row("Boost, least", Some(format!("{} stops", stops(meta.min))));
+                    gain.row("Boost, most", Some(format!("{} stops", stops(meta.max))));
+                    gain.row("Gamma", Some(stops(meta.gamma)));
+                    gain.row("Offset SDR", Some(stops(meta.offset_sdr)));
+                    gain.row("Offset HDR", Some(stops(meta.offset_hdr)));
+                    gain.row("Headroom", Some(format!("{:.2} stops  ·  {:.1}x", meta.capacity_max, 2f32.powf(meta.capacity_max))));
+                    gain.row("Gain map", Some(meta::human_size(*bytes as u64)));
+                }
+                None => gain.row("Gain map", Some("None  ·  an SDR picture".into())),
+            }
+            vec![color, gain]
+        }
+        _ => {
+            let mut cards: Vec<Card> = Vec::new();
+            for (name, value) in &picture.xmp {
+                let space = name.split(':').next().unwrap_or_default().to_string();
+                if cards.last().is_none_or(|card| card.title != space) {
+                    cards.push(Card::new(space));
+                }
+                if let Some(card) = cards.last_mut() {
+                    card.row(name.split(':').nth(1).unwrap_or(name), Some(value.clone()));
+                }
+            }
+            if cards.is_empty() {
+                let mut none = Card::new("XMP");
+                none.row("Properties", Some("None".into()));
+                cards.push(none);
+            }
+            cards
+        }
+    }
 }
