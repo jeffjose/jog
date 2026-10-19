@@ -24,6 +24,12 @@ pub struct EditRow {
     default: bool,
     forced: bool,
     keep: bool,
+    /// Sound: mixed down to stereo, and its loudness evened out, which
+    /// encode it again. Subtitles: drawn into the picture, which encodes
+    /// the video again.
+    stereo: bool,
+    loudness: bool,
+    burn: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,6 +102,9 @@ fn read_rows(path: &Path) -> Result<(Vec<EditRow>, f64, String), String> {
                         default: s["disposition"]["default"] == 1,
                         forced: s["disposition"]["forced"] == 1,
                         keep: true,
+                        stereo: false,
+                        loudness: false,
+                        burn: false,
                     })
                 })
                 .collect()
@@ -183,6 +192,24 @@ impl App {
             Key::Character("t") => return self.ask_track_text(false),
             Key::Character("a") => return self.ask_track_file(),
             Key::Character("x") => return self.extract_track(),
+            Key::Character("s") => match editor.rows.get_mut(at) {
+                Some(row) if row.kind == TrackKind::Audio => row.stereo = !row.stereo,
+                _ => return self.toast("Stereo is for sound"),
+            },
+            Key::Character("n") => match editor.rows.get_mut(at) {
+                Some(row) if row.kind == TrackKind::Audio => row.loudness = !row.loudness,
+                _ => return self.toast("Loudness is for sound"),
+            },
+            Key::Character("b") => {
+                let text = editor.rows.get(at).is_some_and(|row| row.kind == TrackKind::Sub && matches!(row.codec.as_str(), "subrip" | "ass" | "ssa" | "webvtt" | "mov_text"));
+                if !text {
+                    return self.toast("Only text subtitles can be burned in");
+                }
+                // One drawn in at a time.
+                let was = editor.rows[at].burn;
+                editor.rows.iter_mut().for_each(|row| row.burn = false);
+                editor.rows[at].burn = !was;
+            }
             Key::Named(NamedKey::Enter) => return self.write_tracks(),
             Key::Character("R") => editor.replacing = !editor.replacing,
             _ => return,
@@ -272,7 +299,7 @@ impl App {
                 };
                 // A language in the name, as in concert.en.srt.
                 let lang = path.file_stem().and_then(|stem| Path::new(stem).extension()).map(|lang| lang.to_string_lossy().to_lowercase()).filter(|lang| (2..=3).contains(&lang.len()));
-                let row = EditRow { from: Source::File { path, delay }, kind, codec: codec.to_string(), channels: None, lang, title: None, default: false, forced: false, keep: true };
+                let row = EditRow { from: Source::File { path, delay }, kind, codec: codec.to_string(), channels: None, lang, title: None, default: false, forced: false, keep: true, stereo: false, loudness: false, burn: false };
                 // After the last of its kind.
                 let at = editor.rows.iter().rposition(|other| other.kind == kind).map_or(editor.rows.len(), |at| at + 1);
                 editor.rows.insert(at, row);
@@ -286,7 +313,7 @@ impl App {
     /// The ffmpeg arguments, after the video's own `-i`, that write the
     /// rows: the added files as more inputs, then each stream kept in its
     /// order with its language, title and flags.
-    fn remux_args(editor: &TrackEditor, mp4: bool) -> Vec<String> {
+    fn remux_args(editor: &TrackEditor, mp4: bool, video: &Path) -> Vec<String> {
         let mut args: Vec<String> = Vec::new();
         let mut inputs = Vec::new();
         for row in &editor.rows {
@@ -312,6 +339,32 @@ impl App {
         // MP4 takes text subtitles only as mov_text.
         if mp4 {
             args.extend(["-c:s".to_string(), "mov_text".to_string()]);
+        }
+        // Sound mixed down or evened out is encoded again, as AAC in MP4
+        // and Opus elsewhere; loudnorm works at 192 kHz, so back to 48.
+        for (out, row) in kept.iter().enumerate().filter(|(_, row)| row.stereo || row.loudness) {
+            let codec = if mp4 { "aac" } else { "libopus" };
+            args.extend([format!("-c:{out}"), codec.to_string(), format!("-b:{out}"), if row.stereo { "192k" } else { "320k" }.to_string()]);
+            if row.stereo {
+                args.extend([format!("-ac:{out}"), "2".to_string()]);
+            }
+            if row.loudness {
+                args.extend([format!("-filter:{out}"), "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000".to_string()]);
+            }
+        }
+        // Subtitles drawn into the picture: the video encoded again, with
+        // them, as H.264.
+        if let (Some(burn), Some(video_out)) = (editor.rows.iter().find(|row| row.burn), kept.iter().position(|row| row.kind == TrackKind::Video)) {
+            let source = match &burn.from {
+                Source::Stream(index) => {
+                    // The filter counts a file's subtitle streams from 0.
+                    let nth = editor.rows.iter().filter(|row| row.kind == TrackKind::Sub && matches!(row.from, Source::Stream(other) if other < *index)).count();
+                    format!("filename={}:si={nth}", filter_escape(&video.display().to_string()))
+                }
+                Source::File { path, .. } => format!("filename={}", filter_escape(&path.display().to_string())),
+            };
+            args.extend([format!("-c:{video_out}"), "libx264".to_string(), "-crf".to_string(), "18".to_string(), "-preset".to_string(), "medium".to_string()]);
+            args.extend([format!("-filter:{video_out}"), format!("subtitles={source}")]);
         }
         for (out, row) in kept.iter().enumerate() {
             args.push(format!("-metadata:s:{out}"));
@@ -350,7 +403,7 @@ impl App {
             _ if editor.format.contains("webm") && video.extension().is_some_and(|e| e == "webm") => ("mkv", "matroska", false),
             _ => ("mkv", "matroska", false),
         };
-        let args = Self::remux_args(editor, mov_text);
+        let args = Self::remux_args(editor, mov_text, &video);
         let output = video.with_file_name(format!("{stem}.tracks.{ext}"));
         let (replacing, seconds) = (editor.replacing, editor.seconds);
         if self.dry(|_| vec![format!("remux {} -> {}", video.display(), output.display())], "would write the tracks") {
@@ -481,8 +534,8 @@ impl App {
         // Columns: keep, kind, language and title, codec, flags.
         let kind_x = inner + px as i32 * 3;
         let name_x = kind_x + px as i32 * 5;
-        let codec_x = inner + inner_w - px as i32 * 15;
-        let flags_x = inner + inner_w - px as i32 * 8;
+        let codec_x = inner + inner_w - px as i32 * 20;
+        let flags_x = inner + inner_w - px as i32 * 13;
         for (label, x) in [("Keep", inner), ("Kind", kind_x), ("Language  ·  title", name_x), ("Codec", codec_x), ("Flags", flags_x)] {
             text.draw(canvas, x, y, small, DIM_TEXT_COLOR, label);
         }
@@ -541,7 +594,7 @@ impl App {
             };
             text.draw(canvas, codec_x, ty + (line - small_line) / 2, small, DIM_TEXT_COLOR, &codec);
             let mut fx = flags_x;
-            for (on, flag, color) in [(row.default, "default", accent()), (row.forced, "forced", 0x8E5BD6)] {
+            for (on, flag, color) in [(row.default, "default", accent()), (row.forced, "forced", 0x8E5BD6), (row.stereo, "stereo", 0xD9822B), (row.loudness, "loudness", 0xD9822B), (row.burn, "burn in", 0xE5484D)] {
                 if on {
                     let w = text.width(flag, small) + pad / 2;
                     canvas.round_fill(fx, y + (row_h - small_line) / 2, w, small_line, pad / 4, color, 256);
@@ -564,7 +617,13 @@ impl App {
         if added > 0 {
             summary.push_str(&format!("  ·  +{added}"));
         }
-        summary.push_str(if editor.replacing { "  ·  replaces the original, no undo" } else { "  ·  a new file beside it  ·  copied, not encoded" });
+        let encodes = match (editor.rows.iter().any(|row| row.burn), editor.rows.iter().any(|row| row.keep && (row.stereo || row.loudness))) {
+            (true, _) => "  ·  the video encoded again: slow",
+            (false, true) => "  ·  sound encoded again",
+            (false, false) => "  ·  copied, not encoded",
+        };
+        summary.push_str(if editor.replacing { "  ·  replaces the original, no undo" } else { "  ·  a new file beside it" });
+        summary.push_str(encodes);
         canvas.fill(inner, y, inner_w, 1, MENU_EDGE_COLOR);
         y += pad / 2;
         text.draw(canvas, inner, y + (line - small_line) / 2, small, if editor.replacing { DANGER_COLOR } else { DIM_TEXT_COLOR }, &summary);
@@ -581,7 +640,7 @@ impl App {
         text.draw(canvas, rx + pad / 2, y + (line - small_line) / 2, small, TEXT_COLOR, replace);
         editor.drawn.push((Hit::Replace, [rx, y, rw, line]));
         y += line + pad / 2;
-        let keys = "Space keep  ·  Alt+↑↓ move  ·  d default  ·  f forced  ·  l language  ·  t title  ·  a add file  ·  x take out  ·  Esc close";
+        let keys = "Space keep  ·  Alt+↑↓ move  ·  d default  ·  f forced  ·  l language  ·  t title  ·  a add  ·  x take out  ·  s stereo  ·  n loudness  ·  b burn in  ·  Esc";
         let keys = clipped(text, keys, inner_w, small);
         text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, &keys);
     }
@@ -596,4 +655,18 @@ fn toggle_keep(editor: &mut TrackEditor, at: usize) {
         return;
     }
     editor.rows[at].keep = !editor.rows[at].keep;
+}
+
+/// A path as a filter's option wants it: the characters that mean
+/// something to a filter graph each behind a backslash, twice over, once
+/// for the option and once for the graph.
+fn filter_escape(path: &str) -> String {
+    let mut out = String::new();
+    for c in path.chars() {
+        if matches!(c, '\\' | ':' | '\'' | ',' | '[' | ']' | ';' | '=') {
+            out.push_str("\\\\");
+        }
+        out.push(c);
+    }
+    out
 }
