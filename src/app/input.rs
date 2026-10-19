@@ -43,7 +43,10 @@ impl App {
             return self.track_editor_key(key);
         }
         if self.inspector.is_some() {
-            return self.inspector_key(key);
+            // What the inspector does not take goes on to the video.
+            if self.inspector_key(key.clone()) {
+                return;
+            }
         }
         if self.overview.is_some() && self.palette.is_none() && self.overview_key(key.clone()) {
             return;
@@ -361,7 +364,8 @@ impl App {
             }
             return;
         }
-        if self.inspector.is_some() {
+        // On the inspector's panel, its own; beside it, the video's.
+        if self.over_inspector(x, y) {
             if button == MouseButton::Left && pressed {
                 self.inspector_click(x, y);
             }
@@ -631,7 +635,7 @@ impl App {
         if self.compare.is_some() {
             return self.compare_wheel(lines);
         }
-        if self.inspector.is_some() {
+        if self.over_inspector(self.mouse.0, self.mouse.1) {
             return self.inspector_wheel(lines);
         }
         // In the find box it scrolls the list of matches, and what then

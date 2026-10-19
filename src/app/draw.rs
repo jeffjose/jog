@@ -361,6 +361,7 @@ impl App {
         let (width, height) = (canvas.width, canvas.height);
         let px = ui_px(height as u32);
         let margin = px as i32;
+        self.keep_video_clear();
         self.tend_story();
         self.tend_trailer();
         // The grid replaces the image and everything describing it.

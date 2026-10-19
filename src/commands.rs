@@ -219,6 +219,8 @@ pub enum Command {
     ShowAllHere,
     /// The go-to box: type part of a name, pick a match, go to it.
     Palette,
+    /// The same box in command mode: `>` typed, the commands listed.
+    CommandPalette,
     /// The `S` menu, and what it offers: an order for the list, a shuffle,
     /// and the same order backwards.
     SortMenu,
@@ -278,6 +280,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             ">" | "n" => Next,
             "." => RepeatShell,
             "<" | "," => Previous,
+            "p" if modifiers.control_key() || modifiers.super_key() => CommandPalette,
             "p" => ToggleList,
             "z" => Shuffle,
             "}" => NextDir,
@@ -506,7 +509,7 @@ pub fn command_icon(command: Command) -> &'static str {
     match command {
         Next => ARROW_RIGHT,
         Previous => ARROW_LEFT,
-        Search | Palette => SEARCH,
+        Search | Palette | CommandPalette => SEARCH,
         WorkspaceList | Overview | Workspace(_) | WorkspaceKey(_) | NextWorkspace | PrevWorkspace | HomeWorkspace => FOLDERS,
         SaveWorkspace => FOLDER_PLUS,
         ClearFilter | ShowAllHere => LIST_X,
@@ -687,7 +690,8 @@ const GO: &[Option<MenuItem>] = &[
     item("Next folder", "}", Command::NextDir),
     item("Previous folder", "{", Command::PreviousDir),
     None,
-    item("Find file or command…", "Ctrl+K", Command::Palette),
+    item("Find a file…", "Ctrl+K", Command::Palette),
+    item("Run a command…", "Ctrl+P", Command::CommandPalette),
     item("Next workspace", "Ctrl+Tab", Command::NextWorkspace),
     item("Previous workspace", "Ctrl+Shift+Tab", Command::PrevWorkspace),
     item("Back to the start folder", "Ctrl+`", Command::HomeWorkspace),
@@ -990,7 +994,8 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
         (
             "Finding",
             &[
-                ("/  Ctrl+K", "Open the find box"),
+                ("/  Ctrl+K", "Find a file"),
+                ("Ctrl+P", "Run a command"),
                 ("Enter", "Go to the match picked"),
                 ("Tab  Enter", "To the buttons: show only the matches"),
                 ("Esc", "Leave a search, back to where it was begun"),

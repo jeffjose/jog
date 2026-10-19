@@ -155,6 +155,9 @@ pub struct Inspector {
     content_h: i32,
     view_h: i32,
     found: Option<Result<Inspection, String>>,
+    /// Where the panel was drawn, so that clicks and the wheel beside it
+    /// go to the video.
+    place: [i32; 4],
     /// A picture, with its own tabs, rather than a video.
     picture: bool,
     /// The Structure tab: the boxes opened and the one picked out, each by
@@ -226,7 +229,7 @@ impl App {
         std::thread::spawn(move || {
             let _ = proxy.send_event(Event::Inspected(id, Inspection::read(&path)));
         });
-        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new() });
+        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new() });
         self.menu = None;
         self.redraw();
     }
@@ -250,9 +253,11 @@ impl App {
         }
     }
 
-    pub(super) fn inspector_key(&mut self, key: Key<&str>) {
+    /// The inspector's keys. Whether it took the key: the rest go on to
+    /// the video beside it, Space to play and pause and so on.
+    pub(super) fn inspector_key(&mut self, key: Key<&str>) -> bool {
         let (step, shift) = (Text::line_height(ui_px(self.window_size().1)) * 3, self.modifiers.shift_key());
-        let Some(inspector) = &mut self.inspector else { return };
+        let Some(inspector) = &mut self.inspector else { return false };
         // In the Structure tab the arrows go about the tree.
         if inspector.on_structure() {
             let nodes = inspector.found.as_ref().and_then(|found| found.as_ref().ok()).and_then(|found| found.tree.as_ref().ok());
@@ -296,7 +301,8 @@ impl App {
             };
             if handled {
                 inspector.follow = true;
-                return self.redraw();
+                self.redraw();
+                return true;
             }
         }
         match key {
@@ -308,11 +314,15 @@ impl App {
             Key::Named(NamedKey::PageDown) => inspector.scroll += inspector.view_h * 4 / 5,
             Key::Named(NamedKey::PageUp) => inspector.scroll -= inspector.view_h * 4 / 5,
             Key::Character(digit @ ("1" | "2" | "3" | "4" | "5")) if digit.parse::<usize>().unwrap_or(9) <= inspector.tabs().len() => (inspector.tab, inspector.scroll) = (digit.parse::<usize>().unwrap_or(1) - 1, 0),
-            Key::Character("c") => return self.inspector_hit(Hit::CopyAll),
-            _ => return,
+            Key::Character("c") => {
+                self.inspector_hit(Hit::CopyAll);
+                return true;
+            }
+            _ => return false,
         }
         self.clamp_inspector_scroll();
         self.redraw();
+        true
     }
 
     fn clamp_inspector_scroll(&mut self) {
@@ -573,8 +583,13 @@ impl App {
         let line = Text::line_height(px);
         let small = (px * 5 / 6).max(11);
         let small_line = Text::line_height(small);
-        let (left, top) = (pad * 2, pad * 2);
-        let (width, height) = (canvas.width - pad * 4, canvas.height - pad * 4);
+        // A panel down the right, or the left when the file list stands
+        // on the right: the video stays in view beside it.
+        let width = (canvas.width * 2 / 5).clamp((px as i32 * 30).min(canvas.width - pad * 2), px as i32 * 46);
+        let (top, height) = (pad, canvas.height - pad * 2);
+        let left = if self.list_right { pad } else { canvas.width - width - pad };
+        inspector.place = [left, top, width, height];
+
         panel(canvas, left, top, width, height, pad * 2 / 3);
         inspector.drawn.clear();
         let inner = left + pad * 3 / 2;
@@ -655,8 +670,9 @@ impl App {
         if content_h - inspector.scroll > inspector.view_h {
             canvas.fill(inner, view_bottom - 1, inner_w, 1, MENU_EDGE_COLOR);
         }
-        let keys = if inspector.on_structure() { "↑↓ boxes  ·  → open  ·  ← close  ·  click a value to copy it  ·  Tab next tab  ·  c copy all as JSON  ·  Esc close" } else { "Tab or a number for a tab  ·  ↑↓ scroll  ·  click a value to copy it  ·  c copy all as JSON  ·  Esc close" };
-        text.draw(canvas, inner, top + height - pad - small_line, small, DIM_TEXT_COLOR, keys);
+        let keys = if inspector.on_structure() { "↑↓ boxes  ·  → open  ·  ← close  ·  Tab next tab  ·  c copy JSON  ·  Esc" } else { "Tab next tab  ·  ↑↓ scroll  ·  click to copy  ·  c copy JSON  ·  Esc" };
+        let keys = clipped(text, keys, inner_w, small);
+        text.draw(canvas, inner, top + height - pad - small_line, small, DIM_TEXT_COLOR, &keys);
         self.inspector = Some(inspector);
     }
 
@@ -849,7 +865,15 @@ impl App {
                 return 0;
             }
         };
-        let tree_w = (inner_w * 9 / 20).max(px as i32 * 22);
+        // The tree on top, all the width; the box picked out under it,
+        // which stays put as the tree scrolls.
+        let tree_w = inner_w;
+        let per_row = 8;
+        let card_h = node_at(nodes, inspector.selected).map_or(0, |node| {
+            let hex_rows = node.bytes.len().div_ceil(per_row) as i32;
+            pad + line + small_line + pad / 2 + node.fields.len() as i32 * (line + pad / 4) + pad / 2 + hex_rows * (small_line + pad / 6) + pad
+        }).min(inspector.view_h * 3 / 5);
+        let tree_h = inspector.view_h - card_h - pad;
         let row_h = line + pad / 5;
         let visible = visible_nodes(nodes, inspector.open);
         // Keep the one picked out in view after a key.
@@ -859,15 +883,15 @@ impl App {
                 let top = at as i32 * row_h;
                 if top < *inspector.scroll {
                     *inspector.scroll = top;
-                } else if top + row_h > *inspector.scroll + inspector.view_h {
-                    *inspector.scroll = top + row_h - inspector.view_h;
+                } else if top + row_h > *inspector.scroll + tree_h {
+                    *inspector.scroll = top + row_h - tree_h;
                 }
             }
         }
         let size_x = x + tree_w - pad / 2;
         for (row, (path, depth)) in visible.iter().enumerate() {
             let y = row as i32 * row_h - *inspector.scroll;
-            if y + row_h < 0 || y > inspector.view_h {
+            if y < 0 || y + row_h > tree_h {
                 continue;
             }
             let Some(node) = node_at(nodes, path) else { continue };
@@ -909,13 +933,14 @@ impl App {
 
         // The box picked out: its name, what it is, where, its fields and
         // its first bytes. It stays where it is as the tree scrolls.
-        let Some(node) = node_at(nodes, inspector.selected) else { return visible.len() as i32 * row_h };
-        let (dx, dw) = (x + tree_w + pad, inner_w - tree_w - pad);
-        let mut y = 0;
-        let fields_h = node.fields.len() as i32 * (line + pad / 4);
-        let hex_rows = node.bytes.len().div_ceil(16) as i32;
-        let card_h = pad + line + small_line + pad / 2 + fields_h + pad + hex_rows * (small_line + pad / 6) + pad;
-        sub.round_fill(dx, y, dw, card_h.min(inspector.view_h), pad / 2, 0x26262B, 256);
+        let content = visible.len() as i32 * row_h + card_h + pad;
+        let Some(node) = node_at(nodes, inspector.selected) else { return content };
+        let (dx, dw) = (x, inner_w);
+        let mut y = inspector.view_h - card_h;
+
+
+
+        sub.round_fill(dx, y, dw, card_h, pad / 2, 0x26262B, 256);
         y += pad;
         text.draw(sub, dx + pad, y, px, TEXT_COLOR, &node.name);
         let about = if node.about.is_empty() { String::new() } else { format!("  ·  {}", node.about) };
@@ -931,7 +956,7 @@ impl App {
             let name = clipped(text, name, name_w, small);
             text.draw(sub, dx + pad, y + (line - small_line) / 2, small, DIM_TEXT_COLOR, &name);
             let vx = dx + pad + name_w + pad;
-            let shown = clipped(text, value, dw / 4, px);
+            let shown = clipped(text, value, dw / 3, px);
             let vw = text.width(&shown, px);
             let place = [vx - pad / 4 + offset.0, y + offset.1, vw + pad / 2, line];
             if (place[0]..place[0] + place[2]).contains(&mouse.0) && (place[1]..place[1] + place[3]).contains(&mouse.1) {
@@ -947,15 +972,15 @@ impl App {
             y += line + pad / 4;
         }
         y += pad / 2;
-        for (row, chunk) in node.bytes.chunks(16).enumerate() {
+        for (row, chunk) in node.bytes.chunks(per_row).enumerate() {
             let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02X}")).collect();
             let ascii: String = chunk.iter().map(|b| if b.is_ascii_graphic() { *b as char } else { '.' }).collect();
-            let words = format!("{:08X}  {}  {ascii}", node.offset + row as u64 * 16, hex.join(" "));
+            let words = format!("{:08X}  {}  {ascii}", node.offset + (row * per_row) as u64, hex.join(" "));
             let words = clipped(text, &words, dw - 2 * pad, small);
             text.draw(sub, dx + pad, y, small, if row == 0 { TEXT_COLOR } else { DIM_TEXT_COLOR }, &words);
             y += small_line + pad / 6;
         }
-        visible.len() as i32 * row_h
+        content
     }
 }
 
@@ -1063,5 +1088,54 @@ fn picture_cards(picture: &crate::picmeta::Picture, tab: usize) -> Vec<Card> {
             }
             cards
         }
+    }
+}
+
+impl App {
+    /// Whether a window position is on the inspector's panel.
+    pub(super) fn over_inspector(&self, x: f64, y: f64) -> bool {
+        self.inspector.as_ref().is_some_and(|inspector| {
+            let [left, top, w, h] = inspector.place;
+            (left..left + w).contains(&(x as i32)) && (top..top + h).contains(&(y as i32))
+        })
+    }
+}
+
+impl App {
+    /// The inspector's width, and whether it stands on the left, for the
+    /// picture or video to keep clear of it: the same sums it is drawn by.
+    pub(super) fn inspector_room(&self) -> Option<(i32, bool)> {
+        self.inspector.as_ref()?;
+        let (width, height) = self.window_size();
+        let (width, px) = (width as i32, ui_px(height) as i32);
+        let panel = (width * 2 / 5).clamp((px * 30).min(width - px * 2), px * 46);
+        Some((panel + px, self.list_right))
+    }
+}
+
+impl App {
+    /// Tells the player to draw the video clear of the inspector, as a
+    /// picture is laid out beside it; and back across the whole window
+    /// once it closes.
+    pub(super) fn keep_video_clear(&self) {
+        let (width, _) = self.window_size();
+        let want = match self.inspector_room() {
+            Some((room, on_left)) => {
+                let share = f64::from(room) / f64::from(width.max(1));
+                if on_left { (share, 0.0) } else { (0.0, share) }
+            }
+            None => (0.0, 0.0),
+        };
+        if self.video_margins.get() == want {
+            return;
+        }
+        self.video_margins.set(want);
+        for player in self.players() {
+            player.set("video-margin-ratio-left", &format!("{:.4}", want.0));
+            player.set("video-margin-ratio-right", &format!("{:.4}", want.1));
+            // Subtitles in the video, not under the panel beside it.
+            player.set("sub-use-margins", if want == (0.0, 0.0) { "yes" } else { "no" });
+        }
+        self.redraw();
     }
 }

@@ -85,7 +85,7 @@ impl App {
                     _ if !applies => {}
                     _ if !item.sub.is_empty() => groups.push((item.label, item.sub)),
                     // The box itself is not something to run from it.
-                    Command::Search | Command::Palette => {}
+                    Command::Search | Command::Palette | Command::CommandPalette => {}
                     command if group.is_empty() => all.push((self.menu_label(item), item.keys, command)),
                     command => all.push((format!("{group}: {}", self.menu_label(item)), item.keys, command)),
                 }
@@ -96,6 +96,8 @@ impl App {
         let recent = self.recent_labels().to_vec();
         let lately = |label: &str| recent.iter().position(|had| had == label).unwrap_or(usize::MAX);
         all.sort_by_key(|entry| lately(&entry.0));
+        // The Debug commands after the rest, unless run lately.
+        all.sort_by_key(|entry| (lately(&entry.0), entry.0.starts_with("Debug:")));
         let query = Query::parse(typed);
         if query.is_empty() {
             return all;

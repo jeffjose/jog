@@ -209,6 +209,8 @@ Workspaces are folders with names, set in the config file:
                              the ending, %d its folder, %t the time in a video.
                              Up / Down pick one run before; . runs the last again
   + Up / - Down              zoom in / out       * 0 F         100%, fit, fill
+  Ctrl+P                     run a command: the find box with > typed, every
+                             command listed, those run lately first
   / or Ctrl+K                find: type part of a name, Up / Down to pick among
                              the matches, Enter to go to the one picked, Esc
                              to cancel. Tab or Right moves on to the buttons:

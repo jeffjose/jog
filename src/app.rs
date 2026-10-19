@@ -1236,6 +1236,9 @@ pub struct App {
     track_picker: Option<tracks::TrackPicker>,
     /// The inspector (F3), of what a file is made of.
     inspector: Option<inspect::Inspector>,
+    /// The share of the window the video was last told to keep clear on
+    /// each side, left and right, for the inspector beside it.
+    video_margins: Cell<(f64, f64)>,
     /// The tracks editor: a video's streams to keep, order and tag.
     track_editor: Option<track_editor::TrackEditor>,
     track_memory: Option<HashMap<PathBuf, tracks::TrackChoice>>,
@@ -1781,6 +1784,7 @@ impl App {
             convert_panel: None,
             track_picker: None,
             inspector: None,
+            video_margins: Cell::new((0.0, 0.0)),
             track_editor: None,
             track_memory: None,
             sections: HashMap::new(),
@@ -2631,6 +2635,7 @@ impl App {
                 self.toast(if self.muted { "Muted" } else { "Sound on" });
             }
             Search | Palette => self.open_palette(),
+            CommandPalette => self.open_palette_with(">"),
             Remove => self.remove_current(event_loop),
             Trash => self.trash(event_loop),
             // Of a video it is the frame on view that is saved; of a picture,
@@ -2957,10 +2962,19 @@ impl App {
     /// from the left, and its size.
     fn stage(&self) -> (i32, (u32, u32)) {
         let (width, height) = self.window_size();
-        match self.list_panel().filter(|_| self.list_pinned) {
-            Some(panel) => (if self.list_right { 0 } else { panel.width }, ((width as i32 - panel.width).max(1) as u32, height)),
-            None => (0, (width, height)),
+        let (mut left, mut width) = (0, width as i32);
+        if let Some(panel) = self.list_panel().filter(|_| self.list_pinned) {
+            width -= panel.width;
+            left = if self.list_right { 0 } else { panel.width };
         }
+        // The inspector beside it, on the side the list is not.
+        if let Some((room, on_left)) = self.inspector_room() {
+            width -= room;
+            if on_left {
+                left += room;
+            }
+        }
+        (left, (width.max(1) as u32, height))
     }
 
     /// Where a picture of this size is in the window: laid out in the
