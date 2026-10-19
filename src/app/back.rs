@@ -85,7 +85,7 @@ fn worker(jobs: mpsc::Receiver<Job>, proxy: EventLoopProxy<Event>) {
     // SAFETY: a plain system call on the calling thread.
     unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
     let (wake_tx, wake) = mpsc::channel::<Signal>();
-    let Ok(player) = Player::new(Role::Playback { silent: true }, move |signal| {
+    let Ok(player) = Player::new(Role::Playback { silent: true, gpu: false }, move |signal| {
         let _ = wake_tx.send(signal);
     }) else {
         return;

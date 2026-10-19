@@ -35,7 +35,7 @@ impl App {
         let silent = self.snapshot.is_some() || self.bench.is_some();
         std::thread::spawn(move || {
             let wake = proxy.clone();
-            let role = Role::Playback { silent };
+            let role = Role::Playback { silent, gpu: true };
             let player = Player::new(role, move |signal| drop(wake.send_event(Event::Video(0, signal))));
             let playable = player.is_ok();
             let _ = proxy.send_event(Event::Player(player));

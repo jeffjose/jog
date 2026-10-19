@@ -106,6 +106,9 @@ Videos (mp4, mkv, webm and so on; needs libmpv) play in place, picking up
 where they were left unless --no-positions is given.
       --no-autoplay          stay on a video when it ends, instead of
                              playing the next file (config: autoplay = false)
+      --no-hwdec             decode videos on the CPU, not the GPU: the first
+                             video starts a little sooner, but 4K plays less
+                             smoothly on few cores (config: hwdec = false)
       --no-positions         start videos from the beginning, and do not
                              remember where they were left (config:
                              positions = false)
@@ -375,6 +378,8 @@ pub struct Options {
     pub verbose: bool,
     /// Whether a frame late or a stall is told of on the terminal.
     pub hitches: bool,
+    /// Whether videos are decoded by the GPU, where one can.
+    pub hwdec: bool,
     pub watch: bool,
     /// What to narrow the list to from the start, as typed in the find box.
     pub filter: Option<String>,
@@ -589,7 +594,7 @@ fn is_switch(name: &str) -> bool {
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "random",
         "newest", "oldest",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
-        "debug", "verbose", "watch", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "hitches", "no-hitches", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
+        "debug", "verbose", "watch", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "hitches", "no-hitches", "hwdec", "no-hwdec", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
     switches.contains(&name)
 }
@@ -647,6 +652,7 @@ fn parse_with(
         debug: std::env::var_os("JOG_DEBUG").is_some(),
         verbose: false,
         hitches: true,
+        hwdec: true,
         watch: false,
         filter: None,
         start: None,
@@ -871,6 +877,8 @@ fn apply(
         "debug" => options.debug = true,
         "hitches" => options.hitches = true,
         "no-hitches" => options.hitches = false,
+        "hwdec" => options.hwdec = true,
+        "no-hwdec" => options.hwdec = false,
         "verbose" => options.verbose = true,
         "watch" => options.watch = true,
         "positions" => options.resume = true,
@@ -954,6 +962,7 @@ fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>
                 "autoplay" => ("no-autoplay", None),
                 "animations" => ("no-animations", None),
                 "hitches" => ("no-hitches", None),
+                "hwdec" => ("no-hwdec", None),
                 "seen" => ("no-seen", None),
                 "subtitles" => ("no-subtitles", None),
                 "grid-titles" => ("no-grid-titles", None),
@@ -1167,6 +1176,8 @@ mod tests {
         assert!(parse_args(&["--debug"]).unwrap().debug);
         assert!(parse_args(&[]).unwrap().hitches);
         assert!(!parse_args(&["--no-hitches"]).unwrap().hitches);
+        assert!(parse_args(&[]).unwrap().hwdec);
+        assert!(!parse_args(&["--no-hwdec"]).unwrap().hwdec);
         assert!(parse_args(&["--verbose"]).unwrap().verbose);
         assert!(parse_args(&[]).unwrap().resume);
         assert!(!parse_args(&["--no-positions"]).unwrap().resume);

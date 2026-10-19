@@ -1579,6 +1579,7 @@ impl App {
         let slide_delay = Duration::from_secs_f64(options.slideshow_delay.unwrap_or(DEFAULT_SLIDE_DELAY));
         ACCENT.store(options.accent, atomic::Ordering::Relaxed);
         crate::mpv::DEBUG.store(options.debug, atomic::Ordering::Relaxed);
+        crate::mpv::HWDEC.store(options.hwdec, atomic::Ordering::Relaxed);
         // The workspaces of the config file; and unless one of them was
         // asked for by name, what was opened by its path as one more.
         // With sessions to choose from, they are the workspaces, and those

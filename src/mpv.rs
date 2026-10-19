@@ -118,8 +118,9 @@ impl Api {
 /// What a player is for.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Role {
-    /// Playing the video on view. `silent` discards the audio.
-    Playback { silent: bool },
+    /// Playing a video. `silent` discards the audio; `gpu` has it decoded
+    /// by the GPU, unless `--no-hwdec`.
+    Playback { silent: bool, gpu: bool },
     /// Fetching frames to show while the pointer is over the seek bar.
     Preview,
 }
@@ -230,6 +231,10 @@ unsafe extern "C" fn on_frame(context: *mut c_void) {
 /// good while when it opens a file.
 pub static DEBUG: AtomicBool = AtomicBool::new(false);
 
+/// Whether videos played are decoded by the GPU, where it can: see
+/// `Player::new`.
+pub static HWDEC: AtomicBool = AtomicBool::new(true);
+
 fn report_slow(property: &str, asked: Instant) {
     let took = asked.elapsed();
     if took > Duration::from_millis(2) && DEBUG.load(Ordering::Relaxed) {
@@ -270,7 +275,8 @@ impl Player {
                 ("keep-open", "yes"),
                 // Decoding on the CPU starts a file about twice as fast as
                 // setting up a GPU decoder for it, and frames are wanted in
-                // main memory anyway.
+                // main memory anyway: for previews and steps back. Playback
+                // is decoded by the GPU and copied back, set below.
                 ("hwdec", "no"),
                 ("input-default-bindings", "no"),
                 ("osc", "no"),
@@ -296,16 +302,29 @@ impl Player {
                 // Leave the cores to the video that is actually playing.
                 ("vd-lavc-threads", "2"),
             ];
-            let extra: &[(&str, &str)] = match role {
-                Role::Playback { silent: false } => &[],
-                Role::Playback { silent: true } => &[("ao", "null")],
-                Role::Preview => preview,
-            };
+            // On four cores a 4K AV1 video at 60 fps, decoded on the CPU,
+            // dropped 40 frames in 9 s, 90 with panels open; decoded by the
+            // GPU, none, its frames drawn faster for the cores left free.
+            // Only the first video waits longer to start, the GPU decoder
+            // being set up (88 -> 340 ms here): those after it are made
+            // ready ahead. Without a decoder for it, the CPU decodes.
+            let mut extra: Vec<(&str, &str)> = Vec::new();
+            match role {
+                Role::Playback { silent, gpu } => {
+                    if gpu && HWDEC.load(Ordering::Relaxed) {
+                        extra.push(("hwdec", "auto-copy"));
+                    }
+                    if silent {
+                        extra.push(("ao", "null"));
+                    }
+                }
+                Role::Preview => extra.extend_from_slice(preview),
+            }
             // `JOG_MPV` sets further options of the player, as `name=value`
             // with commas between: for trying things out.
             let tried = std::env::var("JOG_MPV").unwrap_or_default();
             let tried = tried.split(',').filter_map(|pair| pair.split_once('='));
-            for (name, value) in options.iter().chain(extra).copied().chain(tried) {
+            for (name, value) in options.iter().chain(&extra).copied().chain(tried) {
                 (api.set_option_string)(handle, c_string(name).as_ptr(), c_string(value).as_ptr());
             }
             if (api.initialize)(handle) < 0 {
