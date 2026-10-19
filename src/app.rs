@@ -1239,6 +1239,9 @@ pub struct App {
     /// The share of the window the video was last told to keep clear on
     /// each side, left and right, for the inspector beside it.
     video_margins: Cell<(f64, f64)>,
+    /// The shortcuts panel as drawn for what was typed in it and the
+    /// window's size: where, and its inside.
+    help_kept: Option<((String, i32, i32), [i32; 4], Vec<u32>)>,
     /// The tracks editor: a video's streams to keep, order and tag.
     track_editor: Option<track_editor::TrackEditor>,
     track_memory: Option<HashMap<PathBuf, tracks::TrackChoice>>,
@@ -1785,6 +1788,7 @@ impl App {
             track_picker: None,
             inspector: None,
             video_margins: Cell::new((0.0, 0.0)),
+            help_kept: None,
             track_editor: None,
             track_memory: None,
             sections: HashMap::new(),

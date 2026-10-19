@@ -257,6 +257,9 @@ impl App {
             };
             if drawn {
                 self.perf.render = started.elapsed();
+                if self.options.debug && self.options.verbose {
+                    eprintln!("jog: {:>7.1?} video render", self.perf.render);
+                }
                 self.scene_live = false;
                 let overlays = Instant::now();
                 self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
@@ -878,7 +881,27 @@ impl App {
             }
         }
         if self.help {
-            draw_help(canvas, &mut text, px, &self.help_search);
+            // Drawn once for what is typed in it, and laid in after: its
+            // words take longer than a 4K frame can spare.
+            let key = (self.help_search.clone(), canvas.width, canvas.height);
+            let radius = px as i32;
+            match self.help_kept.as_ref().filter(|kept| kept.0 == key) {
+                Some((_, [x, y, w, h], inside)) => {
+                    // The straight middle laid in whole; the curved top and
+                    // bottom drawn over the video as it is now.
+                    canvas.paste(*x, y + radius, *w, h - 2 * radius, inside);
+                    for rows in [*y..y + radius, y + h - radius..y + h] {
+                        canvas.band = Some(rows);
+                        draw::panel(canvas, *x, *y, *w, *h, radius);
+                    }
+                    canvas.band = None;
+                }
+                None => {
+                    let [x, y, w, h] = draw_help(canvas, &mut text, px, &self.help_search);
+                    let inside = canvas.copy(x, y + radius, w, h - 2 * radius);
+                    self.help_kept = Some((key, [x, y, w, h], inside));
+                }
+            }
         }
         if fading {
             ui::dissolve_all(canvas.all(), &behind, ((1.0 - box_level) * 0.6 * 256.0) as u32);
@@ -2381,7 +2404,8 @@ pub(super) fn help_keys<'a>(text: &mut Text, keys: &'a str, px: u32) -> Vec<(&'a
 
 /// Draws the list of shortcuts as a panel in the middle of the window:
 /// columns of sections, each key on a cap of its own.
-pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &str) {
+/// Gives back where the panel is.
+pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &str) -> [i32; 4] {
     // What is typed is looked for, each word of it, in a shortcut's keys,
     // what it does and the heading it is under. Those without it stay
     // where they are, faint, so that nothing moves about.
@@ -2480,4 +2504,5 @@ pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &
         }
         x += keys_width + gap + labels_width + 2 * pad;
     }
+    [left, top, width, height]
 }

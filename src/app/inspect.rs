@@ -158,6 +158,10 @@ pub struct Inspector {
     /// Where the panel was drawn, so that clicks and the wheel beside it
     /// go to the video.
     place: [i32; 4],
+    /// The panel as last drawn, and what it was drawn from: drawn again
+    /// only when that changes, and otherwise copied in, so that a 4K video
+    /// beside it is not held up by it on every frame.
+    kept: Option<(PanelKey, Vec<u32>)>,
     /// A picture, with its own tabs, rather than a video.
     picture: bool,
     /// The Structure tab: the boxes opened and the one picked out, each by
@@ -229,7 +233,7 @@ impl App {
         std::thread::spawn(move || {
             let _ = proxy.send_event(Event::Inspected(id, Inspection::read(&path)));
         });
-        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new() });
+        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new() });
         self.menu = None;
         self.redraw();
     }
@@ -589,6 +593,14 @@ impl App {
         let (top, height) = (pad, canvas.height - pad * 2);
         let left = if self.list_right { pad } else { canvas.width - width - pad };
         inspector.place = [left, top, width, height];
+        // Nothing in it has changed: the panel as it was.
+        let over = self.over_inspector(self.mouse.0, self.mouse.1).then_some(mouse);
+        let key = PanelKey { tab: inspector.tab, scroll: inspector.scroll, found: inspector.found.is_some(), selected: inspector.selected.clone(), open: inspector.open.len(), follow: inspector.follow, pointer: over, place: inspector.place, window: (canvas.width, canvas.height) };
+        if let Some((_, pixels)) = inspector.kept.as_ref().filter(|(was, pixels)| *was == key && pixels.len() == (width * height) as usize) {
+            canvas.dissolve(left, top, width, height, pixels, 256);
+            self.inspector = Some(inspector);
+            return;
+        }
 
         panel(canvas, left, top, width, height, pad * 2 / 3);
         inspector.drawn.clear();
@@ -673,6 +685,7 @@ impl App {
         let keys = if inspector.on_structure() { "↑↓ boxes  ·  → open  ·  ← close  ·  Tab next tab  ·  c copy JSON  ·  Esc" } else { "Tab next tab  ·  ↑↓ scroll  ·  click to copy  ·  c copy JSON  ·  Esc" };
         let keys = clipped(text, keys, inner_w, small);
         text.draw(canvas, inner, top + height - pad - small_line, small, DIM_TEXT_COLOR, &keys);
+        inspector.kept = Some((key, canvas.copy(left, top, width, height)));
         self.inspector = Some(inspector);
     }
 
@@ -1138,4 +1151,20 @@ impl App {
         }
         self.redraw();
     }
+}
+
+/// What the inspector's panel is drawn from: when none of it changes, the
+/// panel drawn last is the panel.
+#[derive(Clone, PartialEq, Debug)]
+pub struct PanelKey {
+    tab: usize,
+    scroll: i32,
+    found: bool,
+    selected: Vec<usize>,
+    open: usize,
+    follow: bool,
+    /// The pointer, while it is over the panel.
+    pointer: Option<(i32, i32)>,
+    place: [i32; 4],
+    window: (i32, i32),
 }

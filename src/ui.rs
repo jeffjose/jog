@@ -13,11 +13,14 @@ pub struct Canvas<'a> {
     pixels: &'a mut [u32],
     pub width: i32,
     pub height: i32,
+    /// When set, rounded rectangles are drawn only in these rows: the
+    /// curved top and bottom of a panel whose middle is laid in whole.
+    pub band: Option<std::ops::Range<i32>>,
 }
 
 impl<'a> Canvas<'a> {
     pub fn new(pixels: &'a mut [u32], width: u32, height: u32) -> Self {
-        Canvas { pixels, width: width as i32, height: height as i32 }
+        Canvas { pixels, width: width as i32, height: height as i32, band: None }
     }
 
     /// Rows of the part of a rectangle that is on the canvas.
@@ -34,14 +37,30 @@ impl<'a> Canvas<'a> {
 
     /// What is in a rectangle now, to be laid back over it with `dissolve`.
     pub fn copy(&mut self, x: i32, y: i32, w: i32, h: i32) -> Vec<u32> {
-        self.rows(x, y, w, h).flat_map(|row| row.iter().copied()).collect()
+        let mut out = Vec::with_capacity(w.max(0) as usize * h.max(0) as usize);
+        self.rows(x, y, w, h).for_each(|row| out.extend_from_slice(row));
+        out
     }
 
     /// Lays what `copy` took from this same rectangle back over it,
     /// `amount`/256 opaque: one picture giving way to another.
     pub fn dissolve(&mut self, x: i32, y: i32, w: i32, h: i32, was: &[u32], amount: u32) {
+        if amount >= 256 {
+            return self.paste(x, y, w, h, was);
+        }
         for (pixel, was) in self.rows(x, y, w, h).flatten().zip(was) {
-            *pixel = mix(*pixel, *was, amount.min(256));
+            *pixel = mix(*pixel, *was, amount);
+        }
+    }
+
+    /// Lays what `copy` took back over the same rectangle, as it was: a
+    /// row at a time, which is a plain copy of memory.
+    pub fn paste(&mut self, x: i32, y: i32, w: i32, h: i32, was: &[u32]) {
+        let mut rest = was;
+        for row in self.rows(x, y, w, h) {
+            let n = row.len().min(rest.len());
+            row[..n].copy_from_slice(&rest[..n]);
+            rest = &rest[row.len().min(rest.len())..];
         }
     }
 
@@ -207,7 +226,8 @@ impl<'a> Canvas<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn round_outline(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, thickness: i32, color: u32) {
         let band = radius.max(thickness);
-        for py in y..y + h {
+        let only = self.band.clone();
+        for py in (y..y + h).filter(|py| only.as_ref().is_none_or(|rows| rows.contains(py))) {
             // Away from the top and bottom only the two sides have any.
             let full = py < y + band || py >= y + h - band;
             let spans = if full { [(x, x + w), (0, 0)] } else { [(x, x + thickness), (x + w - thickness, x + w)] };
@@ -224,7 +244,8 @@ impl<'a> Canvas<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn round_fill(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, amount: u32) {
         let radius = radius.clamp(0, w.min(h) / 2);
-        for py in y..y + h {
+        let only = self.band.clone();
+        for py in (y..y + h).filter(|py| only.as_ref().is_none_or(|rows| rows.contains(py))) {
             // Only the ends of the rows at the top and bottom curve; the
             // rest of every row is plain.
             let curved = py < y + radius || py >= y + h - radius;
@@ -234,7 +255,11 @@ impl<'a> Canvas<'a> {
                 self.cover(px, py, color, (cover * f64::from(amount)) as u32);
             }
             for row in self.rows(x + inset, py, w - 2 * inset, 1) {
-                row.iter_mut().for_each(|pixel| *pixel = mix(*pixel, color, amount.min(256)));
+                // Opaque, it is a plain fill, much the quicker.
+                match amount >= 256 {
+                    true => row.fill(color),
+                    false => row.iter_mut().for_each(|pixel| *pixel = mix(*pixel, color, amount)),
+                }
             }
         }
     }
