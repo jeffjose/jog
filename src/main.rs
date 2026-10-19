@@ -184,6 +184,13 @@ fn main() -> ExitCode {
     }
     let proxy = event_loop.create_proxy();
     let _ = proxy_slot.set(proxy.clone());
+    // A small file can be done before then, and nothing told of it. The
+    // window would find it anyway; a scripted run, which starts on being
+    // told, would wait for ever. Told twice, should it finish just now,
+    // is no harm.
+    if loader.fitted(playlist.start).is_some() {
+        let _ = proxy.send_event(Event::Loaded(loader::Job::Fitted(playlist.start)));
+    }
 
     let (watch, filter, choosing) = (options.watch, options.filter.clone(), !options.sessions.is_empty());
     let benchmark = options.benchmark;
