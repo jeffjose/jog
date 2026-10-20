@@ -5,13 +5,14 @@
 
 use super::*;
 use super::inspect::Hit;
+use super::devtools::flow_x;
 use crate::hdrmeta::{self, Agtm, Hdr10Plus, Info};
 
 /// The colors of the charts.
 const STORED: u32 = 0x8A8A8A;
 const IDENTITY: u32 = 0x5A5A5A;
 const PLUS: u32 = 0xB48CF0;
-const CARD: u32 = 0x26262B;
+const CARD: u32 = super::devtools::WELL;
 
 /// What the HDR tab's charts are drawn from, beyond the file: for the
 /// panel kept to be drawn again when one changes.
@@ -51,29 +52,15 @@ impl App {
         HdrKey { headroom: (self.hdr_headroom * 100.0).round() as i64, agtm, plus, gain }
     }
 
-    /// The HDR tab's charts, under its cards, from `y`. Returns where
-    /// they end.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn draw_hdr_charts(&self, sub: &mut Canvas, text: &mut Text, px: u32, id: usize, info: &Info, inner_w: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), gain: bool, drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
-        let seconds = self.hdr_time(id);
-        let mut y = y;
-        if let Some(agtm) = info.agtm.get(index_at(&info.agtm, seconds)).map(|timed| &timed.value) {
-            y = self.draw_agtm(sub, text, px, info, agtm, inner_w, y, offset, mouse, gain, drawn);
-        }
-        if let Some(plus) = info.hdr10plus.get(index_at(&info.hdr10plus, seconds)).map(|timed| &timed.value) {
-            y = draw_plus(sub, text, px, plus, info.hdr10plus.len(), inner_w, y);
-        }
-        draw_ladder(sub, text, px, info, seconds, self.hdr_headroom, inner_w, y)
-    }
 
     /// SMPTE ST 2094-50: every curve the video carries, and the one for
     /// the headroom chosen, blended from the two either side of it.
     #[allow(clippy::too_many_arguments)]
-    fn draw_agtm(&self, sub: &mut Canvas, text: &mut Text, px: u32, info: &Info, agtm: &Agtm, inner_w: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), gain: bool, drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
+    pub(super) fn draw_agtm(&self, sub: &mut Canvas, text: &mut Text, px: u32, info: &Info, agtm: &Agtm, inner_w: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), gain: bool, drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
         let pad = px as i32;
         let small = (px * 5 / 6).max(11);
         let small_line = Text::line_height(small);
-        let x = pad * 3 / 2;
+        let x = flow_x();
         let (cx, cw) = (x + pad, inner_w - 2 * pad);
         let headroom = self.hdr_headroom;
         let curves = agtm.curves();
@@ -198,11 +185,11 @@ fn in_rect((x, y): (i32, i32), [left, top, w, h]: [i32; 4]) -> bool {
 /// HDR10+: the curve of the scene on view, from its brightest to the
 /// screen it was made for, where it leaves the straight line marked.
 #[allow(clippy::too_many_arguments)]
-fn draw_plus(sub: &mut Canvas, text: &mut Text, px: u32, plus: &Hdr10Plus, scenes: usize, inner_w: i32, y: i32) -> i32 {
+pub(super) fn draw_plus(sub: &mut Canvas, text: &mut Text, px: u32, plus: &Hdr10Plus, scenes: usize, inner_w: i32, y: i32) -> i32 {
     let pad = px as i32;
     let small = (px * 5 / 6).max(11);
     let small_line = Text::line_height(small);
-    let x = pad * 3 / 2;
+    let x = flow_x();
     let (cx, cw) = (x + pad, inner_w - 2 * pad);
     let plot_h = cw.min(px as i32 * 12);
     let row = small_line + pad / 4;
@@ -238,11 +225,11 @@ fn draw_plus(sub: &mut Canvas, text: &mut Text, px: u32, plus: &Hdr10Plus, scene
 /// hundredth to ten thousand: where its white is, its brightest, the
 /// screen it was mastered on and the headroom chosen.
 #[allow(clippy::too_many_arguments)]
-fn draw_ladder(sub: &mut Canvas, text: &mut Text, px: u32, info: &Info, seconds: f64, headroom: f64, inner_w: i32, y: i32) -> i32 {
+pub(super) fn draw_ladder(sub: &mut Canvas, text: &mut Text, px: u32, info: &Info, seconds: f64, headroom: f64, inner_w: i32, y: i32) -> i32 {
     let pad = px as i32;
     let small = (px * 5 / 6).max(11);
     let small_line = Text::line_height(small);
-    let x = pad * 3 / 2;
+    let x = flow_x();
     let (cx, cw) = (x + pad, inner_w - 2 * pad);
     // What there is to mark, each with a color.
     let mut marks: Vec<(String, f64, u32)> = Vec::new();
@@ -335,7 +322,7 @@ fn draw_tone_curves(sub: &mut Canvas, text: &mut Text, px: u32, color: &crate::c
     let pad = px as i32;
     let small = (px * 5 / 6).max(11);
     let small_line = Text::line_height(small);
-    let x = pad * 3 / 2;
+    let x = flow_x();
     let (cx, cw) = (x + pad, inner_w - 2 * pad);
     let plot_h = cw.min(px as i32 * 14);
     let card_h = pad + small_line + pad / 2 + plot_h + pad / 2 + small_line + pad;
@@ -369,7 +356,7 @@ fn draw_gain_weight(sub: &mut Canvas, text: &mut Text, px: u32, meta: &crate::ul
     let pad = px as i32;
     let small = (px * 5 / 6).max(11);
     let small_line = Text::line_height(small);
-    let x = pad * 3 / 2;
+    let x = flow_x();
     let (cx, cw) = (x + pad, inner_w - 2 * pad);
     let plot_h = (cw / 2).min(px as i32 * 8);
     let row = small_line + pad / 4;

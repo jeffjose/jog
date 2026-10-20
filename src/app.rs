@@ -71,7 +71,7 @@ mod scripted;
 mod inspect;
 mod inspect_hdr;
 mod devtools;
-use devtools::{DrawerPane, Pane};
+use devtools::{Block, DrawerPane, Pane};
 mod track_editor;
 mod tracks;
 mod triaging;

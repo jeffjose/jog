@@ -8,6 +8,7 @@ use serde_json::Value;
 use winit::keyboard::{Key, NamedKey};
 
 use super::*;
+use super::devtools::flow_x;
 
 /// What was found in a file.
 pub struct Inspection {
@@ -133,9 +134,9 @@ impl Inspector {
 
 /// A card of label and value rows, under a heading.
 pub(super) struct Card {
-    title: String,
-    badges: Vec<String>,
-    rows: Vec<(String, String)>,
+    pub(super) title: String,
+    pub(super) badges: Vec<String>,
+    pub(super) rows: Vec<(String, String)>,
 }
 
 impl Card {
@@ -694,17 +695,6 @@ impl App {
         }
     }
 
-    /// The chapters, for the last tab: start, end and title.
-    fn chapters(found: &Inspection) -> Vec<(f64, f64, String)> {
-        found.probe["chapters"]
-            .as_array()
-            .map(|all| {
-                all.iter()
-                    .filter_map(|c| Some((text_of(&c["start_time"])?.parse().ok()?, text_of(&c["end_time"])?.parse().ok()?, text_of(&c["tags"]["title"]).unwrap_or_default())))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
 
     pub(super) fn draw_inspector(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
         let mouse = (self.mouse.0 as i32, self.mouse.1 as i32);
@@ -743,8 +733,12 @@ impl App {
             Pane::Timeline => Some(u128::from(inspector.packets.is_some()) + self.perf.arrived.elapsed().as_millis() / 500 * 2),
             Pane::Console => Some(self.messages.len() as u128 * 1000 + self.perf.arrived.elapsed().as_secs() as u128 / 30),
             Pane::Color => Some(self.scopes.iter().enumerate().map(|(at, on)| u128::from(*on) << at).sum()),
-            // What is playing, as the info line says it.
-            Pane::Tracks => Some(self.video.as_ref().and_then(|video| video.track_words.as_ref()).map_or(0, |words| words.bytes().fold(0u128, |hash, byte| hash.wrapping_mul(31).wrapping_add(u128::from(byte))))),
+            // What is playing, as the info line says it, and whether it
+            // has started.
+            Pane::Tracks => Some({
+                let words = self.video.as_ref().and_then(|video| video.track_words.as_ref()).map_or(0, |words| words.bytes().fold(0u128, |hash, byte| hash.wrapping_mul(31).wrapping_add(u128::from(byte))));
+                words.wrapping_mul(2) + u128::from(self.video.as_ref().is_some_and(|video| video.id == inspector.id && video.showing))
+            }),
             // The list lights up under the pointer and plays along: every frame.
             Pane::Files => Some(self.perf.arrived.elapsed().as_nanos()),
             _ if self.inspect_drawer => Some(self.perf.arrived.elapsed().as_nanos()),
@@ -834,66 +828,101 @@ impl App {
                 None => text.draw(&mut sub, pad * 3 / 2, pad, px, DIM_TEXT_COLOR, "Reading…"),
                 Some(Err(error)) => text.draw(&mut sub, pad * 3 / 2, pad, px, DIM_TEXT_COLOR, &format!("Not readable · {error}")),
                 Some(Ok(found)) => {
-                    // The tab's cards: those of one of the first tabs, or its own.
-                    let mut cards = match inspector.pane {
-                        Pane::Issues => self.issue_cards(found),
-                        Pane::Performance => self.performance_cards(),
-                        _ if inspector.tab == usize::MAX => Vec::new(),
-                        _ => self.inspector_cards(found, inspector.tab),
-                    };
-                    // A picture's tags are its EXIF and its XMP both.
-                    if inspector.picture && inspector.pane == Pane::Metadata {
-                        cards.extend(self.inspector_cards(found, 3));
+                    // The Timeline's packets, read once, on another thread.
+                    if inspector.pane == Pane::Timeline && !inspector.packets_asked {
+                        inspector.packets_asked = true;
+                        let (id, path, proxy) = (inspector.id, self.files[inspector.id].clone(), self.proxy.clone());
+                        std::thread::spawn(move || drop(proxy.send_event(Event::Packets(id, super::devtools::Packets::read(&path)))));
                     }
-                    content_h = self.draw_cards(&mut sub, text, px, &cards, inner_w, offset, mouse, &mut drawn, -inspector.scroll);
-                    // The tabs drawn here rather than as cards.
-                    content_h = match inspector.pane {
-                        Pane::Convert => self.draw_actions(&mut sub, text, px, &self.convert_actions(inspector.picture), inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
-                        Pane::Compare => self.draw_actions(&mut sub, text, px, &self.compare_actions(), inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
-                        Pane::Timeline => {
-                            // The packets, read once, on another thread.
-                            if !inspector.packets_asked {
-                                inspector.packets_asked = true;
-                                let (id, path, proxy) = (inspector.id, self.files[inspector.id].clone(), self.proxy.clone());
-                                std::thread::spawn(move || drop(proxy.send_event(Event::Packets(id, super::devtools::Packets::read(&path)))));
-                            }
-                            let y = self.draw_bitrate(&mut sub, text, px, inspector.packets.as_ref(), inspector.id, inner_w, content_h - inspector.scroll, offset, &mut drawn);
-                            self.draw_timeline(&mut sub, text, px, inner_w, y, offset, mouse, &mut drawn) + inspector.scroll
+                    if inspector.on_structure() {
+                        super::devtools::set_flow_x(pad * 3 / 2);
+                        let tree = TreeState { open: &inspector.open, selected: &inspector.selected, follow: &mut inspector.follow, scroll: &mut inspector.scroll, view_h: inspector.view_h };
+                        content_h = self.draw_structure(&mut sub, text, px, found, tree, inner_w, offset, mouse, &mut drawn);
+                    } else {
+                        // The tab as blocks, laid out in as many columns as fit.
+                        let mut cards = match inspector.pane {
+                            Pane::Issues => Vec::new(),
+                            _ if inspector.tab == usize::MAX => Vec::new(),
+                            _ => self.inspector_cards(found, inspector.tab),
+                        };
+                        // A picture's tags are its EXIF and its XMP both.
+                        if inspector.picture && inspector.pane == Pane::Metadata {
+                            cards.extend(self.inspector_cards(found, 3));
                         }
-                        Pane::Tracks => self.draw_track_choices(&mut sub, text, px, inspector.id, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
-                        Pane::Console => self.draw_console(&mut sub, text, px, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
-                        Pane::Overview => self.draw_anatomy(&mut sub, text, px, found, inner_w, content_h - inspector.scroll) + inspector.scroll,
-                        _ => content_h,
-                    };
-                    // The HDR tab: a bar for each HDR10+ scene, its brightest.
-                    if inspector.tab == 2 && !inspector.picture {
-                        content_h = self.draw_scene_chart(&mut sub, text, px, found, inner_w, content_h - inspector.scroll, offset, &mut drawn) + inspector.scroll;
-                        // The curves and the brightnesses, drawn.
-                        if let Some(info) = found.hdr.as_ref().filter(|info| info.is_hdr()) {
-                            // The static figures as ffprobe found them, where
-                            // jog's own reading has none.
+                        // The static HDR figures as ffprobe found them, where
+                        // jog's own reading has none.
+                        let info = found.hdr.as_ref().filter(|info| info.is_hdr() && !inspector.picture).map(|info| {
                             let mut info = info.clone();
                             let mastering = found.side("Mastering display metadata");
                             info.mastering = info.mastering.or_else(|| mastering.and_then(|m| Some((ratio(&m["max_luminance"])?, ratio(&m["min_luminance"])?))));
                             let light = found.side("Content light level metadata");
                             info.light = info.light.or_else(|| light.and_then(|l| Some((l["max_content"].as_u64()? as u32, l["max_average"].as_u64()? as u32))));
-                            content_h = self.draw_hdr_charts(&mut sub, text, px, inspector.id, &info, inner_w, content_h - inspector.scroll, offset, mouse, inspector.gain, &mut drawn) + inspector.scroll;
+                            info
+                        });
+                        let mut blocks: Vec<Block> = Vec::new();
+                        match inspector.pane {
+                            Pane::Overview => blocks.push(Block::Hero),
+                            Pane::Issues => blocks.push(Block::Issues),
+                            Pane::Color if info.is_some() => blocks.push(Block::HdrHero),
+                            _ => {}
                         }
-                    }
-                    if inspector.on_structure() {
-                        let tree = TreeState { open: &inspector.open, selected: &inspector.selected, follow: &mut inspector.follow, scroll: &mut inspector.scroll, view_h: inspector.view_h };
-                        content_h = self.draw_structure(&mut sub, text, px, found, tree, inner_w, offset, mouse, &mut drawn);
-                    }
-                    // A picture's color tab: its curves and its gain map, drawn.
-                    if let Some(picture) = found.picture.as_ref().filter(|_| inspector.picture && inspector.tab == 2) {
-                        content_h = self.draw_picture_charts(&mut sub, text, px, picture, inner_w, content_h - inspector.scroll) + inspector.scroll;
-                    }
-                    // And the graphs of the frame on view, to turn on and off.
-                    if inspector.pane == Pane::Color {
-                        content_h = self.draw_actions(&mut sub, text, px, &self.scope_actions(), inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll;
-                    }
-                    if inspector.tab == 4 && !inspector.picture {
-                        content_h = self.draw_chapters(&mut sub, text, px, found, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll;
+                        blocks.extend(cards.iter().map(Block::Card));
+                        match inspector.pane {
+                            Pane::Overview => blocks.push(Block::Anatomy),
+                            Pane::Tracks => blocks.push(Block::Tracks),
+                            Pane::Color if inspector.picture => blocks.extend([Block::PictureCharts, Block::Scopes]),
+                            Pane::Color => blocks.extend([Block::SceneChart, Block::Agtm, Block::Plus, Block::Ladder, Block::Scopes]),
+                            Pane::Timeline => blocks.extend([Block::Bitrate, Block::Chapters]),
+                            Pane::Convert => blocks.push(Block::Convert),
+                            Pane::Compare => blocks.push(Block::Compare),
+                            _ => {}
+                        }
+                        // Columns of at least 26 lines of text, up to four.
+                        let gap = pad;
+                        let avail = content_w - pad * 3;
+                        let columns = ((avail + gap) / (px as i32 * 26 + gap)).clamp(1, 4).min(blocks.len().max(1) as i32);
+                        let column_w = (avail - gap * (columns - 1)) / columns;
+                        let mut heights = vec![pad / 2; columns as usize];
+                        let seconds = self.video.as_ref().filter(|video| video.id == inspector.id).and(self.video_time()).map_or(0.0, |(at, _)| at);
+                        for block in &blocks {
+                            let column = heights.iter().enumerate().min_by_key(|(_, h)| **h).map_or(0, |(at, _)| at);
+                            super::devtools::set_flow_x(pad * 3 / 2 + column as i32 * (column_w + gap));
+                            let top = heights[column] - inspector.scroll;
+                            let end = match block {
+                                Block::Hero => self.draw_overview_hero(&mut sub, text, px, found, column_w, top),
+                                Block::HdrHero => self.draw_hdr_hero(&mut sub, text, px, info.as_ref(), column_w, top),
+                                Block::Issues => self.draw_issues(&mut sub, text, px, found, column_w, top),
+                                Block::Card(card) => self.draw_card(&mut sub, text, px, card, column_w, top, offset, mouse, &mut drawn),
+                                Block::Anatomy => self.draw_anatomy(&mut sub, text, px, found, column_w, top),
+                                Block::Tracks => self.draw_track_choices(&mut sub, text, px, inspector.id, column_w, top, offset, mouse, &mut drawn),
+                                Block::PictureCharts => match found.picture.as_ref() {
+                                    Some(picture) => self.draw_picture_charts(&mut sub, text, px, picture, column_w, top),
+                                    None => top,
+                                },
+                                Block::SceneChart => self.draw_scene_chart(&mut sub, text, px, found, column_w, top, offset, &mut drawn),
+                                Block::Agtm => match info.as_ref().and_then(|info| info.agtm_at(seconds).map(|agtm| (info, agtm))) {
+                                    Some((info, agtm)) => self.draw_agtm(&mut sub, text, px, info, agtm, column_w, top, offset, mouse, inspector.gain, &mut drawn),
+                                    None => top,
+                                },
+                                Block::Plus => match info.as_ref().and_then(|info| info.hdr10plus_at(seconds).map(|plus| (info, plus))) {
+                                    Some((info, plus)) => super::inspect_hdr::draw_plus(&mut sub, text, px, plus, info.hdr10plus.len(), column_w, top),
+                                    None => top,
+                                },
+                                Block::Ladder => match info.as_ref() {
+                                    Some(info) => super::inspect_hdr::draw_ladder(&mut sub, text, px, info, seconds, self.hdr_headroom, column_w, top),
+                                    None => top,
+                                },
+                                Block::Scopes => self.draw_actions(&mut sub, text, px, &self.scope_actions(), column_w, top, offset, mouse, &mut drawn),
+                                Block::Bitrate => self.draw_bitrate(&mut sub, text, px, inspector.packets.as_ref(), inspector.id, column_w, top, offset, &mut drawn),
+                                Block::Chapters => self.draw_timeline(&mut sub, text, px, column_w, top, offset, mouse, &mut drawn),
+                                Block::Convert => self.draw_actions(&mut sub, text, px, &self.convert_actions(inspector.picture), column_w, top, offset, mouse, &mut drawn),
+                                Block::Compare => self.draw_actions(&mut sub, text, px, &self.compare_actions(), column_w, top, offset, mouse, &mut drawn),
+                            };
+                            if end > top {
+                                heights[column] = end + inspector.scroll + gap / 2;
+                            }
+                        }
+                        content_h = heights.into_iter().max().unwrap_or(0);
                     }
                 }
             }
@@ -994,7 +1023,7 @@ impl App {
             let x = pad * 3 / 2 + column as i32 * (card_w + gap);
             let card_h = pad + line + pad / 2 + card.rows.len() as i32 * row_h + pad * 2 / 3;
             let y = heights[column] + scroll;
-            sub.round_fill(x, y, card_w, card_h, pad / 2, 0x26262B, 256);
+            sub.round_fill(x, y, card_w, card_h, pad / 2, super::devtools::WELL, 256);
             let mut tx = x + pad;
             sub_title(sub, text, tx, y + pad, small, &card.title.to_uppercase());
             tx += text.width(&card.title.to_uppercase(), small) + pad / 2;
@@ -1036,10 +1065,10 @@ impl App {
         let pad = px as i32;
         let small = (px * 5 / 6).max(11);
         let small_line = Text::line_height(small);
-        let x = pad * 3 / 2;
+        let x = flow_x();
         let chart_h = px as i32 * 9;
         let card_h = pad + small_line + pad / 2 + chart_h + pad / 2 + small_line + pad;
-        sub.round_fill(x, y, inner_w, card_h, pad / 2, 0x26262B, 256);
+        sub.round_fill(x, y, inner_w, card_h, pad / 2, super::devtools::WELL, 256);
         sub_title(sub, text, x + pad, y + pad, small, "HDR10+ · BRIGHTEST OF EACH SCENE");
         let scenes = hdr_scenes(hdr);
         let peak = scenes.iter().map(|(_, brightest, _)| *brightest).fold(1000.0_f64, f64::max);
@@ -1065,35 +1094,6 @@ impl App {
         y + card_h + pad
     }
 
-    /// The chapters as rows, each to be clicked to go there.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_chapters(&self, sub: &mut Canvas, text: &mut Text, px: u32, found: &Inspection, inner_w: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
-        let chapters = Self::chapters(found);
-        if chapters.is_empty() {
-            return y;
-        }
-        let pad = px as i32;
-        let line = Text::line_height(px);
-        let small = (px * 5 / 6).max(11);
-        let x = pad * 3 / 2;
-        let row_h = line + pad / 3;
-        let card_h = pad + Text::line_height(small) + pad / 2 + chapters.len() as i32 * row_h + pad / 2;
-        sub.round_fill(x, y, inner_w, card_h, pad / 2, 0x26262B, 256);
-        sub_title(sub, text, x + pad, y + pad, small, &format!("CHAPTERS · {}", chapters.len()));
-        let mut ry = y + pad + Text::line_height(small) + pad / 2;
-        for (start, end, title) in chapters {
-            let place = [x + offset.0, ry + offset.1, inner_w, row_h];
-            if (place[0]..place[0] + place[2]).contains(&mouse.0) && (place[1]..place[1] + place[3]).contains(&mouse.1) {
-                sub.round_fill(x + pad / 2, ry, inner_w - pad, row_h, pad / 4, 0x3A3A40, 256);
-            }
-            let span = format!("{} – {}", clock(start), clock(end));
-            text.draw(sub, x + pad, ry, px, DIM_TEXT_COLOR, &span);
-            text.draw(sub, x + pad + px as i32 * 9, ry, px, TEXT_COLOR, &title);
-            drawn.push((Hit::Seek(start), place));
-            ry += row_h;
-        }
-        y + card_h + pad
-    }
 }
 
 /// A card's heading: small capitals, dim.
@@ -1156,7 +1156,7 @@ impl App {
         let line = Text::line_height(px);
         let small = (px * 5 / 6).max(11);
         let small_line = Text::line_height(small);
-        let x = pad * 3 / 2;
+        let x = flow_x();
         let nodes = match &found.tree {
             Ok(nodes) => nodes,
             Err(error) => {
@@ -1239,7 +1239,7 @@ impl App {
 
 
 
-        sub.round_fill(dx, y, dw, card_h, pad / 2, 0x26262B, 256);
+        sub.round_fill(dx, y, dw, card_h, pad / 2, super::devtools::WELL, 256);
         y += pad;
         text.draw(sub, dx + pad, y, px, TEXT_COLOR, &node.name);
         let about = if node.about.is_empty() { String::new() } else { format!("  ·  {}", node.about) };

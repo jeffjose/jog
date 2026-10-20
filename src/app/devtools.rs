@@ -186,18 +186,6 @@ impl App {
         issues
     }
 
-    /// The Issues tab's cards.
-    pub(super) fn issue_cards(&self, found: &super::inspect::Inspection) -> Vec<Card> {
-        let issues = self.issues(found);
-        let mut card = Card::new(format!("Issues · {}", issues.len()));
-        if issues.is_empty() {
-            card.row("Found", Some("Nothing off".into()));
-        }
-        for (severity, words) in issues {
-            card.row(if severity == Severity::Warning { "Warning" } else { "Note" }, Some(words));
-        }
-        vec![card]
-    }
 
     /// The Performance tab's cards: the debug overlay's figures.
     pub(super) fn performance_cards(&mut self) -> Vec<Card> {
@@ -277,24 +265,29 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_actions(&self, sub: &mut Canvas, text: &mut Text, px: u32, groups: &[(String, Vec<Action>)], inner_w: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
         let pad = px as i32;
-        let small = (px * 5 / 6).max(11);
-        let small_line = Text::line_height(small);
         let line = Text::line_height(px);
-        let x = pad * 3 / 2;
-        let row_h = line + pad / 2;
+        let x = flow_x();
+        // A section, as the facts are: its name and a hairline, then a row
+        // for each, quiet until the pointer is on it, a '›' at its end.
+        let row_h = line + pad / 3;
         let mut y = y;
         for (title, actions) in groups {
-            text.draw(sub, x, y, small, DIM_TEXT_COLOR, &title.to_uppercase());
-            y += small_line + pad / 3;
+            y = section_head(sub, text, px, x, y, inner_w, title);
             for action in actions {
                 let place = [x + offset.0, y + offset.1, inner_w, row_h];
                 let over = (place[0]..place[0] + place[2]).contains(&mouse.0) && (place[1]..place[1] + place[3]).contains(&mouse.1);
-                sub.round_fill(x, y, inner_w, row_h, row_h / 2, if over { accent() } else { 0x26262B }, 256);
-                text.draw(sub, x + pad, y + (row_h - line) / 2, px, if over { on_accent() } else { TEXT_COLOR }, &action.words);
+                if over {
+                    sub.round_fill(x - pad / 3, y, inner_w + pad * 2 / 3, row_h, pad / 3, 0x2C2D35, 256);
+                }
+                let words = clipped(text, &action.words, inner_w - pad * 2, px);
+                text.draw(sub, x, y + (row_h - line) / 2, px, TEXT_COLOR, &words);
+                let more = "›";
+                let more_w = text.width(more, px);
+                text.draw(sub, x + inner_w - more_w, y + (row_h - line) / 2, px, if over { accent_soft() } else { 0x5C5D66 }, more);
                 drawn.push((action.hit.clone(), place));
-                y += row_h + pad / 3;
+                y += row_h;
             }
-            y += pad / 2;
+            y += pad;
         }
         y
     }
@@ -306,31 +299,28 @@ impl App {
         let entries = self.entries();
         let pad = px as i32;
         let line = Text::line_height(px);
-        let small = (px * 5 / 6).max(11);
-        let small_line = Text::line_height(small);
-        let x = pad * 3 / 2;
+        let x = flow_x();
         let row_h = line + pad / 3;
-        let rows = entries.len().max(1) as i32;
-        let card_h = pad + small_line + pad / 2 + rows * row_h + pad / 2;
-        sub.round_fill(x, y, inner_w, card_h, pad / 2, 0x26262B, 256);
-        text.draw(sub, x + pad, y + pad, small, DIM_TEXT_COLOR, &format!("CHAPTERS AND SECTIONS · {}", entries.len()));
-        let mut ry = y + pad + small_line + pad / 2;
+        let mut y = section_head(sub, text, px, x, y, inner_w, &format!("Chapters and sections · {}", entries.len()));
         if entries.is_empty() {
-            text.draw(sub, x + pad, ry, px, DIM_TEXT_COLOR, "None · mark one with Shift+A and Shift+B");
+            text.draw(sub, x, y + (row_h - line) / 2, px, DIM_TEXT_COLOR, "None · mark one with Shift+A and Shift+B");
+            y += row_h;
         }
+        let when_w = px as i32 * 9;
         for entry in &entries {
-            let place = [x + offset.0, ry + offset.1, inner_w, row_h];
+            let place = [x + offset.0, y + offset.1, inner_w, row_h];
             if (place[0]..place[0] + place[2]).contains(&mouse.0) && (place[1]..place[1] + place[3]).contains(&mouse.1) {
-                sub.round_fill(x + pad / 2, ry, inner_w - pad, row_h, pad / 4, 0x3A3A40, 256);
+                sub.round_fill(x - pad / 3, y, inner_w + pad * 2 / 3, row_h, pad / 3, 0x2C2D35, 256);
             }
-            text.draw(sub, x + pad, ry, px, DIM_TEXT_COLOR, &format!("{} – {}", clock(entry.start), clock(entry.end)));
+            text.draw(sub, x, y + (row_h - line) / 2, px, DIM_TEXT_COLOR, &format!("{} – {}", clock(entry.start), clock(entry.end)));
             let kind = if entry.kept { "section" } else { "chapter" };
             let title = entry.title.clone().unwrap_or_else(|| kind.to_string());
-            text.draw(sub, x + pad + px as i32 * 9, ry, px, TEXT_COLOR, &title);
+            let title = clipped(text, &title, inner_w - when_w, px);
+            text.draw(sub, x + when_w, y + (row_h - line) / 2, px, if entry.kept { accent_soft() } else { TEXT_COLOR }, &title);
             drawn.push((Hit::Seek(entry.start), place));
-            ry += row_h;
+            y += row_h;
         }
-        y + card_h + pad
+        y + pad
     }
 
     /// The transport bar along the inspector's foot, drawn every frame:
@@ -428,31 +418,29 @@ impl App {
         };
         let pad = px as i32;
         let line = Text::line_height(px);
-        let small = (px * 5 / 6).max(11);
-        let small_line = Text::line_height(small);
-        let x = pad * 3 / 2;
+        let x = flow_x();
         let row_h = line + pad / 3;
         let mut y = y;
+        // Each kind a section; the one playing marked in the accent, the
+        // rest quiet until the pointer is on them.
         let mut group = |sub: &mut Canvas, text: &mut Text, y: &mut i32, title: &str, rows: Vec<(String, bool, Hit)>| {
             if rows.is_empty() {
                 return;
             }
-            let card_h = pad + small_line + pad / 2 + rows.len() as i32 * row_h + pad / 2;
-            sub.round_fill(x, *y, inner_w, card_h, pad / 2, 0x26262B, 256);
-            text.draw(sub, x + pad, *y + pad, small, DIM_TEXT_COLOR, title);
-            let mut ry = *y + pad + small_line + pad / 2;
+            *y = section_head(sub, text, px, x, *y, inner_w, title);
             for (words, on, hit) in rows {
-                let place = [x + offset.0, ry + offset.1, inner_w, row_h];
+                let place = [x + offset.0, *y + offset.1, inner_w, row_h];
                 let over = (place[0]..place[0] + place[2]).contains(&mouse.0) && (place[1]..place[1] + place[3]).contains(&mouse.1);
-                if on || over {
-                    sub.round_fill(x + pad / 2, ry, inner_w - pad, row_h, pad / 3, if on { accent() } else { 0x3A3A40 }, 256);
+                if over {
+                    sub.round_fill(x - pad / 3, *y, inner_w + pad * 2 / 3, row_h, pad / 3, 0x2C2D35, 256);
                 }
                 let mark = if on { "●" } else { "○" };
-                text.draw(sub, x + pad, ry + (row_h - line) / 2, px, if on { on_accent() } else { TEXT_COLOR }, &format!("{mark}  {words}"));
+                let words = clipped(text, &format!("{mark}  {words}"), inner_w, px);
+                text.draw(sub, x, *y + (row_h - line) / 2, px, if on { accent_soft() } else { TEXT_COLOR }, &words);
                 drawn.push((hit, place));
-                ry += row_h;
+                *y += row_h;
             }
-            *y += card_h + pad;
+            *y += pad;
         };
         if !playing {
             text.draw(sub, x, y, px, DIM_TEXT_COLOR, "Play the video to choose its tracks");
@@ -463,11 +451,11 @@ impl App {
             .filter(|track| track.kind == tracks::TrackKind::Audio)
             .map(|track| (tracks::track_label(track), track.selected, Hit::Track(true, Some(track.id))))
             .collect();
-        group(sub, text, &mut y, "PLAYING · AUDIO", audio);
+        group(sub, text, &mut y, "Audio", audio);
         let mut subs: Vec<(String, bool, Hit)> = vec![("Off".to_string(), !tracks.iter().any(|track| track.kind == tracks::TrackKind::Sub && track.selected), Hit::Track(false, None))];
         subs.extend(tracks.iter().filter(|track| track.kind == tracks::TrackKind::Sub).map(|track| (tracks::track_label(track), track.selected, Hit::Track(false, Some(track.id)))));
         if playing {
-            group(sub, text, &mut y, "PLAYING · SUBTITLES", subs);
+            group(sub, text, &mut y, "Subtitles", subs);
         }
         let run = |words: &str, command: Command| Action { words: words.to_string(), hit: Hit::Run(command) };
         let actions = vec![(
@@ -513,18 +501,15 @@ impl App {
         let pad = px as i32;
         let line = Text::line_height(px);
         let small = (px * 5 / 6).max(11);
-        let small_line = Text::line_height(small);
-        let x = pad * 3 / 2;
+        let x = flow_x();
         let shown: Vec<&(Instant, String)> = self.messages.iter().rev().take(200).collect();
         let row_h = line + pad / 4;
-        let card_h = pad + small_line + pad / 2 + shown.len().max(1) as i32 * row_h + pad / 2;
-        sub.round_fill(x, y, inner_w, card_h, pad / 2, 0x26262B, 256);
-        text.draw(sub, x + pad, y + pad, small, DIM_TEXT_COLOR, &format!("MESSAGES · {}", self.messages.len()));
-        let mut ry = y + pad + small_line + pad / 2;
+        y = section_head(sub, text, px, x, y, inner_w, &format!("Messages · {}", self.messages.len()));
         if shown.is_empty() {
-            text.draw(sub, x + pad, ry, px, DIM_TEXT_COLOR, "Nothing yet");
+            text.draw(sub, x, y, px, DIM_TEXT_COLOR, "Nothing yet");
+            y += row_h;
         }
-        let when_w = px as i32 * 4;
+        let when_w = px as i32 * 3;
         for (at, words) in shown {
             let ago = at.elapsed().as_secs();
             let when = match ago {
@@ -532,13 +517,12 @@ impl App {
                 60..=3599 => format!("{}m", ago / 60),
                 _ => format!("{}h", ago / 3600),
             };
-            text.draw(sub, x + pad, ry, small, DIM_TEXT_COLOR, &when);
-            let words = clipped(text, words, inner_w - pad * 2 - when_w, px);
-            text.draw(sub, x + pad + when_w, ry, px, TEXT_COLOR, &words);
-            ry += row_h;
+            text.draw(sub, x, y + (line - Text::line_height(small)) / 2, small, 0x6C6D78, &when);
+            let words = clipped(text, words, inner_w - when_w, px);
+            text.draw(sub, x + when_w, y, px, TEXT_COLOR, &words);
+            y += row_h;
         }
-        y += card_h + pad;
-        y
+        y + pad
     }
 
     /// The Color tab's graphs of the picture on view, as toggles.
@@ -565,7 +549,7 @@ impl App {
         let pad = px as i32;
         let small = (px * 5 / 6).max(11);
         let small_line = Text::line_height(small);
-        let x = pad * 3 / 2;
+        let x = flow_x();
         let word = |value: &serde_json::Value| value.as_str().map(str::to_string).filter(|v| !v.is_empty() && v != "unknown");
         let container = found.probe["format"]["format_long_name"].as_str().or(found.probe["format"]["format_name"].as_str()).unwrap_or("file").to_string();
         // Each stream's layers, outermost first: what it is, then within it
@@ -604,7 +588,7 @@ impl App {
         let stream_h = |layers: &Vec<(String, u32)>| layers.len() as i32 * (label_h + inset) + inset;
         let inside: i32 = layers.iter().map(stream_h).sum::<i32>() + inset * (layers.len() as i32 + 1);
         let card_h = pad + small_line + pad / 2 + label_h + inside + pad;
-        sub.round_fill(x, y, inner_w, card_h, pad / 2, 0x26262B, 256);
+        sub.round_fill(x, y, inner_w, card_h, pad / 2, WELL, 256);
         text.draw(sub, x + pad, y + pad, small, DIM_TEXT_COLOR, "ANATOMY");
         let (fx, fw) = (x + pad, inner_w - pad * 2);
         let mut fy = y + pad + small_line + pad / 2;
@@ -698,33 +682,52 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_bitrate(&self, sub: &mut Canvas, text: &mut Text, px: u32, packets: Option<&Result<Packets, String>>, id: usize, inner_w: i32, y: i32, offset: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
         let pad = px as i32;
-        let small = (px * 5 / 6).max(11);
-        let small_line = Text::line_height(small);
-        let x = pad * 3 / 2;
-        let (cx, cw) = (x + pad, inner_w - 2 * pad);
+        let line = Text::line_height(px);
+        let x = flow_x();
+        let (cx, cw) = (x, inner_w);
         let chart_h = px as i32 * 8;
-        let row = small_line + pad / 4;
-        let card_h = pad + small_line + pad / 2 + chart_h + pad / 3 + pad / 2 + 3 * row + pad;
-        sub.round_fill(x, y, inner_w, card_h, pad / 2, 0x26262B, 256);
-        text.draw(sub, cx, y + pad, small, DIM_TEXT_COLOR, "BITRATE AND KEYFRAMES");
-        let top = y + pad + small_line + pad / 2;
+        let row = line + pad / 4;
+        let card_h = chart_h + pad / 3 + pad / 2 + 3 * row;
+        let top = section_head(sub, text, px, x, y, inner_w, "Bitrate and keyframes");
+        let end = top + card_h + pad;
         let packets = match packets {
             None => {
                 text.draw(sub, cx, top, px, DIM_TEXT_COLOR, "Reading the packets…");
-                return y + card_h + pad;
+                return end;
             }
             Some(Err(error)) => {
                 text.draw(sub, cx, top, px, DIM_TEXT_COLOR, &format!("Not readable · {error}"));
-                return y + card_h + pad;
+                return end;
             }
             Some(Ok(packets)) => packets,
         };
-        let bins = (cw / 3).max(1) as usize;
+        // A bar for every 3 pixels, but none thinner than two frames, so
+        // a short clip's bars aren't single frames.
+        let bins = ((cw / 3) as usize).min(packets.times.len() / 2).max(1);
         let rates = packets.bitrate(bins);
         let peak = rates.iter().copied().fold(1.0, f64::max);
-        let mean = packets.sizes.iter().map(|size| f64::from(*size)).sum::<f64>() * 8.0 / packets.length().max(1e-3);
         let length = packets.length().max(1e-3);
-        sub.fill(cx, top, cw, chart_h, 0x0B0B0B);
+        let mean = packets.sizes.iter().map(|size| f64::from(*size)).sum::<f64>() * 8.0 / length;
+        // The busiest second, as a stream has to carry it.
+        let busiest = {
+            let window = 1.0_f64.min(length);
+            let (mut most, mut bytes, mut from) = (0u64, 0u64, 0);
+            let order: Vec<(f64, u32)> = {
+                let mut order: Vec<(f64, u32)> = packets.times.iter().copied().zip(packets.sizes.iter().copied()).collect();
+                order.sort_by(|a, b| a.0.total_cmp(&b.0));
+                order
+            };
+            for &(time, size) in &order {
+                bytes += u64::from(size);
+                while order[from].0 <= time - window {
+                    bytes -= u64::from(order[from].1);
+                    from += 1;
+                }
+                most = most.max(bytes);
+            }
+            most as f64 * 8.0 / window
+        };
+        sub.round_fill(cx, top, cw, chart_h, pad / 3, WELL, 256);
         for (bin, value) in rates.iter().enumerate() {
             let (bx, next) = (cx + bin as i32 * cw / bins as i32, cx + (bin as i32 + 1) * cw / bins as i32);
             let h = ((value / peak) * f64::from(chart_h)).max(1.0) as i32;
@@ -744,25 +747,40 @@ impl App {
             sub.fill(ax.min(cx + cw - 1), top, 2, chart_h, accent());
         }
         let mut ty = ticks + pad / 3 + pad / 2;
-        let gaps: Vec<f64> = packets.keys.windows(2).map(|pair| pair[1] - pair[0]).collect();
-        let (gap_mean, gap_most) = (gaps.iter().sum::<f64>() / gaps.len().max(1) as f64, gaps.iter().copied().fold(0.0, f64::max));
-        let lines = [
-            format!("Mean {}  ·  busiest stretch {}", rate(mean), rate(peak)),
-            format!("{} keyframes  ·  one every {:.1} s, at most {:.1} s apart", packets.keys.len(), gap_mean, gap_most),
-            match at {
-                Some(at) => {
-                    let back = packets.keys.iter().rev().find(|key| **key <= at + 1e-6).map_or(at, |key| at - key);
-                    format!("A seek here decodes from {:.1} s back  ·  click the chart to go there", back)
-                }
-                None => "Click the chart to go there".to_string(),
-            },
+        // Gaps to the end too: one keyframe at the start of a long video
+        // is a long way to seek.
+        let mut gaps: Vec<f64> = packets.keys.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        if let Some(last) = packets.keys.last() {
+            gaps.push(length - last);
+        }
+        let gap_most = gaps.iter().copied().fold(0.0, f64::max);
+        let keys = match packets.keys.len() {
+            0 => "No keyframes".to_string(),
+            1 => format!("1 keyframe · at {}", clock(packets.keys[0])),
+            n => format!("every {:.1} s · longest gap {:.1} s", length / n as f64, gap_most),
+        };
+        let facts = [
+            ("Bitrate", format!("{} mean · {} busiest second", rate(mean), rate(busiest))),
+            ("Keyframes", if packets.keys.len() > 1 { format!("{} · {keys}", packets.keys.len()) } else { keys }),
+            (
+                "Seek here",
+                match at {
+                    Some(at) => {
+                        let back = packets.keys.iter().rev().find(|key| **key <= at + 1e-6).map_or(at, |key| at - key);
+                        format!("decodes {back:.1} s of video first")
+                    }
+                    None => "Click the chart to go there".to_string(),
+                },
+            ),
         ];
-        for words in lines {
-            let words = clipped(text, &words, cw, small);
-            text.draw(sub, cx, ty, small, TEXT_COLOR, &words);
+        let name_w = facts.iter().map(|(name, _)| text.width(name, px)).max().unwrap_or(0) + pad;
+        for (name, words) in facts {
+            text.draw(sub, cx, ty, px, DIM_TEXT_COLOR, name);
+            let words = clipped(text, &words, cw - name_w, px);
+            text.draw(sub, cx + name_w, ty, px, TEXT_COLOR, &words);
             ty += row;
         }
-        y + card_h + pad
+        end
     }
 }
 
@@ -844,4 +862,237 @@ impl DrawerPane {
             DrawerPane::Performance => Pane::Performance,
         }
     }
+}
+
+/// Where the block being drawn in an Inspect tab starts from the left of
+/// its sheet: the column the tab's layout put it in. Every block reads it
+/// rather than standing at the one margin, so that a tab lays itself out
+/// in as many columns as its width has room for.
+static FLOW_X: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+pub(super) fn flow_x() -> i32 {
+    FLOW_X.load(atomic::Ordering::Relaxed)
+}
+
+pub(super) fn set_flow_x(x: i32) {
+    FLOW_X.store(x, atomic::Ordering::Relaxed);
+}
+
+/// One thing a tab shows, placed by the tab's layout in a column.
+pub(super) enum Block<'a> {
+    /// The Overview's opening line: what the file is.
+    Hero,
+    /// The Color tab's: what HDR it is.
+    HdrHero,
+    Issues,
+    Card(&'a Card),
+    Anatomy,
+    Tracks,
+    PictureCharts,
+    SceneChart,
+    Agtm,
+    Plus,
+    Ladder,
+    Scopes,
+    Bitrate,
+    Chapters,
+    Convert,
+    Compare,
+}
+
+/// The ground of a chart or a box that is a thing in itself; sections
+/// of facts have none.
+pub(super) const WELL: u32 = 0x1B1C21;
+
+/// A section's head, as a card's: its name in small capitals and a
+/// hairline under; returns where its rows start.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn section_head(sub: &mut Canvas, text: &mut Text, px: u32, x: i32, y: i32, width: i32, title: &str) -> i32 {
+    let pad = px as i32;
+    let small_line = Text::line_height((px * 5 / 6).max(11));
+    let tiny = (px * 2 / 3).max(10);
+    text.draw(sub, x, y + (small_line - Text::line_height(tiny)) / 2, tiny, 0x6C6D78, &title.to_uppercase());
+    let y = y + small_line + pad / 3;
+    sub.fill(x, y, width, 1, MENU_EDGE_COLOR);
+    y + pad / 3
+}
+
+impl App {
+    /// A section of facts: its name in small capitals with any chips after
+    /// it and a hairline under, then each fact, its name dim against one
+    /// edge and its value after, a click copying it. No box around it.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_card(&self, sub: &mut Canvas, text: &mut Text, px: u32, card: &Card, width: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
+        let pad = px as i32;
+        let line = Text::line_height(px);
+        let small = (px * 5 / 6).max(11);
+        let tiny = (px * 2 / 3).max(10);
+        let small_line = Text::line_height(small);
+        let x = flow_x();
+        let mut tx = x;
+        let title = card.title.to_uppercase();
+        text.draw(sub, tx, y + (small_line - Text::line_height(tiny)) / 2, tiny, 0x6C6D78, &title);
+        tx += text.width(&title, tiny) + pad / 2;
+        for name in &card.badges {
+            tx += chip(sub, text, tx, y, small, name, badge_color(name)) + pad / 3;
+        }
+        let mut ry = y + small_line + pad / 3;
+        sub.fill(x, ry, width, 1, MENU_EDGE_COLOR);
+        ry += pad / 2;
+        let row_h = line + pad / 5;
+        let label_w = card.rows.iter().map(|(label, _)| text.width(label, small)).max().unwrap_or(0).min(width * 2 / 5);
+        for (label, value) in &card.rows {
+            let label = clipped(text, label, label_w, small);
+            text.draw(sub, x, ry + (line - small_line) / 2, small, DIM_TEXT_COLOR, &label);
+            let vx = x + label_w + pad;
+            let shown = clipped(text, value, x + width - vx, px);
+            let vw = text.width(&shown, px);
+            let place = [vx - pad / 4 + offset.0, ry + offset.1, vw + pad / 2, row_h];
+            if (place[0]..place[0] + place[2]).contains(&mouse.0) && (place[1]..place[1] + place[3]).contains(&mouse.1) {
+                sub.round_fill(vx - pad / 4, ry, vw + pad / 2, row_h, pad / 4, 0x2C2D35, 256);
+            }
+            text.draw(sub, vx, ry, px, TEXT_COLOR, &shown);
+            drawn.push((Hit::Copy(value.to_string()), place));
+            ry += row_h;
+        }
+        ry + pad
+    }
+
+    /// The Overview's opening: the video's codec, size and rate large, its
+    /// length, size on disk and bitrate under, then chips for what else
+    /// it is. For a picture its format and size.
+    pub(super) fn draw_overview_hero(&self, sub: &mut Canvas, text: &mut Text, px: u32, found: &super::inspect::Inspection, width: i32, y: i32) -> i32 {
+        let pad = px as i32;
+        let big = px * 3 / 2;
+        let small = (px * 5 / 6).max(11);
+        let x = flow_x();
+        let format = &found.probe["format"];
+        let (headline, under, chips) = match found.video() {
+            Some(video) => {
+                let codec = video["codec_name"].as_str().unwrap_or("video").to_uppercase();
+                let size = match (video["width"].as_i64(), video["height"].as_i64()) {
+                    (Some(w), Some(h)) => format!("{w}×{h}"),
+                    _ => String::new(),
+                };
+                let rate = video["avg_frame_rate"].as_str().and_then(|rate| {
+                    let (n, d) = rate.split_once('/')?;
+                    let fps = n.parse::<f64>().ok()? / d.parse::<f64>().ok().filter(|d| *d > 0.0)?;
+                    Some(fps_words(fps))
+                });
+                let headline = [Some(codec), (!size.is_empty()).then_some(size), rate].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                let seconds = format["duration"].as_str().and_then(|d| d.parse::<f64>().ok());
+                let bytes = format["size"].as_str().and_then(|s| s.parse::<u64>().ok());
+                let bits = format["bit_rate"].as_str().and_then(|b| b.parse::<f64>().ok());
+                let under = [seconds.map(clock), bytes.map(meta::human_size), bits.map(|b| format!("{:.1} Mb/s", b / 1e6))].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                let mut chips: Vec<String> = Vec::new();
+                if let Some(name) = format["format_name"].as_str() {
+                    chips.push(name.split(',').next().unwrap_or(name).to_uppercase());
+                }
+                if video["pix_fmt"].as_str().is_some_and(|f| f.contains("10")) {
+                    chips.push("10-bit".into());
+                }
+                if let Some(hdr) = found.hdr.as_ref() {
+                    chips.extend(hdr.badges());
+                }
+                let count = |kind: &str| found.streams().iter().filter(|s| s["codec_type"] == kind).count();
+                chips.push(format!("{} audio", count("audio")));
+                if count("subtitle") > 0 {
+                    chips.push(format!("{} subtitles", count("subtitle")));
+                }
+                (headline, under, chips)
+            }
+            None => match found.picture.as_ref() {
+                Some(picture) => {
+                    let size = picture.size.map(|(w, h)| format!("{w}×{h}")).unwrap_or_default();
+                    let headline = [picture.format.clone(), (!size.is_empty()).then_some(size)].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                    let mp = picture.size.map(|(w, h)| format!("{:.1} MP", f64::from(w) * f64::from(h) / 1e6));
+                    let under = [mp, Some(meta::human_size(picture.bytes))].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                    let mut chips = Vec::new();
+                    if picture.gain.is_some() {
+                        chips.push("Ultra HDR".to_string());
+                    }
+                    if let Some((name, _)) = &picture.icc {
+                        chips.push(name.clone());
+                    }
+                    (headline, under, chips)
+                }
+                None => return y,
+            },
+        };
+        let headline = clipped(text, &headline, width, big);
+        text.draw(sub, x, y, big, TEXT_COLOR, &headline);
+        let mut ty = y + Text::line_height(big) + pad / 4;
+        { let shown = clipped(text, &under, width, px); text.draw(sub, x, ty, px, DIM_TEXT_COLOR, &shown); }
+        ty += Text::line_height(px) + pad / 2;
+        let mut cx = x;
+        for name in &chips {
+            let w = text.width(name, small) + pad / 2;
+            if cx + w > x + width && cx > x {
+                cx = x;
+                ty += Text::line_height(small) + pad / 3;
+            }
+            cx += chip(sub, text, cx, ty, small, name, badge_color(name)) + pad / 3;
+        }
+        ty + Text::line_height(small) + pad
+    }
+
+    /// The Color tab's opening: the HDR formats large, the curve, the
+    /// primaries and the mastering peak under.
+    pub(super) fn draw_hdr_hero(&self, sub: &mut Canvas, text: &mut Text, px: u32, info: Option<&crate::hdrmeta::Info>, width: i32, y: i32) -> i32 {
+        let Some(info) = info else { return y };
+        let pad = px as i32;
+        let big = px * 3 / 2;
+        let x = flow_x();
+        let headline = info.badges().join(" · ");
+        { let shown = clipped(text, &headline, width, big); text.draw(sub, x, y, big, TEXT_COLOR, &shown); }
+        let curve = match info.transfer {
+            Some(crate::hdrmeta::Transfer::Pq) => "PQ",
+            Some(crate::hdrmeta::Transfer::Hlg) => "HLG",
+            _ => "SDR",
+        };
+        let under = [Some(curve.to_string()), info.bt2020.then(|| "BT.2020".to_string()), info.mastering.map(|(peak, _)| format!("mastered at {peak:.0} nits"))].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+        let ty = y + Text::line_height(big) + pad / 4;
+        { let shown = clipped(text, &under, width, px); text.draw(sub, x, ty, px, DIM_TEXT_COLOR, &shown); }
+        ty + Text::line_height(px) + pad
+    }
+
+    /// The Issues tab: how many, then each with a bar of its severity's
+    /// color, what is off and what it means.
+    pub(super) fn draw_issues(&self, sub: &mut Canvas, text: &mut Text, px: u32, found: &super::inspect::Inspection, width: i32, y: i32) -> i32 {
+        let pad = px as i32;
+        let big = px * 3 / 2;
+        let small = (px * 5 / 6).max(11);
+        let x = flow_x();
+        let issues = self.issues(found);
+        let headline = match issues.len() {
+            0 => "Nothing off".to_string(),
+            1 => "1 issue".to_string(),
+            n => format!("{n} issues"),
+        };
+        text.draw(sub, x, y, big, if issues.is_empty() { 0x3DD68C } else { TEXT_COLOR }, &headline);
+        let mut ty = y + Text::line_height(big) + pad;
+        for (severity, words) in issues {
+            // The first clause is what is off, the rest what it means.
+            let (what, means) = words.split_once(':').map_or((words.as_str(), ""), |(a, b)| (a, b.trim()));
+            let color = if severity == Severity::Warning { 0xE5A50A } else { 0x9DB1F5 };
+            let h = Text::line_height(px) + if means.is_empty() { 0 } else { Text::line_height(small) + pad / 6 };
+            sub.round_fill(x, ty, 3, h, 1, color, 256);
+            { let shown = clipped(text, what, width - pad, px); text.draw(sub, x + pad * 2 / 3, ty, px, TEXT_COLOR, &shown); }
+            if !means.is_empty() {
+                { let shown = clipped(text, means, width - pad, small); text.draw(sub, x + pad * 2 / 3, ty + Text::line_height(px) + pad / 6, small, DIM_TEXT_COLOR, &shown); }
+            }
+            ty += h + pad * 2 / 3;
+        }
+        ty + pad / 2
+    }
+}
+
+/// A chip: a word on a small rounded ground of its color. Returns its width.
+fn chip(sub: &mut Canvas, text: &mut Text, x: i32, y: i32, small: u32, name: &str, color: u32) -> i32 {
+    let pad = small as i32;
+    let w = text.width(name, small) + pad * 2 / 3;
+    let h = Text::line_height(small);
+    sub.round_fill(x, y, w, h, pad / 4, color, 210);
+    text.draw(sub, x + pad / 3, y, small, TEXT_COLOR, name);
+    w
 }
