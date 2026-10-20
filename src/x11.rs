@@ -150,7 +150,12 @@ pub struct Backdrop {
     height: u32,
     pixmap: c_ulong,
     image: *mut c_void,
-    info: ShmSegmentInfo,
+    /// Boxed: the image keeps a pointer to it, which `XShmPutImage` reads
+    /// the segment through, so it must not move. Kept on the stack and
+    /// moved in here, the image pointed at a stale copy, and the server
+    /// was handed whatever was there as the segment: BadShmSeg, which
+    /// winit then panics on at its next call that checks.
+    info: Box<ShmSegmentInfo>,
     shown: bool,
 }
 
@@ -183,14 +188,14 @@ impl Backdrop {
             if shmaddr as isize == -1 {
                 return None;
             }
-            let mut info = ShmSegmentInfo { shmseg: 0, shmid, shmaddr: shmaddr.cast(), read_only: 1 };
+            let mut info = Box::new(ShmSegmentInfo { shmseg: 0, shmid, shmaddr: shmaddr.cast(), read_only: 1 });
             // ZPixmap is 2.
-            let image = (api.shm_create_image)(display, attributes.visual, 24, 2, shmaddr.cast(), &mut info, width, height);
+            let image = (api.shm_create_image)(display, attributes.visual, 24, 2, shmaddr.cast(), &mut *info, width, height);
             if image.is_null() {
                 libc::shmdt(shmaddr);
                 return None;
             }
-            if (api.shm_attach)(display, &mut info) == 0 {
+            if (api.shm_attach)(display, &mut *info) == 0 {
                 (api.destroy_image)(image);
                 libc::shmdt(shmaddr);
                 return None;
@@ -217,7 +222,7 @@ impl Backdrop {
             (self.api.shm_put_image)(self.display, self.pixmap, gc, self.image, 0, 0, 0, 0, self.width, self.height, 0);
             (self.api.set_background_pixmap)(self.display, self.window, self.pixmap);
             (self.api.clear_area)(self.display, self.window, 0, 0, 0, 0, 0);
-            (self.api.shm_detach)(self.display, &mut self.info);
+            (self.api.shm_detach)(self.display, &mut *self.info);
             (self.api.free_gc)(self.display, gc);
             (self.api.flush)(self.display);
         }
@@ -230,7 +235,7 @@ impl Drop for Backdrop {
         // SAFETY: the handles are the ones `new` made, freed once.
         unsafe {
             if !self.shown {
-                (self.api.shm_detach)(self.display, &mut self.info);
+                (self.api.shm_detach)(self.display, &mut *self.info);
             }
             // No background pixmap: `None` is 0.
             (self.api.set_background_pixmap)(self.display, self.window, 0);
