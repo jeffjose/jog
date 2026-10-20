@@ -101,6 +101,11 @@ impl Inspection {
 /// The tab of the boxes or elements the file is made of.
 const STRUCTURE: usize = 3;
 
+/// How long the panel of the file before is held up while the next is
+/// read: long enough for most, and not so long that a slow read looks
+/// like the wrong file's facts.
+const HOLD_PREVIOUS: Duration = Duration::from_millis(1000);
+
 impl Inspector {
     /// Goes to a tab: its cards and charts, if it is one of the first tabs,
     /// under that one's number, and from the top.
@@ -116,6 +121,12 @@ impl Inspector {
     /// The file it is about.
     pub(super) fn id(&self) -> usize {
         self.id
+    }
+
+    /// When the file before's panel, held up while this one is read, is
+    /// to give way to "Reading…".
+    pub(super) fn held_until(&self) -> Option<Instant> {
+        self.previous.as_ref().filter(|_| self.found.is_none()).map(|(since, _)| *since + HOLD_PREVIOUS)
     }
 
     pub(super) fn panes(&self) -> (Vec<Pane>, usize) {
@@ -208,6 +219,10 @@ pub struct Inspector {
     /// only when that changes, and otherwise copied in, so that a 4K video
     /// beside it is not held up by it on every frame.
     kept: Option<(PanelKey, Vec<u32>)>,
+    /// The panel as last drawn for the file before, held up until this
+    /// one's facts are read, so that going on to the next file does not
+    /// blank it for a moment.
+    previous: Option<(Instant, Vec<u32>)>,
     /// A picture, with its own tabs, rather than a video.
     picture: bool,
     /// The Structure tab: the boxes opened and the one picked out, each by
@@ -287,7 +302,9 @@ impl App {
         std::thread::spawn(move || {
             let _ = proxy.send_event(Event::Inspected(id, Inspection::read(&path)));
         });
-        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false, pane: Pane::Overview, transport: Vec::new(), packets: None, packets_asked: false });
+        // What was up stays up until there is something to replace it.
+        let previous = self.inspector.take().and_then(|old| old.kept.map(|(_, pixels)| (Instant::now(), pixels)).or(old.previous));
+        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, previous, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false, pane: Pane::Overview, transport: Vec::new(), packets: None, packets_asked: false });
         // On the tab used last.
         let pane = self.inspect_pane;
         if let Some(inspector) = &mut self.inspector {
@@ -767,6 +784,18 @@ impl App {
             self.inspector = Some(inspector);
             return;
         }
+        // The next file not read yet: the last one's panel, for a second at
+        // most, rather than a blank one for a moment and then this.
+        if inspector.found.is_none() {
+            let held = inspector.previous.as_ref().filter(|(since, pixels)| since.elapsed() < HOLD_PREVIOUS && pixels.len() == (width * height) as usize);
+            if let Some((_, pixels)) = held {
+                canvas.dissolve(left, top, width, height, pixels, 256 - through);
+                inspector.transport = self.draw_transport(canvas, text, px, [left, top + height - transport_h, width, transport_h], inspector.picture);
+                self.inspector = Some(inspector);
+                return;
+            }
+        }
+        inspector.previous = None;
         let behind = (through > 0).then(|| canvas.copy(left, top, width, height));
 
         canvas.fill(left, top, width, height, GRID_COLOR);

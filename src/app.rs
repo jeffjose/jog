@@ -4281,7 +4281,13 @@ impl App {
             }
         }
         let flicker_due = self.tend_flicker(now);
-        let deadlines = [Some(self.session_due), flicker_due, self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due, self.back_due, self.hitches.due()];
+        // Inspect's panel for the file before, held up too long.
+        let held_until = self.inspector.as_ref().and_then(|inspector| inspector.held_until());
+        if held_until.is_some_and(|at| at <= now) {
+            self.redraw();
+        }
+        let held_until = held_until.filter(|at| *at > now);
+        let deadlines = [Some(self.session_due), flicker_due, held_until, self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due, self.back_due, self.hitches.due()];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

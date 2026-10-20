@@ -782,7 +782,9 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_tab_row(&self, canvas: &mut Canvas, text: &mut Text, px: u32, [left, top, width]: [i32; 3], panes: &[Pane], current: usize, mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
         let pad = px as i32;
-        let small = (px * 5 / 6).max(11);
+        // The names at the size of what is under them; the group labels
+        // small capitals, as the sections' heads are.
+        let small = px;
         let tiny = (px * 2 / 3).max(10);
         let line = Text::line_height(small);
         let row_h = line + pad * 3 / 4;
