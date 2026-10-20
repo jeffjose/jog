@@ -71,7 +71,7 @@ mod scripted;
 mod inspect;
 mod inspect_hdr;
 mod devtools;
-use devtools::Pane;
+use devtools::{DrawerPane, Pane};
 mod track_editor;
 mod tracks;
 mod triaging;
@@ -1286,6 +1286,7 @@ pub struct App {
     /// The drawer under Inspect's tab: the file list, in view whatever
     /// tab is up, as a browser's tools keep their console.
     inspect_drawer: bool,
+    drawer_pane: DrawerPane,
     inspector_rows: f64,
     pending_command: Option<Command>,
     /// Where Inspect's Files tab has the list, as left, top, width,
@@ -1879,6 +1880,7 @@ impl App {
             inspect_pane: pins.pane.unwrap_or_default(),
             inspector_bottom: pins.bottom,
             inspect_drawer: pins.drawer,
+            drawer_pane: pins.drawer_pane.unwrap_or_default(),
             inspector_rows: pins.rows.unwrap_or(24.0),
             pending_command: None,
             inspector_list: Cell::new(None),

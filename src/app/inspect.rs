@@ -104,14 +104,11 @@ impl Inspector {
     /// Goes to a tab: its cards and charts, if it is one of the first tabs,
     /// under that one's number, and from the top.
     pub(super) fn set_pane(&mut self, pane: Pane) {
-        let pane = if pane.applies(self.picture) { pane } else { Pane::Overview };
+        // One now in the drawer, or not for this kind of file: the Overview.
+        let pane = if pane.applies(self.picture) && pane.drawer().is_none() { pane } else { Pane::Overview };
         self.pane = pane;
         self.tab = pane.legacy(self.picture).unwrap_or(usize::MAX);
         self.scroll = 0;
-    }
-
-    pub(super) fn pane(&self) -> Pane {
-        self.pane
     }
 
     /// The tabs it shows, and where the one up is among them.
@@ -168,6 +165,8 @@ pub(super) enum Hit {
     Dock,
     /// The drawer under the tab, with the file list, open or shut.
     Drawer,
+    /// One of the drawer's tabs.
+    DrawerTab(super::devtools::DrawerPane),
     /// A command, as from a key or the menu: the transport bar's and the
     /// action rows', run on the next turn of the event loop.
     Run(Command),
@@ -479,6 +478,11 @@ impl App {
             Hit::Close => self.inspector = None,
             Hit::Pin => self.toggle_inspector_pin(),
             Hit::Dock => self.toggle_inspector_dock(),
+            Hit::DrawerTab(pane) => {
+                self.drawer_pane = pane;
+                self.save_panels();
+                self.redraw();
+            }
             Hit::Drawer => {
                 self.inspect_drawer = !self.inspect_drawer;
                 self.save_panels();
@@ -800,52 +804,17 @@ impl App {
         canvas.fill(pad / 2 + left, y, width - pad, 1, MENU_EDGE_COLOR);
         y += pad / 2;
 
-        // The tabs, as the list's order buttons: pills, as many to a row as
-        // fit, the rows filled out evenly.
+        // The tabs, as a browser's developer tools have them: one row of
+        // names, the one up underlined, a small label before each group;
+        // moved along to keep the one up in view when they do not all fit.
         let (panes, current) = inspector.panes();
-        let gap = pad / 3;
-        let tab_h = small_line + pad / 4;
-        let widths: Vec<i32> = panes.iter().map(|pane| text.width(pane.name(), small) + pad).collect();
-        let room = width - pad;
-        let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
-        let mut used = 0;
-        for (at, w) in widths.iter().enumerate() {
-            if used > 0 && used + gap + w > room {
-                rows.push(Vec::new());
-                used = 0;
-            }
-            used += if used > 0 { gap } else { 0 } + w;
-            rows.last_mut().expect("a row").push(at);
-        }
-        let full = rows.len();
-        for (number, row) in rows.iter().enumerate() {
-            let natural: i32 = row.iter().map(|at| widths[*at]).sum::<i32>() + gap * (row.len() as i32 - 1);
-            // Rows are filled out to the width, all but a last one of a few.
-            let short = full > 1 && number == full - 1 && natural < room * 2 / 3;
-            let extra = if short { 0 } else { (room - natural) / row.len() as i32 };
-            let mut x = left + pad / 2;
-            for at in row {
-                let tab_w = widths[*at] + extra;
-                let on = *at == current;
-                let hovered = (x..x + tab_w).contains(&mouse.0) && (y..y + tab_h).contains(&mouse.1);
-                let lit = on || hovered;
-                canvas.round_fill(x, y, tab_w, tab_h, tab_h / 2, if lit { accent() } else { PLACEHOLDER_COLOR }, if hovered && !on { 200 } else { 256 });
-                canvas.round_outline(x, y, tab_w, tab_h, tab_h / 2, 1, if lit { accent() } else { MENU_EDGE_COLOR });
-                let name = panes[*at].name();
-                let name_w = text.width(name, small);
-                text.draw(canvas, x + (tab_w - name_w) / 2, y + (tab_h - small_line) / 2, small, if lit { on_accent() } else { TEXT_COLOR }, name);
-                inspector.drawn.push((Hit::Tab(*at), [x, y, tab_w, tab_h]));
-                x += tab_w + gap;
-            }
-            y += tab_h + gap;
-        }
-        y += pad - gap;
+        y = self.draw_tab_row(canvas, text, px, [left, y, width], &panes, current, mouse, &mut inspector.drawn);
 
         // The content, scrolled, clipped to the panel above the transport bar,
         // or above the drawer, when that is open under another tab.
         let view_top = y;
         let foot = top + height - transport_h;
-        let drawer = self.inspect_drawer && inspector.pane != Pane::Files;
+        let drawer = self.inspect_drawer;
         // Docked along the bottom the drawer stands beside the tab, there
         // being little height; down the side, under it.
         let beside = drawer && bottom;
@@ -931,37 +900,63 @@ impl App {
             canvas.dissolve(left, view_top, content_w, inspector.view_h, &sheet, 256);
         }
         inspector.content_h = content_h;
-        // The Files tab, or the drawer: the file list, drawn as it is beside
-        // the picture.
-        if inspector.pane == Pane::Files || drawer {
-            let (list_top, view_bottom) = match (drawer, beside) {
-                (true, true) => (view_top, foot),
-                (true, false) => (view_bottom, foot),
-                _ => (view_top, view_bottom),
-            };
+        // The drawer: what is about jog rather than the file, under the tab
+        // (down the side) or beside it (along the bottom), with a row of
+        // its own tabs: the playlist, the console, how jog is doing.
+        if drawer {
+            let (drawer_top, drawer_bottom) = if beside { (view_top, foot) } else { (view_bottom, foot) };
             let (left, width) = if beside { (left + content_w, width - content_w) } else { (left, width) };
-            if drawer {
-                canvas.fill(left, list_top, width, view_bottom - list_top, GRID_COLOR);
-                if beside {
-                    canvas.fill(left, list_top, 1, view_bottom - list_top, MENU_EDGE_COLOR);
-                } else {
-                    canvas.fill(left, list_top, width, 1, MENU_EDGE_COLOR);
+            canvas.fill(left, drawer_top, width, drawer_bottom - drawer_top, GRID_COLOR);
+            if beside {
+                canvas.fill(left, drawer_top, 1, drawer_bottom - drawer_top, MENU_EDGE_COLOR);
+            } else {
+                canvas.fill(left, drawer_top, width, 1, MENU_EDGE_COLOR);
+            }
+            let drawer_panes: Vec<Pane> = DrawerPane::ALL.iter().map(|pane| pane.as_pane()).collect();
+            let at = DrawerPane::ALL.iter().position(|pane| *pane == self.drawer_pane).unwrap_or(0);
+            let mut tab_hits = Vec::new();
+            let body_top = self.draw_tab_row(canvas, text, px, [left, drawer_top + 1, width], &drawer_panes, at, mouse, &mut tab_hits);
+            inspector.drawn.extend(tab_hits.into_iter().map(|(hit, place)| match hit {
+                Hit::Tab(at) => (Hit::DrawerTab(DrawerPane::ALL[at]), place),
+                other => (other, place),
+            }));
+            match self.drawer_pane {
+                DrawerPane::Playlist => {
+                    self.inspector_list.set(Some([left, body_top - pad / 2, width, drawer_bottom]));
+                    self.inspector_list_drawing.set(true);
+                    if let Some(panel) = self.list_panel() {
+                        for pos in panel.first..panel.first + panel.rows {
+                            self.want_duration(self.list[pos]);
+                        }
+                        let mut column = canvas.copy(left, 0, width, drawer_bottom);
+                        if column.len() == (width * drawer_bottom) as usize {
+                            self.draw_list(&mut Canvas::new(&mut column, width as u32, drawer_bottom as u32), text, &panel);
+                            let from = body_top - pad / 2;
+                            canvas.paste(left, from, width, drawer_bottom - from, &column[(from * width) as usize..]);
+                        }
+                    }
+                    self.inspector_list_drawing.set(false);
+                }
+                other => {
+                    self.inspector_list.set(None);
+                    let h = drawer_bottom - body_top;
+                    let mut sheet = canvas.copy(left, body_top, width, h);
+                    if h > 0 && sheet.len() == (width * h) as usize {
+                        let mut sub = Canvas::new(&mut sheet, width as u32, h as u32);
+                        let mut hits = Vec::new();
+                        let drawer_inner = width - pad * 3;
+                        match other {
+                            DrawerPane::Console => drop(self.draw_console(&mut sub, text, px, drawer_inner, 0, (left, body_top), mouse, &mut hits)),
+                            _ => {
+                                let cards = self.performance_cards();
+                                self.draw_cards(&mut sub, text, px, &cards, drawer_inner, (left, body_top), mouse, &mut hits, 0);
+                            }
+                        }
+                        canvas.paste(left, body_top, width, h, &sheet);
+                        inspector.drawn.extend(hits.into_iter().filter(|(_, [_, y, _, hh])| *y + *hh > body_top && *y < drawer_bottom));
+                    }
                 }
             }
-            let view_top = list_top;
-            self.inspector_list.set(Some([left, view_top, width, view_bottom]));
-            self.inspector_list_drawing.set(true);
-            if let Some(panel) = self.list_panel() {
-                for pos in panel.first..panel.first + panel.rows {
-                    self.want_duration(self.list[pos]);
-                }
-                let mut column = canvas.copy(left, 0, width, view_bottom);
-                if column.len() == (width * view_bottom) as usize {
-                    self.draw_list(&mut Canvas::new(&mut column, width as u32, view_bottom as u32), text, &panel);
-                    canvas.paste(left, view_top, width, view_bottom - view_top, &column[(view_top * width) as usize..]);
-                }
-            }
-            self.inspector_list_drawing.set(false);
         } else {
             self.inspector_list.set(None);
         }

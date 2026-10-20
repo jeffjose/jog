@@ -28,23 +28,23 @@ pub enum Pane {
 
 impl Pane {
     pub const ALL: [Pane; 12] = [
-        Pane::Files,
         Pane::Overview,
         Pane::Tracks,
         Pane::Color,
         Pane::Timeline,
-        Pane::Convert,
-        Pane::Compare,
         Pane::Structure,
         Pane::Metadata,
-        Pane::Performance,
         Pane::Issues,
+        Pane::Convert,
+        Pane::Compare,
+        Pane::Files,
         Pane::Console,
+        Pane::Performance,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
-            Pane::Files => "Files",
+            Pane::Files => "Playlist",
             Pane::Overview => "Overview",
             Pane::Tracks => "Tracks",
             Pane::Color => "Color",
@@ -64,9 +64,30 @@ impl Pane {
         !(picture && matches!(self, Pane::Tracks | Pane::Timeline | Pane::Structure))
     }
 
-    /// The tabs there are for a picture, or for a video.
+    /// The tabs there are for a picture, or for a video: those about the
+    /// file, then the tools. What is about jog itself (the playlist, the
+    /// console, how it performs) is in the drawer.
     pub fn shown(picture: bool) -> Vec<Pane> {
-        Pane::ALL.into_iter().filter(|pane| pane.applies(picture)).collect()
+        Pane::ALL.into_iter().filter(|pane| pane.applies(picture) && pane.drawer().is_none()).collect()
+    }
+
+    /// For a pane that now lives in the drawer, which of its tabs.
+    pub fn drawer(self) -> Option<DrawerPane> {
+        match self {
+            Pane::Files => Some(DrawerPane::Playlist),
+            Pane::Console => Some(DrawerPane::Console),
+            Pane::Performance => Some(DrawerPane::Performance),
+            _ => None,
+        }
+    }
+
+    /// The group a tab is in, for the label before the first of it.
+    pub fn group(self) -> &'static str {
+        match self {
+            Pane::Convert | Pane::Compare => "Tools",
+            Pane::Files | Pane::Console | Pane::Performance => "jog",
+            _ => "File",
+        }
     }
 
     /// Which of the inspector's first tabs this one's cards and charts
@@ -87,6 +108,31 @@ impl Pane {
     /// Its name in the panels file, to open on it next time.
     pub fn from_name(name: &str) -> Option<Pane> {
         Pane::ALL.into_iter().find(|pane| pane.name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// The drawer's tabs: what is about jog rather than the file on view.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DrawerPane {
+    #[default]
+    Playlist,
+    Console,
+    Performance,
+}
+
+impl DrawerPane {
+    pub const ALL: [DrawerPane; 3] = [DrawerPane::Playlist, DrawerPane::Console, DrawerPane::Performance];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            DrawerPane::Playlist => "Playlist",
+            DrawerPane::Console => "Console",
+            DrawerPane::Performance => "Performance",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<DrawerPane> {
+        DrawerPane::ALL.into_iter().find(|pane| pane.name().eq_ignore_ascii_case(name))
     }
 }
 
@@ -365,7 +411,7 @@ impl App {
             return true;
         }
         let here = (self.drawing_popout == Some(Popped::Inspector)) == self.popped(Popped::Inspector);
-        here && self.inspector.as_ref().is_some_and(|inspector| inspector.pane() == Pane::Files || self.inspect_drawer)
+        here && self.inspector.is_some() && self.inspect_drawer && self.drawer_pane == DrawerPane::Playlist
     }
 }
 
@@ -717,5 +763,85 @@ impl App {
             ty += row;
         }
         y + card_h + pad
+    }
+}
+
+impl App {
+    /// A row of tabs, a browser's developer tools' way: the names in a
+    /// line, the one up in full white and underlined, a small label before
+    /// each group (File, Tools), a hairline under all; when they are wider
+    /// than the room, the row is moved along to keep the one up in view,
+    /// with a fade and a » at the cut. Returns where under it to go on.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_tab_row(&self, canvas: &mut Canvas, text: &mut Text, px: u32, [left, top, width]: [i32; 3], panes: &[Pane], current: usize, mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
+        let pad = px as i32;
+        let small = (px * 5 / 6).max(11);
+        let tiny = (px * 2 / 3).max(10);
+        let line = Text::line_height(small);
+        let row_h = line + pad * 3 / 4;
+        let gap = pad;
+        // Where each name and group label would go, from 0.
+        let mut items: Vec<(Option<usize>, &str, i32, i32)> = Vec::new();
+        let mut x = 0;
+        let mut group = "";
+        for (at, pane) in panes.iter().enumerate() {
+            if pane.group() != group {
+                group = pane.group();
+                let label = if group == "jog" { group.to_string() } else { group.to_uppercase() };
+                let w = text.width(&label, tiny);
+                items.push((None, group, x, w));
+                x += w + gap / 2;
+            }
+            let w = text.width(pane.name(), small);
+            items.push((Some(at), pane.name(), x, w));
+            x += w + gap;
+        }
+        let total = x - gap;
+        let room = width - pad * 2;
+        // Along far enough that the one up ends inside the room.
+        let shift = items
+            .iter()
+            .find(|(at, ..)| *at == Some(current))
+            .map_or(0, |(_, _, x, w)| (x + w + gap * 2 - room).max(0))
+            .min((total - room).max(0));
+        let base = left + pad;
+        for (at, name, x, w) in &items {
+            let x = base + x - shift;
+            if x + w <= left || x >= left + width - pad {
+                continue;
+            }
+            match at {
+                None => text.draw(canvas, x, top + (row_h - Text::line_height(tiny)) / 2 + 1, tiny, 0x5C5D66, &if *name == "jog" { name.to_string() } else { name.to_uppercase() }),
+                Some(at) => {
+                    let on = *at == current;
+                    let hovered = (x - gap / 2..x + w + gap / 2).contains(&mouse.0) && (top..top + row_h).contains(&mouse.1);
+                    let color = if on || hovered { TEXT_COLOR } else { DIM_TEXT_COLOR };
+                    text.draw(canvas, x, top + (row_h - line) / 2, small, color, name);
+                    if on {
+                        canvas.fill(x, top + row_h - 2, *w, 2, accent());
+                    }
+                    drawn.push((Hit::Tab(*at), [x - gap / 2, top, w + gap, row_h]));
+                }
+            }
+        }
+        // A cut: the names fade into the panel, and » says there is more.
+        if total - shift > room {
+            let edge = left + width - pad * 2;
+            canvas.fill(edge, top, pad * 2, row_h - 1, GRID_COLOR);
+            text.draw(canvas, edge + pad / 2, top + (row_h - line) / 2, small, DIM_TEXT_COLOR, "»");
+        }
+        canvas.fill(left, top + row_h - 1, width, 1, MENU_EDGE_COLOR);
+        top + row_h + pad / 2
+    }
+}
+
+impl DrawerPane {
+    /// As the pane it was a tab of, for drawing its name in a row of tabs.
+    pub fn as_pane(self) -> Pane {
+        match self {
+            DrawerPane::Playlist => Pane::Files,
+            DrawerPane::Console => Pane::Console,
+            DrawerPane::Performance => Pane::Performance,
+        }
     }
 }
