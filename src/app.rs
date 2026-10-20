@@ -74,6 +74,7 @@ mod scripted;
 mod inspect;
 mod inspect_hdr;
 mod devtools;
+mod timeline;
 use devtools::{Block, DrawerPane, Pane};
 mod track_editor;
 mod tracks;
@@ -282,6 +283,11 @@ pub enum Event {
     FilesDone(filework::FilesDone),
     /// A video's packets, read for Inspect's Timeline.
     Packets(usize, Result<devtools::Packets, String>),
+    /// What the Timeline tab looked deeper for: frames near where the video
+    /// is, where its scenes cut, its sound.
+    TimelineFrames(usize, Result<timeline::Frames, String>),
+    TimelineCuts(usize, Result<Vec<f64>, String>),
+    TimelineSound(usize, Result<timeline::Sound, String>),
     /// File details read on another thread, for the info and EXIF overlays.
     Meta(usize, Meta),
     /// The font, loaded on another thread while the first image decodes.
@@ -4058,6 +4064,9 @@ impl App {
             Event::TracksWritten(result, replaced) => self.tracks_written(result, replaced),
             Event::FilesDone(done) => self.files_done(done, event_loop),
             Event::Packets(id, packets) => self.packets_read(id, packets),
+            Event::TimelineFrames(id, frames) => self.timeline_frames(id, frames),
+            Event::TimelineCuts(id, cuts) => self.timeline_cuts(id, cuts),
+            Event::TimelineSound(id, sound) => self.timeline_sound(id, sound),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {
                 self.spare = spare.ok().map(|player| Spare { player, id: None, from: 0.0 });

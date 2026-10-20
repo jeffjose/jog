@@ -123,6 +123,11 @@ impl Inspector {
         self.id
     }
 
+    /// The Timeline's deeper look.
+    pub(super) fn deep_mut(&mut self) -> &mut super::timeline::Deep {
+        &mut self.deep
+    }
+
     /// When the file before's panel, held up while this one is read, is
     /// to give way to "Reading…".
     pub(super) fn held_until(&self) -> Option<Instant> {
@@ -204,6 +209,8 @@ pub(super) enum Hit {
     Convert(super::convert_tab::Knob),
     /// A file that crashed the player, to be tried again.
     Forget(std::path::PathBuf),
+    /// The Timeline's frames over a longer span, or a shorter.
+    FramesZoom(bool),
 }
 
 pub struct Inspector {
@@ -243,6 +250,8 @@ pub struct Inspector {
     /// The video's packets, for the Timeline, once read; and whether asked for.
     packets: Option<Result<super::devtools::Packets, String>>,
     packets_asked: bool,
+    /// The Timeline's deeper look: frames near here, cuts, sound.
+    deep: super::timeline::Deep,
 }
 
 fn text_of(value: &Value) -> Option<String> {
@@ -308,7 +317,7 @@ impl App {
         });
         // What was up stays up until there is something to replace it.
         let previous = self.inspector.take().and_then(|old| old.kept.map(|(_, pixels)| (Instant::now(), pixels)).or(old.previous));
-        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, kept_w: 0, previous, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false, pane: Pane::Overview, transport: Vec::new(), packets: None, packets_asked: false });
+        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, kept_w: 0, previous, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false, pane: Pane::Overview, transport: Vec::new(), packets: None, packets_asked: false, deep: Default::default() });
         // On the tab used last.
         let pane = self.inspect_pane;
         if let Some(inspector) = &mut self.inspector {
@@ -505,6 +514,7 @@ impl App {
             }
             Hit::Run(command) => self.pending_command = Some(command),
             Hit::Scrub(..) | Hit::Convert(_) => {}
+            Hit::FramesZoom(out) => self.timeline_zoom(out),
             Hit::Forget(path) => {
                 crate::mpv::forget_crash(&path);
                 let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -909,6 +919,11 @@ impl App {
                         let (id, path, proxy) = (inspector.id, self.files[inspector.id].clone(), self.proxy.clone());
                         std::thread::spawn(move || drop(proxy.send_event(Event::Packets(id, super::devtools::Packets::read(&path)))));
                     }
+                    // And its deeper look: frames near here, cuts, sound.
+                    if inspector.pane == Pane::Timeline && !inspector.picture {
+                        let length = found.probe["format"]["duration"].as_str().and_then(|d| d.parse::<f64>().ok());
+                        self.tend_timeline(inspector.id, &mut inspector.deep, length);
+                    }
                     if inspector.on_structure() {
                         super::devtools::set_flow_x(pad * 3 / 2);
                         let tree = TreeState { open: &inspector.open, selected: &inspector.selected, follow: &mut inspector.follow, scroll: &mut inspector.scroll, view_h: inspector.view_h };
@@ -948,7 +963,7 @@ impl App {
                             Pane::Tracks => blocks.push(Block::Tracks),
                             Pane::Color if inspector.picture => blocks.extend([Block::PictureCharts, Block::Scopes]),
                             Pane::Color => blocks.extend([Block::SceneChart, Block::Agtm, Block::Plus, Block::Ladder, Block::Scopes]),
-                            Pane::Timeline => blocks.extend([Block::Bitrate, Block::Chapters]),
+                            Pane::Timeline => blocks.extend([Block::Bitrate, Block::Frames, Block::Sound, Block::Chapters]),
                             Pane::Convert if inspector.picture => blocks.push(Block::Convert),
                             Pane::Convert => blocks.extend([Block::ConvertSource, Block::ConvertOutput, Block::ConvertResult]),
                             Pane::Compare => blocks.push(Block::Compare),
@@ -992,7 +1007,22 @@ impl App {
                                     None => top,
                                 },
                                 Block::Scopes => self.draw_actions(&mut sub, text, px, &self.scope_actions(), column_w, top, offset, mouse, &mut drawn),
-                                Block::Bitrate => self.draw_bitrate(&mut sub, text, px, inspector.packets.as_ref(), inspector.id, column_w, top, offset, &mut drawn),
+                                Block::Bitrate => {
+                                    // Where its scenes cut: those found, and how far along
+                                    // the pass is while it goes.
+                                    let deep = &inspector.deep;
+                                    let (cuts, along) = match &deep.cuts {
+                                        Some(Ok(cuts)) => (cuts.clone(), None),
+                                        Some(Err(_)) => (Vec::new(), None),
+                                        None => (deep.cuts_found.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(), Some(deep.cuts_along.load(std::sync::atomic::Ordering::Relaxed))),
+                                    };
+                                    self.draw_bitrate(&mut sub, text, px, inspector.packets.as_ref(), inspector.id, column_w, top, offset, &mut drawn, (&cuts, along))
+                                }
+                                Block::Frames => self.draw_frames(&mut sub, text, px, inspector.id, &inspector.deep, column_w, top, offset, mouse, &mut drawn),
+                                Block::Sound => {
+                                    let length = found.probe["format"]["duration"].as_str().and_then(|d| d.parse::<f64>().ok());
+                                    self.draw_sound(&mut sub, text, px, inspector.id, &inspector.deep, length, column_w, top, offset, &mut drawn)
+                                }
                                 Block::Chapters => self.draw_timeline(&mut sub, text, px, column_w, top, offset, mouse, &mut drawn),
                                 Block::Convert => self.draw_actions(&mut sub, text, px, &self.convert_actions(inspector.picture), column_w, top, offset, mouse, &mut drawn),
                                 Block::ConvertSource => self.draw_convert_source(&mut sub, text, px, found, inspector.id, column_w, top, offset, mouse, &mut drawn),
@@ -1615,6 +1645,11 @@ pub struct PanelKey {
 }
 
 impl App {
+    /// The Timeline's deeper look, if `id` is still the file inspected.
+    pub(super) fn inspected_deep(&mut self, id: usize) -> Option<&mut super::timeline::Deep> {
+        self.inspector.as_mut().filter(|inspector| inspector.id == id).map(|inspector| &mut inspector.deep)
+    }
+
     /// A video's packets read, for the Timeline, if it is still the one
     /// inspected.
     pub(super) fn packets_read(&mut self, id: usize, packets: Result<super::devtools::Packets, String>) {

@@ -746,14 +746,14 @@ impl App {
     /// The Timeline's bitrate over the video, its keyframes under it, and
     /// what that means for seeking from where the video is.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn draw_bitrate(&self, sub: &mut Canvas, text: &mut Text, px: u32, packets: Option<&Result<Packets, String>>, id: usize, inner_w: i32, y: i32, offset: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
+    pub(super) fn draw_bitrate(&self, sub: &mut Canvas, text: &mut Text, px: u32, packets: Option<&Result<Packets, String>>, id: usize, inner_w: i32, y: i32, offset: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>, (cuts, finding): (&[f64], Option<u32>)) -> i32 {
         let pad = px as i32;
         let line = Text::line_height(px);
         let x = flow_x();
         let (cx, cw) = (x, inner_w);
         let chart_h = px as i32 * 8;
         let row = line + pad / 4;
-        let card_h = chart_h + pad / 3 + pad / 2 + 3 * row;
+        let card_h = chart_h + pad / 3 + pad / 2 + 4 * row;
         let top = section_head(sub, text, px, x, y, inner_w, "Bitrate and keyframes");
         let end = top + card_h + pad;
         let packets = match packets {
@@ -806,6 +806,11 @@ impl App {
             let kx = cx + ((key / length) * f64::from(cw)) as i32;
             sub.fill(kx.min(cx + cw - 1), ticks, 1, pad / 3, TEXT_COLOR);
         }
+        // Where the scenes cut, a mark each down from the top.
+        for cut in cuts {
+            let kx = cx + ((cut / length) * f64::from(cw)) as i32;
+            sub.fill(kx.min(cx + cw - 1), top, 1, chart_h / 3, 0xE0A040);
+        }
         // Where the video is.
         let at = self.video.as_ref().filter(|video| video.id == id).and(self.video_time()).map(|(at, _)| at);
         if let Some(at) = at {
@@ -836,6 +841,15 @@ impl App {
                         format!("decodes {back:.1} s of video first")
                     }
                     None => "Click the chart to go there".to_string(),
+                },
+            ),
+            (
+                "Scenes",
+                match (finding, cuts.len()) {
+                    (Some(along), found) => format!("finding cuts · {}% · {found} so far", along / 10),
+                    (None, 0) => "no cuts found".to_string(),
+                    (None, 1) => "1 cut".to_string(),
+                    (None, found) => format!("{found} cuts · one every {:.0} s on average", length / (found + 1) as f64),
                 },
             ),
         ];
@@ -979,6 +993,9 @@ pub(super) enum Block<'a> {
     Ladder,
     Scopes,
     Bitrate,
+    /// The Timeline's frames near where the video is, and its sound.
+    Frames,
+    Sound,
     Chapters,
     Convert,
     ConvertSource,
