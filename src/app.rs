@@ -45,6 +45,7 @@ use crate::ui::{self, Canvas, Text};
 
 mod convert_panel;
 mod convert_tab;
+mod compare_tab;
 use convert_panel::{ConvertPanel, PanelSource};
 mod section;
 use section::{Edge, EntryFrames, Section, StripTab};
@@ -271,6 +272,8 @@ pub enum Event {
     CompareDelta(u64, compare::Delta),
     /// What a file was found to be made of, for the inspector.
     Inspected(usize, Result<inspect::Inspection, String>),
+    /// The file Inspect's Compare tab sets beside the one on view, read.
+    Compared(usize, Result<inspect::Inspection, String>),
     /// The tracks editor's file written, or why not; and whether it took
     /// the original's place.
     TracksWritten(Result<PathBuf, String>, bool),
@@ -1294,6 +1297,9 @@ pub struct App {
     inspector_rows: f64,
     /// Inspect's Convert tab's choices for a video.
     video_convert: convert_tab::VideoConvert,
+    /// The file Inspect's Compare tab is comparing with, and what it is
+    /// once read.
+    compare_found: Option<(usize, Option<Result<inspect::Inspection, String>>)>,
     pending_command: Option<Command>,
     /// Where Inspect's Files tab has the list, as left, top, width,
     /// bottom; and whether it is being drawn there just now.
@@ -1888,6 +1894,7 @@ impl App {
             inspect_drawer: pins.drawer,
             drawer_pane: pins.drawer_pane.unwrap_or_default(),
             video_convert: Default::default(),
+            compare_found: None,
             inspector_rows: pins.rows.unwrap_or(24.0),
             pending_command: None,
             inspector_list: Cell::new(None),
@@ -4019,6 +4026,7 @@ impl App {
             Event::CompareScore(ticket, score) => self.compare_score(ticket, score),
             Event::CompareDelta(ticket, delta) => self.compare_delta(ticket, delta),
             Event::Inspected(id, found) => self.inspected(id, found),
+            Event::Compared(id, found) => self.compared(id, found),
             Event::TracksWritten(result, replaced) => self.tracks_written(result, replaced),
             Event::FilesDone(done) => self.files_done(done, event_loop),
             Event::Packets(id, packets) => self.packets_read(id, packets),

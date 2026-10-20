@@ -250,17 +250,6 @@ impl App {
         }
     }
 
-    /// The Compare tab's actions.
-    pub(super) fn compare_actions(&self) -> Vec<(String, Vec<Action>)> {
-        let marked = self.marks.len();
-        let words = match marked {
-            0 => "Mark a file (x), then compare it with this one".to_string(),
-            1 => "Compare with the marked file".to_string(),
-            n => format!("Compare the first two of {n} marked"),
-        };
-        vec![("Compare".to_string(), vec![Action { words, hit: Hit::Run(Command::Compare) }])]
-    }
-
     /// Draws groups of action rows on `sub` from `y`; returns where they end.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_actions(&self, sub: &mut Canvas, text: &mut Text, px: u32, groups: &[(String, Vec<Action>)], inner_w: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {

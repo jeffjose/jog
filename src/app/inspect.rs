@@ -742,6 +742,8 @@ impl App {
             Pane::Timeline => Some(u128::from(inspector.packets.is_some()) + self.perf.arrived.elapsed().as_millis() / 500 * 2),
             Pane::Console => Some(self.messages.len() as u128 * 1000 + self.perf.arrived.elapsed().as_secs() as u128 / 30),
             Pane::Convert => Some(self.convert_tab_key()),
+            // Which file it is compared with, and whether that is read.
+            Pane::Compare => Some(self.marks.iter().map(|id| *id as u128 + 1).sum::<u128>() * 4 + self.compare_found.as_ref().map_or(0, |(id, answer)| (*id as u128) * 2 + u128::from(answer.is_some()))),
             Pane::Color => Some(self.scopes.iter().enumerate().map(|(at, on)| u128::from(*on) << at).sum()),
             // What is playing, as the info line says it, and whether it
             // has started.
@@ -892,7 +894,9 @@ impl App {
                         let gap = pad;
                         let avail = content_w - pad * 3;
                         let columns = ((avail + gap) / (px as i32 * 26 + gap)).clamp(1, 4).min(blocks.len().max(1) as i32);
-                        let column_w = (avail - gap * (columns - 1)) / columns;
+                        // No wider than reads well: a lone block in a wide
+                        // dock keeps to the left rather than stretching.
+                        let column_w = ((avail - gap * (columns - 1)) / columns).min(px as i32 * 48);
                         let mut heights = vec![pad / 2; columns as usize];
                         let seconds = self.video.as_ref().filter(|video| video.id == inspector.id).and(self.video_time()).map_or(0.0, |(at, _)| at);
                         for block in &blocks {
@@ -930,7 +934,7 @@ impl App {
                                 Block::ConvertSource => self.draw_convert_source(&mut sub, text, px, found, inspector.id, column_w, top, offset, mouse, &mut drawn),
                                 Block::ConvertOutput => self.draw_convert_output(&mut sub, text, px, found, column_w, top, offset, mouse, &mut drawn),
                                 Block::ConvertResult => self.draw_convert_result(&mut sub, text, px, found, inspector.id, column_w, top, offset, mouse, &mut drawn),
-                                Block::Compare => self.draw_actions(&mut sub, text, px, &self.compare_actions(), column_w, top, offset, mouse, &mut drawn),
+                                Block::Compare => self.draw_compare_tab(&mut sub, text, px, found, inspector.id, column_w, top, offset, mouse, &mut drawn),
                             };
                             if end > top {
                                 heights[column] = end + inspector.scroll + gap / 2;
