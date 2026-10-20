@@ -272,7 +272,7 @@ pub(super) fn draw_tip(sub: &mut Canvas, text: &mut Text, px: u32, tips: &[Tip],
     // Drawn last is innermost.
     let Some(tip) = tips.iter().rev().find(|tip| inside(tip.place)) else { return };
     let pad = px as i32;
-    let small = (px * 5 / 6).max(11);
+    let small = px;
     let (line, small_line) = (Text::line_height(px), Text::line_height(small));
     // Each term, then what it is: what the term means if jog knows, else
     // what its role is. Made wider until it fits the height there is, as

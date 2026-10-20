@@ -374,7 +374,7 @@ impl App {
         }
         y += h + pad / 2;
         if busy {
-            text.draw(sub, x, y, (px * 5 / 6).max(11), DIM_TEXT_COLOR, "Converting · how far in the toast");
+            text.draw(sub, x, y, px, DIM_TEXT_COLOR, "Converting · how far in the toast");
             y += line;
         }
         y + pad

@@ -419,7 +419,7 @@ impl App {
             }
         }
         // Between them: the time along, and a thin bar to click or drag on.
-        let small = (px * 5 / 6).max(11);
+        let small = px;
         let words = match self.video_time() {
             Some((at, length)) if !picture => format!("{} / {}", clock(at), clock(length)),
             _ => format!("{} / {}", self.pos + 1, self.list.len()),
@@ -553,7 +553,7 @@ impl App {
         let mut y = self.draw_actions(sub, text, px, &actions, inner_w, y, offset, mouse, drawn);
         let pad = px as i32;
         let line = Text::line_height(px);
-        let small = (px * 5 / 6).max(11);
+        let small = px;
         let x = flow_x();
         let shown: Vec<&(Instant, String)> = self.messages.iter().rev().take(200).collect();
         let row_h = line + pad / 4;
@@ -600,7 +600,8 @@ impl App {
             return y;
         }
         let pad = px as i32;
-        let small = (px * 5 / 6).max(11);
+        // Its words at the size of all that is read.
+        let small = px;
         let small_line = Text::line_height(small);
         let x = flow_x();
         let word = |value: &serde_json::Value| value.as_str().map(str::to_string).filter(|v| !v.is_empty() && v != "unknown");
@@ -653,7 +654,7 @@ impl App {
         let inside: i32 = layers.iter().map(stream_h).sum::<i32>() + inset * (layers.len() as i32 + 1);
         let card_h = pad + small_line + pad / 2 + label_h + inside + pad;
         sub.round_fill(x, y, inner_w, card_h, pad / 2, WELL, 256);
-        text.draw(sub, x + pad, y + pad, small, DIM_TEXT_COLOR, "ANATOMY");
+        text.draw(sub, x + pad, y + pad, small, HEAD_COLOR, "Anatomy");
         let (fx, fw) = (x + pad, inner_w - pad * 2);
         let mut fy = y + pad + small_line + pad / 2;
         let file_h = label_h + inside;
@@ -876,7 +877,7 @@ impl App {
         // The names at the size of what is under them; the group labels
         // small capitals, as the sections' heads are.
         let small = px;
-        let tiny = (px * 2 / 3).max(10);
+        let tiny = (px * 5 / 6).max(11);
         let line = Text::line_height(small);
         let row_h = line + pad * 3 / 4;
         let gap = pad;
@@ -1008,17 +1009,31 @@ pub(super) enum Block<'a> {
 /// of facts have none.
 pub(super) const WELL: u32 = 0x1B1C21;
 
-/// A section's head, as a card's: its name in small capitals and a
-/// hairline under; returns where its rows start.
+/// Inspect's type is one size for all that is read, its rank told by its
+/// color: values in full white, the names of facts dim, the heads of
+/// sections between, over a hairline. A smaller size is for what is only
+/// glanced at: chips, a chart's scale.
+pub(super) const HEAD_COLOR: u32 = 0xC4C6D0;
+
+/// A section's head: its name, in `HEAD_COLOR`, a hairline under;
+/// returns where its rows start.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn section_head(sub: &mut Canvas, text: &mut Text, px: u32, x: i32, y: i32, width: i32, title: &str) -> i32 {
     let pad = px as i32;
-    let small_line = Text::line_height((px * 5 / 6).max(11));
-    let tiny = (px * 2 / 3).max(10);
-    text.draw(sub, x, y + (small_line - Text::line_height(tiny)) / 2, tiny, 0x6C6D78, &title.to_uppercase());
-    let y = y + small_line + pad / 3;
+    text.draw(sub, x, y, px, HEAD_COLOR, &sentence(title));
+    let y = y + Text::line_height(px) + pad / 4;
     sub.fill(x, y, width, 1, MENU_EDGE_COLOR);
     y + pad / 3
+}
+
+/// A head as a sentence starts: its first letter up, the rest as it was,
+/// and a head written in capitals brought down. Names in capitals within
+/// it (HDR10+, AV1) are kept.
+pub(super) fn sentence(title: &str) -> String {
+    let shouted = title.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase()) && title.chars().filter(|c| c.is_alphabetic()).count() > 6;
+    let title = if shouted { title.to_lowercase() } else { title.to_string() };
+    let mut chars = title.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
 impl App {
@@ -1030,28 +1045,27 @@ impl App {
         let pad = px as i32;
         let line = Text::line_height(px);
         let small = (px * 5 / 6).max(11);
-        let tiny = (px * 2 / 3).max(10);
-        let small_line = Text::line_height(small);
         let x = flow_x();
         let mut tx = x;
-        let title = card.title.to_uppercase();
-        text.draw(sub, tx, y + (small_line - Text::line_height(tiny)) / 2, tiny, 0x6C6D78, &title);
-        tx += text.width(&title, tiny) + pad / 2;
+        // The head, as `section_head` draws it, with its chips after it.
+        let title = sentence(&card.title);
+        text.draw(sub, tx, y, px, HEAD_COLOR, &title);
+        tx += text.width(&title, px) + pad / 2;
         for name in &card.badges {
-            tx += chip(sub, text, tx, y, small, name, badge_color(name)) + pad / 3;
+            tx += chip(sub, text, tx, y + (line - Text::line_height(small)) / 2, small, name, badge_color(name)) + pad / 3;
         }
-        let mut ry = y + small_line + pad / 3;
+        let mut ry = y + line + pad / 4;
         sub.fill(x, ry, width, 1, MENU_EDGE_COLOR);
         ry += pad / 2;
         let row_h = line + pad / 5;
-        let label_w = card.rows.iter().map(|(label, _)| text.width(label, small)).max().unwrap_or(0).min(width * 2 / 5);
+        let label_w = card.rows.iter().map(|(label, _)| text.width(label, px)).max().unwrap_or(0).min(width * 2 / 5);
         for (label, value) in &card.rows {
             // Over its name: what the fact is, and what this value means.
             if let Some(tip) = super::glossary::fact_tip([x, ry, label_w + pad / 2, row_h], label, value) {
                 tips.push(tip);
             }
-            let label = clipped(text, label, label_w, small);
-            text.draw(sub, x, ry + (line - small_line) / 2, small, DIM_TEXT_COLOR, &label);
+            let label = clipped(text, label, label_w, px);
+            text.draw(sub, x, ry, px, DIM_TEXT_COLOR, &label);
             let vx = x + label_w + pad;
             let shown = clipped(text, value, x + width - vx, px);
             let vw = text.width(&shown, px);
@@ -1169,7 +1183,7 @@ impl App {
     pub(super) fn draw_issues(&self, sub: &mut Canvas, text: &mut Text, px: u32, found: &super::inspect::Inspection, width: i32, y: i32) -> i32 {
         let pad = px as i32;
         let big = px * 3 / 2;
-        let small = (px * 5 / 6).max(11);
+        let small = px;
         let x = flow_x();
         let issues = self.issues(found);
         let headline = match issues.len() {

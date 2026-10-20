@@ -757,7 +757,7 @@ impl App {
         let mut inspector = inspector;
         let pad = px as i32;
         let line = Text::line_height(px);
-        let small = (px * 5 / 6).max(11);
+        let small = px;
         let small_line = Text::line_height(small);
         // A column down the side the file list is not on, as wide as the
         // list and laid out as it is: over the picture, or pinned beside it.
@@ -1142,7 +1142,7 @@ impl App {
     fn draw_cards(&self, sub: &mut Canvas, text: &mut Text, px: u32, cards: &[Card], inner_w: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>, scroll: i32) -> i32 {
         let pad = px as i32;
         let line = Text::line_height(px);
-        let small = (px * 5 / 6).max(11);
+        let small = px;
         let small_line = Text::line_height(small);
         let columns = (inner_w / (px as i32 * 26)).clamp(1, 3);
         let gap = pad;
@@ -1157,12 +1157,13 @@ impl App {
             let y = heights[column] + scroll;
             sub.round_fill(x, y, card_w, card_h, pad / 2, super::devtools::WELL, 256);
             let mut tx = x + pad;
-            sub_title(sub, text, tx, y + pad, small, &card.title.to_uppercase());
-            tx += text.width(&card.title.to_uppercase(), small) + pad / 2;
+            sub_title(sub, text, tx, y + pad, small, &card.title);
+            tx += text.width(&super::devtools::sentence(&card.title), small) + pad / 2;
+            let chip_px = (px * 5 / 6).max(11);
             for name in &card.badges {
-                let w = text.width(name, small) + pad / 2;
-                sub.round_fill(tx, y + pad, w, small_line, pad / 4, badge_color(name), 230);
-                text.draw(sub, tx + pad / 4, y + pad, small, TEXT_COLOR, name);
+                let w = text.width(name, chip_px) + pad / 2;
+                sub.round_fill(tx, y + pad + (small_line - Text::line_height(chip_px)) / 2, w, Text::line_height(chip_px), pad / 4, badge_color(name), 230);
+                text.draw(sub, tx + pad / 4, y + pad + (small_line - Text::line_height(chip_px)) / 2, chip_px, TEXT_COLOR, name);
                 tx += w + pad / 3;
             }
             let mut ry = y + pad + line + pad / 2;
@@ -1195,13 +1196,13 @@ impl App {
     fn draw_scene_chart(&self, sub: &mut Canvas, text: &mut Text, px: u32, found: &Inspection, inner_w: i32, y: i32, offset: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
         let Some(hdr) = found.hdr.as_ref().filter(|hdr| !hdr.hdr10plus.is_empty()) else { return y };
         let pad = px as i32;
-        let small = (px * 5 / 6).max(11);
+        let small = px;
         let small_line = Text::line_height(small);
         let x = flow_x();
         let chart_h = px as i32 * 9;
         let card_h = pad + small_line + pad / 2 + chart_h + pad / 2 + small_line + pad;
         sub.round_fill(x, y, inner_w, card_h, pad / 2, super::devtools::WELL, 256);
-        sub_title(sub, text, x + pad, y + pad, small, "HDR10+ · BRIGHTEST OF EACH SCENE");
+        sub_title(sub, text, x + pad, y + pad, small, "HDR10+ · brightest of each scene");
         let scenes = hdr_scenes(hdr);
         let peak = scenes.iter().map(|(_, brightest, _)| *brightest).fold(1000.0_f64, f64::max);
         let (cx, cy, cw) = (x + pad, y + pad + small_line + pad / 2, inner_w - 2 * pad);
@@ -1230,7 +1231,7 @@ impl App {
 
 /// A card's heading: small capitals, dim.
 fn sub_title(canvas: &mut Canvas, text: &mut Text, x: i32, y: i32, px: u32, words: &str) {
-    text.draw(canvas, x, y, px, DIM_TEXT_COLOR, words);
+    text.draw(canvas, x, y, px, super::devtools::HEAD_COLOR, &super::devtools::sentence(words));
 }
 
 /// The HDR10+ metadata as scenes: frames in a row with the same values are
@@ -1286,7 +1287,7 @@ impl App {
     fn draw_structure(&self, sub: &mut Canvas, text: &mut Text, px: u32, found: &Inspection, inspector: TreeState, inner_w: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
         let pad = px as i32;
         let line = Text::line_height(px);
-        let small = (px * 5 / 6).max(11);
+        let small = px;
         let small_line = Text::line_height(small);
         let x = flow_x();
         let nodes = match &found.tree {

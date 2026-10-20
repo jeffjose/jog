@@ -103,7 +103,7 @@ impl App {
         let column = (width - name_w - pad) / 2;
         let (a_x, b_x) = (x + name_w, x + name_w + column + pad);
         // Each file's name over its column.
-        let small = (px * 5 / 6).max(11);
+        let small = px;
         let this_name = clipped(text, &name(self, id), column, small);
         let that_name = clipped(text, &name(self, other), column, small);
         text.draw(sub, a_x, y, small, DIM_TEXT_COLOR, &this_name);

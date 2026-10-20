@@ -58,7 +58,7 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_agtm(&self, sub: &mut Canvas, text: &mut Text, px: u32, info: &Info, agtm: &Agtm, inner_w: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), gain: bool, drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
         let pad = px as i32;
-        let small = (px * 5 / 6).max(11);
+        let small = px;
         let small_line = Text::line_height(small);
         let x = flow_x();
         let (cx, cw) = (x + pad, inner_w - 2 * pad);
@@ -70,7 +70,7 @@ impl App {
         let card_h = pad + small_line + pad / 2 + button_h + pad / 2 + plot_h + pad / 2 + small_line + pad / 2 + rows * (small_line + pad / 4) + pad;
         sub.round_fill(x, y, inner_w, card_h, pad / 2, CARD, 256);
         let mut top = y + pad;
-        line(sub, text, cx, top, cw, small, DIM_TEXT_COLOR, "2094-50 · TONE CURVES");
+        line(sub, text, cx, top, cw, small, super::devtools::HEAD_COLOR, "2094-50 · tone curves");
         // Output against input, or the gain in stops: as hdr-explorer's two views.
         let mut right = cx + cw;
         for (word, on) in [("Gain", gain), ("Output", !gain)].into_iter() {
@@ -187,7 +187,7 @@ fn in_rect((x, y): (i32, i32), [left, top, w, h]: [i32; 4]) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_plus(sub: &mut Canvas, text: &mut Text, px: u32, plus: &Hdr10Plus, scenes: usize, inner_w: i32, y: i32) -> i32 {
     let pad = px as i32;
-    let small = (px * 5 / 6).max(11);
+    let small = px;
     let small_line = Text::line_height(small);
     let x = flow_x();
     let (cx, cw) = (x + pad, inner_w - 2 * pad);
@@ -196,7 +196,7 @@ pub(super) fn draw_plus(sub: &mut Canvas, text: &mut Text, px: u32, plus: &Hdr10
     let card_h = pad + small_line + pad / 2 + plot_h + pad / 2 + small_line + pad / 2 + 4 * row + pad;
     sub.round_fill(x, y, inner_w, card_h, pad / 2, CARD, 256);
     let mut top = y + pad;
-    line(sub, text, cx, top, cw, small, DIM_TEXT_COLOR, "HDR10+ · THIS SCENE'S CURVE");
+    line(sub, text, cx, top, cw, small, super::devtools::HEAD_COLOR, "HDR10+ · this scene's curve");
     top += small_line + pad / 2;
     let lines: Vec<(Box<dyn Fn(f64) -> f64 + '_>, u32, bool)> = vec![(Box::new(|x| x), IDENTITY, true), (Box::new(move |x| plus.tone(x)), PLUS, false)];
     draw::plot(sub, [cx, top, cw, plot_h], (1.0, 1.0), 0.25, &lines);
@@ -227,7 +227,7 @@ pub(super) fn draw_plus(sub: &mut Canvas, text: &mut Text, px: u32, plus: &Hdr10
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_ladder(sub: &mut Canvas, text: &mut Text, px: u32, info: &Info, seconds: f64, headroom: f64, inner_w: i32, y: i32) -> i32 {
     let pad = px as i32;
-    let small = (px * 5 / 6).max(11);
+    let small = px;
     let small_line = Text::line_height(small);
     let x = flow_x();
     let (cx, cw) = (x + pad, inner_w - 2 * pad);
@@ -261,18 +261,20 @@ pub(super) fn draw_ladder(sub: &mut Canvas, text: &mut Text, px: u32, info: &Inf
     let card_h = pad + small_line + pad / 2 + bar_h + small_line + pad / 2 + marks.len() as i32 * row + pad;
     sub.round_fill(x, y, inner_w, card_h, pad / 2, CARD, 256);
     let mut top = y + pad;
-    line(sub, text, cx, top, cw, small, DIM_TEXT_COLOR, "BRIGHTNESS · NITS, ON A LOG SCALE");
+    line(sub, text, cx, top, cw, small, super::devtools::HEAD_COLOR, "Brightness · nits, on a log scale");
     top += small_line + pad / 2;
     // A decade a sixth of the way: 0.01 to 10,000 nits.
     let (lo, hi) = (-2.0_f64, 4.0_f64);
     let at = |nits: f64| cx + ((nits.max(1e-3).log10() - lo) / (hi - lo) * f64::from(cw)).round() as i32;
     sub.round_fill(cx, top, cw, bar_h, bar_h / 2, 0x0B0B0B, 256);
+    // The scale's marks: glanced at, not read, so a size down.
+    let scale = (px * 5 / 6).max(11);
     for decade in [0.01, 1.0, 100.0, 10_000.0] {
         let dx = at(decade).min(cx + cw - 1);
         sub.fill(dx, top, 1, bar_h, 0x3A3A3A);
         let label = nits(decade);
-        let label_w = text.width(&label, small);
-        text.draw(sub, (dx - label_w / 2).clamp(cx, cx + cw - label_w), top + bar_h, small, DIM_TEXT_COLOR, &label);
+        let label_w = text.width(&label, scale);
+        text.draw(sub, (dx - label_w / 2).clamp(cx, cx + cw - label_w), top + bar_h, scale, DIM_TEXT_COLOR, &label);
     }
     for (_, value, color) in &marks {
         let dx = at(*value).clamp(cx, cx + cw - 3);
@@ -320,7 +322,7 @@ impl App {
 fn draw_tone_curves(sub: &mut Canvas, text: &mut Text, px: u32, color: &crate::colorinfo::Color, inner_w: i32, y: i32) -> i32 {
     use crate::colorinfo::Curve;
     let pad = px as i32;
-    let small = (px * 5 / 6).max(11);
+    let small = px;
     let small_line = Text::line_height(small);
     let x = flow_x();
     let (cx, cw) = (x + pad, inner_w - 2 * pad);
@@ -328,7 +330,7 @@ fn draw_tone_curves(sub: &mut Canvas, text: &mut Text, px: u32, color: &crate::c
     let card_h = pad + small_line + pad / 2 + plot_h + pad / 2 + small_line + pad;
     sub.round_fill(x, y, inner_w, card_h, pad / 2, CARD, 256);
     let mut top = y + pad;
-    line(sub, text, cx, top, cw, small, DIM_TEXT_COLOR, "TONE CURVES · STORED TO LINEAR");
+    line(sub, text, cx, top, cw, small, super::devtools::HEAD_COLOR, "Tone curves · stored to linear");
     top += small_line + pad / 2;
     let srgb = Curve::Parametric(3, vec![2.4, 1.0 / 1.055, 0.055 / 1.055, 1.0 / 12.92, 0.04045]);
     let mut lines: Vec<(Box<dyn Fn(f64) -> f64 + '_>, u32, bool)> = vec![(Box::new(|x| x), IDENTITY, true), (Box::new(move |x| srgb.eval(x)), 0x4A6A8A, true)];
@@ -354,7 +356,7 @@ fn draw_tone_curves(sub: &mut Canvas, text: &mut Text, px: u32, color: &crate::c
 /// an SDR screen, all of it from the headroom it was made for.
 fn draw_gain_weight(sub: &mut Canvas, text: &mut Text, px: u32, meta: &crate::ultrahdr::Meta, inner_w: i32, y: i32) -> i32 {
     let pad = px as i32;
-    let small = (px * 5 / 6).max(11);
+    let small = px;
     let small_line = Text::line_height(small);
     let x = flow_x();
     let (cx, cw) = (x + pad, inner_w - 2 * pad);
@@ -363,7 +365,7 @@ fn draw_gain_weight(sub: &mut Canvas, text: &mut Text, px: u32, meta: &crate::ul
     let card_h = pad + small_line + pad / 2 + plot_h + pad / 2 + small_line + pad / 2 + 2 * row + pad;
     sub.round_fill(x, y, inner_w, card_h, pad / 2, CARD, 256);
     let mut top = y + pad;
-    line(sub, text, cx, top, cw, small, DIM_TEXT_COLOR, "GAIN MAP · HOW MUCH, BY SCREEN");
+    line(sub, text, cx, top, cw, small, super::devtools::HEAD_COLOR, "Gain map · how much, by screen");
     top += small_line + pad / 2;
     let full = f64::from(meta.capacity_max).max(0.01);
     let across = (full + 1.0).ceil();

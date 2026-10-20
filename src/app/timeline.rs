@@ -353,7 +353,8 @@ impl App {
         let side = line;
         for (at, (words, out)) in [("−", false), ("+", true)].into_iter().enumerate() {
             let bx = x + width - (2 - at as i32) * (side + pad / 4);
-            let by = y - pad / 3 - Text::line_height((px * 5 / 6).max(11)) - pad / 3 - side / 2 + 2;
+            // Level with the head's words, `section_head` having come down past them.
+            let by = y - pad / 3 - pad / 4 - line;
             let place = [bx + offset.0, by + offset.1, side, side];
             let over = (place[0]..place[0] + side).contains(&mouse.0) && (place[1]..place[1] + side).contains(&mouse.1);
             sub.round_fill(bx, by, side, side, side / 2, if over { 0x2C2D35 } else { super::devtools::WELL }, 256);
@@ -395,7 +396,7 @@ impl App {
         }
         y += chart_h + pad / 2;
         // The legend, then what the frames say.
-        let small = (px * 5 / 6).max(11);
+        let small = px;
         let mut lx = x;
         for (kind, words) in [('I', "I · whole picture"), ('P', "P · from before"), ('B', "B · from both sides")] {
             sub.round_fill(lx, y + (Text::line_height(small) - pad / 2) / 2, pad / 2, pad / 2, 2, kind_color(kind), 256);
