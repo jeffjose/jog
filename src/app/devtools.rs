@@ -365,3 +365,90 @@ impl App {
         here && self.inspector.as_ref().is_some_and(|inspector| inspector.pane() == Pane::Files)
     }
 }
+
+impl App {
+    /// The Tracks tab, under its cards: the audio and subtitles playing,
+    /// each a row to click to play that one instead, with what else there
+    /// is to do with the tracks.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_track_choices(&self, sub: &mut Canvas, text: &mut Text, px: u32, id: usize, inner_w: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
+        let playing = self.video.as_ref().is_some_and(|video| video.id == id && video.showing);
+        let tracks = match (&self.player, playing) {
+            (Some(player), true) => tracks::track_list(player),
+            _ => Vec::new(),
+        };
+        let pad = px as i32;
+        let line = Text::line_height(px);
+        let small = (px * 5 / 6).max(11);
+        let small_line = Text::line_height(small);
+        let x = pad * 3 / 2;
+        let row_h = line + pad / 3;
+        let mut y = y;
+        let mut group = |sub: &mut Canvas, text: &mut Text, y: &mut i32, title: &str, rows: Vec<(String, bool, Hit)>| {
+            if rows.is_empty() {
+                return;
+            }
+            let card_h = pad + small_line + pad / 2 + rows.len() as i32 * row_h + pad / 2;
+            sub.round_fill(x, *y, inner_w, card_h, pad / 2, 0x26262B, 256);
+            text.draw(sub, x + pad, *y + pad, small, DIM_TEXT_COLOR, title);
+            let mut ry = *y + pad + small_line + pad / 2;
+            for (words, on, hit) in rows {
+                let place = [x + offset.0, ry + offset.1, inner_w, row_h];
+                let over = (place[0]..place[0] + place[2]).contains(&mouse.0) && (place[1]..place[1] + place[3]).contains(&mouse.1);
+                if on || over {
+                    sub.round_fill(x + pad / 2, ry, inner_w - pad, row_h, pad / 3, if on { accent() } else { 0x3A3A40 }, 256);
+                }
+                let mark = if on { "●" } else { "○" };
+                text.draw(sub, x + pad, ry + (row_h - line) / 2, px, if on { on_accent() } else { TEXT_COLOR }, &format!("{mark}  {words}"));
+                drawn.push((hit, place));
+                ry += row_h;
+            }
+            *y += card_h + pad;
+        };
+        if !playing {
+            text.draw(sub, x, y, px, DIM_TEXT_COLOR, "Play the video to choose its tracks");
+            y += line + pad;
+        }
+        let audio: Vec<(String, bool, Hit)> = tracks
+            .iter()
+            .filter(|track| track.kind == tracks::TrackKind::Audio)
+            .map(|track| (tracks::track_label(track), track.selected, Hit::Track(true, Some(track.id))))
+            .collect();
+        group(sub, text, &mut y, "PLAYING · AUDIO", audio);
+        let mut subs: Vec<(String, bool, Hit)> = vec![("Off".to_string(), !tracks.iter().any(|track| track.kind == tracks::TrackKind::Sub && track.selected), Hit::Track(false, None))];
+        subs.extend(tracks.iter().filter(|track| track.kind == tracks::TrackKind::Sub).map(|track| (tracks::track_label(track), track.selected, Hit::Track(false, Some(track.id)))));
+        if playing {
+            group(sub, text, &mut y, "PLAYING · SUBTITLES", subs);
+        }
+        let run = |words: &str, command: Command| Action { words: words.to_string(), hit: Hit::Run(command) };
+        let actions = vec![(
+            "Tracks".to_string(),
+            vec![run("Edit tracks…  keep, order, tag, burn in", Command::EditTracks), run("Larger subtitles", Command::SubtitlesLarger), run("Smaller subtitles", Command::SubtitlesSmaller)],
+        )];
+        self.draw_actions(sub, text, px, &actions, inner_w, y, offset, mouse, drawn)
+    }
+
+    /// Plays another audio track, or subtitles, or none, as the track
+    /// picker does, and keeps the choice for the video.
+    pub(super) fn choose_track(&mut self, audio: bool, id: Option<i64>) {
+        let Some(player) = &self.player else { return };
+        match (audio, id) {
+            (true, Some(id)) => player.set("aid", &id.to_string()),
+            (false, Some(id)) => {
+                player.set("sid", &id.to_string());
+                self.subtitles = true;
+            }
+            (_, None) => {
+                player.set("sid", "no");
+                self.subtitles = false;
+            }
+        }
+        self.remember_tracks();
+        // What the info line and Inspect say is playing, read again.
+        let words = self.player.as_ref().and_then(|player| tracks::playing_words(&tracks::track_list(player), self.subtitles));
+        if let Some(video) = &mut self.video {
+            video.track_words = words;
+        }
+        self.redraw();
+    }
+}

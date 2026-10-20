@@ -169,6 +169,8 @@ pub(super) enum Hit {
     Run(Command),
     /// The transport bar's thin bar, where it starts and how wide.
     Scrub(i32, i32),
+    /// A track to play: audio or subtitles, and which; none for subtitles off.
+    Track(bool, Option<i64>),
     /// The HDR tab: the headroom up or down, and the 2094-50 curves as
     /// gain rather than output.
     Headroom(bool),
@@ -466,6 +468,7 @@ impl App {
             }
             Hit::Run(command) => self.pending_command = Some(command),
             Hit::Scrub(..) => {}
+            Hit::Track(audio, id) => self.choose_track(audio, id),
             Hit::Close => self.inspector = None,
             Hit::Pin => self.toggle_inspector_pin(),
             Hit::PopOut => self.toggle_popout(Popped::Inspector),
@@ -712,6 +715,8 @@ impl App {
         // Performance's figures change all the time: drawn again twice a second.
         let tick = match inspector.pane {
             Pane::Performance => Some(self.perf.arrived.elapsed().as_millis() / 500),
+            // What is playing, as the info line says it.
+            Pane::Tracks => Some(self.video.as_ref().and_then(|video| video.track_words.as_ref()).map_or(0, |words| words.bytes().fold(0u128, |hash, byte| hash.wrapping_mul(31).wrapping_add(u128::from(byte))))),
             // The list lights up under the pointer and plays along: every frame.
             Pane::Files => Some(self.perf.arrived.elapsed().as_nanos()),
             _ => None,
@@ -834,6 +839,7 @@ impl App {
                         Pane::Convert => self.draw_actions(&mut sub, text, px, &self.convert_actions(inspector.picture), inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
                         Pane::Compare => self.draw_actions(&mut sub, text, px, &self.compare_actions(), inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
                         Pane::Timeline => self.draw_timeline(&mut sub, text, px, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
+                        Pane::Tracks => self.draw_track_choices(&mut sub, text, px, inspector.id, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
                         _ => content_h,
                     };
                     // The HDR tab: a bar for each HDR10+ scene, its brightest.
