@@ -1969,9 +1969,12 @@ impl App {
                     Command::ListFlip => commands::icons::REPLACE,
                     Command::CycleLoop if self.looping == Looping::File => commands::icons::REPEAT_1,
                     Command::CycleLoop => commands::icons::REPEAT,
+                    Command::ListPopOut if self.popped(Popped::List) => commands::icons::POP_IN,
                     Command::ListPopOut => commands::icons::EXTERNAL_LINK,
                     _ => commands::icons::X,
                 };
+                // Out, its button is one to bring it in, not one lit.
+                let on = on && button.command != Command::ListPopOut;
                 round_button(canvas, text, button, icon, px, over, on, false);
                 continue;
             }

@@ -464,6 +464,8 @@ pub mod icons {
     pub const KEYBOARD: &str = "\u{e283}";
     pub const LOG_OUT: &str = "\u{e111}";
     pub const EXTERNAL_LINK: &str = "\u{e0bd}";
+    /// The pop-out arrow turned back: into the main window again.
+    pub const POP_IN: &str = "\u{e600}";
     pub const CHECK: &str = "\u{e070}";
     pub const CHEVRON_RIGHT: &str = "\u{e073}";
     pub const CHEVRON_LEFT: &str = "\u{e072}";

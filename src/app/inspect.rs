@@ -670,7 +670,7 @@ impl App {
         if !popped {
             buttons.push((Hit::Pin, commands::icons::PIN, self.inspector_pinned));
         }
-        buttons.push((Hit::PopOut, commands::icons::EXTERNAL_LINK, popped));
+        buttons.push((Hit::PopOut, if popped { commands::icons::POP_IN } else { commands::icons::EXTERNAL_LINK }, false));
         buttons.push((Hit::CopyAll, commands::icons::BRACES, false));
         let mut button_left = left + width;
         for (at, (hit, icon, on)) in buttons.into_iter().enumerate() {

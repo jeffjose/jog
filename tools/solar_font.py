@@ -45,7 +45,7 @@ PICKS = {
     "BRACES": "braces", "FOLDER_INPUT": "move-to-folder", "FOLDER_PLUS": "add-folder", "FOLDERS": "folders",
     "PENCIL": "pen", "REFRESH": "refresh", "UNDO": "undo-left", "CLIPBOARD": "clipboard", "MINUS": "minus",
     "TRASH": "trash-bin-minimalistic", "CIRCLE_X": "close-circle", "BUG": "bug", "TERMINAL": "command",
-    "KEYBOARD": "keyboard", "LOG_OUT": "logout-2", "EXTERNAL_LINK": "square-arrow-right-up", "CHECK": "check",
+    "KEYBOARD": "keyboard", "LOG_OUT": "logout-2", "EXTERNAL_LINK": "square-arrow-right-up", "POP_IN": "square-arrow-left-down", "CHECK": "check",
     "CHEVRON_RIGHT": "alt-arrow-right", "CHEVRON_LEFT": "alt-arrow-left", "TRIANGLE_ALERT": "danger-triangle",
     "TYPE": "text-bold", "MONITOR_PLAY": "display", "FILE": "file", "STEP_FORWARD": "round-alt-arrow-right",
     "STEP_BACK": "round-alt-arrow-left", "FAST_FORWARD": "rewind-forward", "REWIND": "rewind-back",
