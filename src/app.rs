@@ -1281,6 +1281,9 @@ pub struct App {
     /// Inspect docked along the bottom rather than down the side, and how
     /// tall it is there, in lines of text.
     inspector_bottom: bool,
+    /// The drawer under Inspect's tab: the file list, in view whatever
+    /// tab is up, as a browser's tools keep their console.
+    inspect_drawer: bool,
     inspector_rows: f64,
     pending_command: Option<Command>,
     /// Where Inspect's Files tab has the list, as left, top, width,
@@ -1873,6 +1876,7 @@ impl App {
             out: pins.out.clone(),
             inspect_pane: pins.pane.unwrap_or_default(),
             inspector_bottom: pins.bottom,
+            inspect_drawer: pins.drawer,
             inspector_rows: pins.rows.unwrap_or(24.0),
             pending_command: None,
             inspector_list: Cell::new(None),

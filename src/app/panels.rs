@@ -31,6 +31,8 @@ pub(super) struct Saved {
     pub pane: Option<super::Pane>,
     /// Inspect along the bottom, and how tall, in lines of text.
     pub bottom: bool,
+    /// The drawer under its tab open.
+    pub drawer: bool,
     pub rows: Option<f64>,
 }
 
@@ -61,6 +63,7 @@ pub(super) fn load() -> Saved {
         at,
         pane: value("inspect-tab").and_then(super::Pane::from_name),
         bottom: value("inspect-dock") == Some("bottom"),
+        drawer: value("inspect-drawer") == Some("open"),
         rows: number("inspect-height"),
     }
 }
@@ -111,7 +114,7 @@ impl App {
         }
         let word = |pinned: bool| if pinned { "pinned" } else { "over" };
         let text = format!(
-            "list={}\ninspector={}\nstrip={}\nlist-width={:.1}\ninspector-width={:.1}\nstrip-height={:.2}\ninspect-tab={}\ninspect-dock={}\ninspect-height={:.1}\n{}",
+            "list={}\ninspector={}\nstrip={}\nlist-width={:.1}\ninspector-width={:.1}\nstrip-height={:.2}\ninspect-tab={}\ninspect-dock={}\ninspect-height={:.1}\ninspect-drawer={}\n{}",
             word(self.list_pinned),
             word(self.inspector_pinned),
             word(self.strip_docked),
@@ -121,6 +124,7 @@ impl App {
             self.inspect_pane.name(),
             if self.inspector_bottom { "bottom" } else { "side" },
             self.inspector_rows,
+            if self.inspect_drawer { "open" } else { "shut" },
             super::Popped::ALL
                 .into_iter()
                 .map(|what| {

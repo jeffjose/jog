@@ -365,7 +365,7 @@ impl App {
             return true;
         }
         let here = (self.drawing_popout == Some(Popped::Inspector)) == self.popped(Popped::Inspector);
-        here && self.inspector.as_ref().is_some_and(|inspector| inspector.pane() == Pane::Files)
+        here && self.inspector.as_ref().is_some_and(|inspector| inspector.pane() == Pane::Files || self.inspect_drawer)
     }
 }
 

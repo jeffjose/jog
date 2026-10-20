@@ -166,6 +166,8 @@ pub(super) enum Hit {
     PopOut,
     /// Docked along the bottom, or down the side.
     Dock,
+    /// The drawer under the tab, with the file list, open or shut.
+    Drawer,
     /// A command, as from a key or the menu: the transport bar's and the
     /// action rows', run on the next turn of the event loop.
     Run(Command),
@@ -474,6 +476,11 @@ impl App {
             Hit::Close => self.inspector = None,
             Hit::Pin => self.toggle_inspector_pin(),
             Hit::Dock => self.toggle_inspector_dock(),
+            Hit::Drawer => {
+                self.inspect_drawer = !self.inspect_drawer;
+                self.save_panels();
+                self.redraw();
+            }
             Hit::PopOut => self.toggle_popout(Popped::Inspector),
             Hit::Headroom(up) => self.hdr_headroom = (self.hdr_headroom + if up { 0.25 } else { -0.25 }).clamp(0.0, 6.0),
             Hit::GainView => {
@@ -731,6 +738,7 @@ impl App {
             Pane::Tracks => Some(self.video.as_ref().and_then(|video| video.track_words.as_ref()).map_or(0, |words| words.bytes().fold(0u128, |hash, byte| hash.wrapping_mul(31).wrapping_add(u128::from(byte))))),
             // The list lights up under the pointer and plays along: every frame.
             Pane::Files => Some(self.perf.arrived.elapsed().as_nanos()),
+            _ if self.inspect_drawer => Some(self.perf.arrived.elapsed().as_nanos()),
             _ => None,
         };
         let key = PanelKey { pane: inspector.pane, tick, tab: inspector.tab, scroll: inspector.scroll, found: inspector.found.is_some(), selected: inspector.selected.clone(), open: inspector.open.len(), follow: inspector.follow, pointer: over, place: inspector.place, window: (canvas.width, canvas.height), pinned: self.inspector_pinned, hdr };
@@ -754,7 +762,6 @@ impl App {
         }
         inspector.drawn.clear();
         let inner = left + pad * 3 / 2;
-        let inner_w = width - pad * 3;
 
         // The heading, as the file list's: what and the file, then the
         // round buttons from the right: close, pin, copy as JSON.
@@ -768,6 +775,8 @@ impl App {
             buttons.push((Hit::Pin, commands::icons::PIN, self.inspector_pinned));
             // Down the side or along the bottom, as a browser's tools dock.
             buttons.push((Hit::Dock, commands::icons::LAYOUT_GRID, self.inspector_bottom));
+            // The file list in a drawer under the tab.
+            buttons.push((Hit::Drawer, commands::icons::LIST, self.inspect_drawer));
         }
         buttons.push((Hit::PopOut, if popped { commands::icons::POP_IN } else { commands::icons::EXTERNAL_LINK }, false));
         buttons.push((Hit::CopyAll, commands::icons::BRACES, false));
@@ -827,15 +836,23 @@ impl App {
         }
         y += pad - gap;
 
-        // The content, scrolled, clipped to the panel above the transport bar.
+        // The content, scrolled, clipped to the panel above the transport bar,
+        // or above the drawer, when that is open under another tab.
         let view_top = y;
-        let view_bottom = top + height - transport_h;
+        let foot = top + height - transport_h;
+        let drawer = self.inspect_drawer && inspector.pane != Pane::Files;
+        // Docked along the bottom the drawer stands beside the tab, there
+        // being little height; down the side, under it.
+        let beside = drawer && bottom;
+        let content_w = if beside { width * 3 / 5 } else { width };
+        let inner_w = content_w - pad * 3;
+        let view_bottom = if drawer && !beside { view_top + (foot - view_top) * 11 / 20 } else { foot };
         inspector.view_h = view_bottom - view_top;
-        let mut sheet = canvas.copy(left, view_top, width, inspector.view_h);
+        let mut sheet = canvas.copy(left, view_top, content_w, inspector.view_h);
         let mut drawn = Vec::new();
         let mut content_h = 0;
-        if sheet.len() == (width * inspector.view_h) as usize {
-            let mut sub = Canvas::new(&mut sheet, width as u32, inspector.view_h as u32);
+        if sheet.len() == (content_w * inspector.view_h) as usize {
+            let mut sub = Canvas::new(&mut sheet, content_w as u32, inspector.view_h as u32);
             // The sheet's origin in the window; what is drawn on it is
             // already moved up by the scroll.
             let offset = (left, view_top);
@@ -897,11 +914,27 @@ impl App {
                     }
                 }
             }
-            canvas.dissolve(left, view_top, width, inspector.view_h, &sheet, 256);
+            canvas.dissolve(left, view_top, content_w, inspector.view_h, &sheet, 256);
         }
         inspector.content_h = content_h;
-        // The Files tab: the file list, drawn as it is beside the picture.
-        if inspector.pane == Pane::Files {
+        // The Files tab, or the drawer: the file list, drawn as it is beside
+        // the picture.
+        if inspector.pane == Pane::Files || drawer {
+            let (list_top, view_bottom) = match (drawer, beside) {
+                (true, true) => (view_top, foot),
+                (true, false) => (view_bottom, foot),
+                _ => (view_top, view_bottom),
+            };
+            let (left, width) = if beside { (left + content_w, width - content_w) } else { (left, width) };
+            if drawer {
+                canvas.fill(left, list_top, width, view_bottom - list_top, GRID_COLOR);
+                if beside {
+                    canvas.fill(left, list_top, 1, view_bottom - list_top, MENU_EDGE_COLOR);
+                } else {
+                    canvas.fill(left, list_top, width, 1, MENU_EDGE_COLOR);
+                }
+            }
+            let view_top = list_top;
             self.inspector_list.set(Some([left, view_top, width, view_bottom]));
             self.inspector_list_drawing.set(true);
             if let Some(panel) = self.list_panel() {
