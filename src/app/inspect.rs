@@ -12,14 +12,14 @@ use super::*;
 /// What was found in a file.
 pub struct Inspection {
     probe: Value,
-    hdr: Option<crate::hdrmeta::Info>,
+    pub(super) hdr: Option<crate::hdrmeta::Info>,
     /// The first video frame's side data: what the bitstream carries
     /// that the container may not, HDR10 values written by the encoder.
     first_frame: Value,
     /// Its boxes or elements.
-    tree: Result<Vec<crate::boxes::Node>, String>,
+    pub(super) tree: Result<Vec<crate::boxes::Node>, String>,
     /// For a picture, what it carries: EXIF, color profile, XMP, gain map.
-    picture: Option<crate::picmeta::Picture>,
+    pub(super) picture: Option<crate::picmeta::Picture>,
 }
 
 impl Inspection {
@@ -56,12 +56,12 @@ impl Inspection {
         self.probe["streams"].as_array().map_or(&[], Vec::as_slice)
     }
 
-    fn video(&self) -> Option<&Value> {
+    pub(super) fn video(&self) -> Option<&Value> {
         self.streams().iter().find(|stream| stream["codec_type"] == "video" && stream["disposition"]["attached_pic"] != 1)
     }
 
     /// One side data entry of the video stream, by its type.
-    fn side(&self, kind: &str) -> Option<&Value> {
+    pub(super) fn side(&self, kind: &str) -> Option<&Value> {
         self.side_from(kind).map(|(side, _)| side)
     }
 
@@ -97,20 +97,35 @@ impl Inspection {
     }
 }
 
-/// The tabs, in order: a video's, and a picture's.
-const TABS: [&str; 5] = ["Summary", "Streams", "HDR", "Structure", "Tags · chapters"];
-const PICTURE_TABS: [&str; 4] = ["Summary", "EXIF", "Color · HDR", "XMP"];
 /// The tab of the boxes or elements the file is made of.
 const STRUCTURE: usize = 3;
+
+impl Inspector {
+    /// Goes to a tab: its cards and charts, if it is one of the first tabs,
+    /// under that one's number, and from the top.
+    pub(super) fn set_pane(&mut self, pane: Pane) {
+        let pane = if pane.applies(self.picture) { pane } else { Pane::Overview };
+        self.pane = pane;
+        self.tab = pane.legacy(self.picture).unwrap_or(usize::MAX);
+        self.scroll = 0;
+    }
+
+    pub(super) fn pane(&self) -> Pane {
+        self.pane
+    }
+
+    /// The tabs it shows, and where the one up is among them.
+    pub(super) fn panes(&self) -> (Vec<Pane>, usize) {
+        let panes = Pane::shown(self.picture);
+        let at = panes.iter().position(|pane| *pane == self.pane).unwrap_or(0);
+        (panes, at)
+    }
+}
 
 impl Inspector {
     /// Where the panel was last drawn.
     pub(super) fn place(&self) -> [i32; 4] {
         self.place
-    }
-
-    fn tabs(&self) -> &'static [&'static str] {
-        if self.picture { &PICTURE_TABS } else { &TABS }
     }
 
     /// Whether the Structure tab is the one up.
@@ -120,19 +135,19 @@ impl Inspector {
 }
 
 /// A card of label and value rows, under a heading.
-struct Card {
+pub(super) struct Card {
     title: String,
     badges: Vec<String>,
     rows: Vec<(String, String)>,
 }
 
 impl Card {
-    fn new(title: impl Into<String>) -> Card {
+    pub(super) fn new(title: impl Into<String>) -> Card {
         Card { title: title.into(), badges: Vec::new(), rows: Vec::new() }
     }
 
     /// A row, when there is something to say.
-    fn row(&mut self, label: &str, value: Option<String>) {
+    pub(super) fn row(&mut self, label: &str, value: Option<String>) {
         if let Some(value) = value.filter(|value| !value.is_empty()) {
             self.rows.push((label.to_string(), value));
         }
@@ -149,6 +164,11 @@ pub(super) enum Hit {
     Pin,
     /// Out into a window of its own, or back.
     PopOut,
+    /// A command, as from a key or the menu: the transport bar's and the
+    /// action rows', run on the next turn of the event loop.
+    Run(Command),
+    /// The transport bar's thin bar, where it starts and how wide.
+    Scrub(i32, i32),
     /// The HDR tab: the headroom up or down, and the 2094-50 curves as
     /// gain rather than output.
     Headroom(bool),
@@ -185,6 +205,9 @@ pub struct Inspector {
     drawn: Vec<(Hit, [i32; 4])>,
     /// The 2094-50 curves shown as gain in stops rather than output.
     gain: bool,
+    /// The tab up, and the transport bar's buttons as drawn this frame.
+    pane: Pane,
+    transport: Vec<(Hit, [i32; 4])>,
 }
 
 fn text_of(value: &Value) -> Option<String> {
@@ -248,7 +271,12 @@ impl App {
         std::thread::spawn(move || {
             let _ = proxy.send_event(Event::Inspected(id, Inspection::read(&path)));
         });
-        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false });
+        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false, pane: Pane::Overview, transport: Vec::new() });
+        // On the tab used last.
+        let pane = self.inspect_pane;
+        if let Some(inspector) = &mut self.inspector {
+            inspector.set_pane(pane);
+        }
         // Out in its own window, if that is where it was last.
         self.reopen_out(Popped::Inspector);
         self.menu = None;
@@ -263,11 +291,11 @@ impl App {
         if inspector.id == id {
             return;
         }
-        let tab = inspector.tab;
-        let same_kind = inspector.picture == !files::is_video(&self.files[id]);
+        // On the same tab, where the other file has it.
+        let pane = inspector.pane;
         self.open_inspector();
-        if let Some(inspector) = self.inspector.as_mut().filter(|_| same_kind) {
-            inspector.tab = tab;
+        if let Some(inspector) = self.inspector.as_mut() {
+            inspector.set_pane(pane);
         }
     }
 
@@ -346,13 +374,24 @@ impl App {
             Key::Named(NamedKey::Escape | NamedKey::F3 | NamedKey::F12) => self.inspector = None,
             // The keys that open it close it too, as a browser's do.
             Key::Character("I" | "i") if self.modifiers.control_key() && self.modifiers.shift_key() => self.inspector = None,
-            Key::Named(NamedKey::Tab | NamedKey::ArrowRight) if !shift => (inspector.tab, inspector.scroll) = ((inspector.tab + 1) % inspector.tabs().len(), 0),
-            Key::Named(NamedKey::Tab | NamedKey::ArrowLeft) => (inspector.tab, inspector.scroll) = ((inspector.tab + inspector.tabs().len() - 1) % inspector.tabs().len(), 0),
+            Key::Named(NamedKey::Tab) => {
+                // The next tab, or with Shift the one before; the arrows are
+                // the video's, to seek with.
+                let back = shift;
+                let (panes, at) = inspector.panes();
+                let pane = panes[if back { (at + panes.len() - 1) % panes.len() } else { (at + 1) % panes.len() }];
+                inspector.set_pane(pane);
+                self.inspect_pane = pane;
+            }
             Key::Named(NamedKey::ArrowDown) => inspector.scroll += step,
             Key::Named(NamedKey::ArrowUp) => inspector.scroll -= step,
             Key::Named(NamedKey::PageDown) => inspector.scroll += inspector.view_h * 4 / 5,
             Key::Named(NamedKey::PageUp) => inspector.scroll -= inspector.view_h * 4 / 5,
-            Key::Character(digit @ ("1" | "2" | "3" | "4" | "5")) if digit.parse::<usize>().unwrap_or(9) <= inspector.tabs().len() => (inspector.tab, inspector.scroll) = (digit.parse::<usize>().unwrap_or(1) - 1, 0),
+            Key::Character(digit @ ("1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")) if digit.parse::<usize>().unwrap_or(99) <= inspector.panes().0.len() => {
+                let pane = inspector.panes().0[digit.parse::<usize>().unwrap_or(1) - 1];
+                inspector.set_pane(pane);
+                self.inspect_pane = pane;
+            }
             Key::Character("c") => {
                 self.inspector_hit(Hit::CopyAll);
                 return true;
@@ -379,11 +418,29 @@ impl App {
         self.redraw();
     }
 
-    pub(super) fn inspector_click(&mut self, x: f64, y: f64) {
+    pub(super) fn inspector_click(&mut self, x: f64, y: f64, event_loop: &ActiveEventLoop) {
+        // The Files tab's list answers as the list does.
+        if let Some(panel) = self.list_panel().filter(|panel| panel.embedded && panel.holds(x, y)) {
+            let within = x as i32 - panel.left;
+            let in_field = self.list_field().is_some_and(|[fx, fy, w, h]| (fx..fx + w).contains(&within) && (fy..fy + h).contains(&(y as i32)));
+            if !in_field {
+                self.list_search = None;
+            }
+            self.list_click(x, y, in_field, true, event_loop);
+            return self.redraw();
+        }
         let Some(inspector) = &self.inspector else { return };
         let on = |[left, top, w, h]: [i32; 4]| (left..left + w).contains(&(x as i32)) && (top..top + h).contains(&(y as i32));
-        if let Some((hit, _)) = inspector.drawn.iter().rev().find(|(_, place)| on(*place)).cloned() {
-            self.inspector_hit(hit);
+        // The transport bar first, drawn over the panel every frame.
+        let hit = inspector.transport.iter().chain(inspector.drawn.iter().rev()).find(|(_, place)| on(*place)).cloned();
+        match hit {
+            // Along the thin bar: to that point of the video.
+            Some((Hit::Scrub(bar_x, bar_w), _)) => {
+                let fraction = ((x - f64::from(bar_x)) / f64::from(bar_w.max(1))).clamp(0.0, 1.0);
+                self.seek_to(fraction, true);
+            }
+            Some((hit, _)) => self.inspector_hit(hit),
+            None => {}
         }
     }
 
@@ -397,11 +454,18 @@ impl App {
             }
         };
         match hit {
-            Hit::Tab(tab) => {
+            Hit::Tab(at) => {
                 if let Some(inspector) = &mut self.inspector {
-                    (inspector.tab, inspector.scroll) = (tab, 0);
+                    let (panes, _) = inspector.panes();
+                    if let Some(pane) = panes.get(at) {
+                        inspector.set_pane(*pane);
+                        self.inspect_pane = *pane;
+                        self.save_panels();
+                    }
                 }
             }
+            Hit::Run(command) => self.pending_command = Some(command),
+            Hit::Scrub(..) => {}
             Hit::Close => self.inspector = None,
             Hit::Pin => self.toggle_inspector_pin(),
             Hit::PopOut => self.toggle_popout(Popped::Inspector),
@@ -643,13 +707,23 @@ impl App {
         let over = ((left..left + width).contains(&mouse.0) && (top..top + height).contains(&mouse.1)).then_some(mouse);
         let hdr_info = inspector.found.as_ref().and_then(|found| found.as_ref().ok()).and_then(|found| found.hdr.as_ref());
         let hdr = (inspector.tab == 2 && !inspector.picture).then(|| self.hdr_key(inspector.id, hdr_info, inspector.gain));
-        let key = PanelKey { tab: inspector.tab, scroll: inspector.scroll, found: inspector.found.is_some(), selected: inspector.selected.clone(), open: inspector.open.len(), follow: inspector.follow, pointer: over, place: inspector.place, window: (canvas.width, canvas.height), pinned: self.inspector_pinned, hdr };
+        // The transport bar along the foot, drawn afresh every frame.
+        let transport_h = pad * 5 / 2;
+        // Performance's figures change all the time: drawn again twice a second.
+        let tick = match inspector.pane {
+            Pane::Performance => Some(self.perf.arrived.elapsed().as_millis() / 500),
+            // The list lights up under the pointer and plays along: every frame.
+            Pane::Files => Some(self.perf.arrived.elapsed().as_nanos()),
+            _ => None,
+        };
+        let key = PanelKey { pane: inspector.pane, tick, tab: inspector.tab, scroll: inspector.scroll, found: inspector.found.is_some(), selected: inspector.selected.clone(), open: inspector.open.len(), follow: inspector.follow, pointer: over, place: inspector.place, window: (canvas.width, canvas.height), pinned: self.inspector_pinned, hdr };
         // Over the picture it lets it show through faintly, as the file
         // list does there: the panel, kept whole, laid on with a little of
         // what is under it.
         let through = if self.inspector_pinned || popped { 0 } else { 24 };
         if let Some((_, pixels)) = inspector.kept.as_ref().filter(|(was, pixels)| *was == key && pixels.len() == (width * height) as usize) {
             canvas.dissolve(left, top, width, height, pixels, 256 - through);
+            inspector.transport = self.draw_transport(canvas, text, px, [left, top + height - transport_h, width, transport_h], inspector.picture);
             self.inspector = Some(inspector);
             return;
         }
@@ -689,28 +763,47 @@ impl App {
         canvas.fill(pad / 2 + left, y, width - pad, 1, MENU_EDGE_COLOR);
         y += pad / 2;
 
-        // The tabs, as the list's order buttons: pills sharing the row.
-        let tabs = inspector.tabs();
+        // The tabs, as the list's order buttons: pills, as many to a row as
+        // fit, the rows filled out evenly.
+        let (panes, current) = inspector.panes();
         let gap = pad / 3;
         let tab_h = small_line + pad / 4;
-        let tab_w = (width - pad - gap * (tabs.len() as i32 - 1)) / tabs.len() as i32;
-        for (at, name) in tabs.iter().enumerate() {
-            let x = left + pad / 2 + at as i32 * (tab_w + gap);
-            let on = at == inspector.tab;
-            let hovered = (x..x + tab_w).contains(&mouse.0) && (y..y + tab_h).contains(&mouse.1);
-            let lit = on || hovered;
-            canvas.round_fill(x, y, tab_w, tab_h, tab_h / 2, if lit { accent() } else { PLACEHOLDER_COLOR }, if hovered && !on { 200 } else { 256 });
-            canvas.round_outline(x, y, tab_w, tab_h, tab_h / 2, 1, if lit { accent() } else { MENU_EDGE_COLOR });
-            let name = clipped(text, name, tab_w - pad / 2, small);
-            let name_w = text.width(&name, small);
-            text.draw(canvas, x + (tab_w - name_w) / 2, y + (tab_h - small_line) / 2, small, if lit { on_accent() } else { TEXT_COLOR }, &name);
-            inspector.drawn.push((Hit::Tab(at), [x, y, tab_w, tab_h]));
+        let widths: Vec<i32> = panes.iter().map(|pane| text.width(pane.name(), small) + pad).collect();
+        let room = width - pad;
+        let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+        let mut used = 0;
+        for (at, w) in widths.iter().enumerate() {
+            if used > 0 && used + gap + w > room {
+                rows.push(Vec::new());
+                used = 0;
+            }
+            used += if used > 0 { gap } else { 0 } + w;
+            rows.last_mut().expect("a row").push(at);
         }
-        y += tab_h + pad;
+        for row in &rows {
+            let natural: i32 = row.iter().map(|at| widths[*at]).sum::<i32>() + gap * (row.len() as i32 - 1);
+            let extra = (room - natural) / row.len() as i32;
+            let mut x = left + pad / 2;
+            for at in row {
+                let tab_w = widths[*at] + extra;
+                let on = *at == current;
+                let hovered = (x..x + tab_w).contains(&mouse.0) && (y..y + tab_h).contains(&mouse.1);
+                let lit = on || hovered;
+                canvas.round_fill(x, y, tab_w, tab_h, tab_h / 2, if lit { accent() } else { PLACEHOLDER_COLOR }, if hovered && !on { 200 } else { 256 });
+                canvas.round_outline(x, y, tab_w, tab_h, tab_h / 2, 1, if lit { accent() } else { MENU_EDGE_COLOR });
+                let name = panes[*at].name();
+                let name_w = text.width(name, small);
+                text.draw(canvas, x + (tab_w - name_w) / 2, y + (tab_h - small_line) / 2, small, if lit { on_accent() } else { TEXT_COLOR }, name);
+                inspector.drawn.push((Hit::Tab(*at), [x, y, tab_w, tab_h]));
+                x += tab_w + gap;
+            }
+            y += tab_h + gap;
+        }
+        y += pad - gap;
 
-        // The content, scrolled, clipped to the panel above the key line.
+        // The content, scrolled, clipped to the panel above the transport bar.
         let view_top = y;
-        let view_bottom = top + height - pad - small_line - pad / 2;
+        let view_bottom = top + height - transport_h;
         inspector.view_h = view_bottom - view_top;
         let mut sheet = canvas.copy(left, view_top, width, inspector.view_h);
         let mut drawn = Vec::new();
@@ -724,8 +817,25 @@ impl App {
                 None => text.draw(&mut sub, pad * 3 / 2, pad, px, DIM_TEXT_COLOR, "Reading…"),
                 Some(Err(error)) => text.draw(&mut sub, pad * 3 / 2, pad, px, DIM_TEXT_COLOR, &format!("Not readable · {error}")),
                 Some(Ok(found)) => {
-                    let cards = self.inspector_cards(found, inspector.tab);
+                    // The tab's cards: those of one of the first tabs, or its own.
+                    let mut cards = match inspector.pane {
+                        Pane::Issues => self.issue_cards(found),
+                        Pane::Performance => self.performance_cards(),
+                        _ if inspector.tab == usize::MAX => Vec::new(),
+                        _ => self.inspector_cards(found, inspector.tab),
+                    };
+                    // A picture's tags are its EXIF and its XMP both.
+                    if inspector.picture && inspector.pane == Pane::Metadata {
+                        cards.extend(self.inspector_cards(found, 3));
+                    }
                     content_h = self.draw_cards(&mut sub, text, px, &cards, inner_w, offset, mouse, &mut drawn, -inspector.scroll);
+                    // The tabs drawn here rather than as cards.
+                    content_h = match inspector.pane {
+                        Pane::Convert => self.draw_actions(&mut sub, text, px, &self.convert_actions(inspector.picture), inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
+                        Pane::Compare => self.draw_actions(&mut sub, text, px, &self.compare_actions(), inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
+                        Pane::Timeline => self.draw_timeline(&mut sub, text, px, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
+                        _ => content_h,
+                    };
                     // The HDR tab: a bar for each HDR10+ scene, its brightest.
                     if inspector.tab == 2 && !inspector.picture {
                         content_h = self.draw_scene_chart(&mut sub, text, px, found, inner_w, content_h - inspector.scroll, offset, &mut drawn) + inspector.scroll;
@@ -757,19 +867,35 @@ impl App {
             canvas.dissolve(left, view_top, width, inspector.view_h, &sheet, 256);
         }
         inspector.content_h = content_h;
+        // The Files tab: the file list, drawn as it is beside the picture.
+        if inspector.pane == Pane::Files {
+            self.inspector_list.set(Some([left, view_top, width, view_bottom]));
+            self.inspector_list_drawing.set(true);
+            if let Some(panel) = self.list_panel() {
+                for pos in panel.first..panel.first + panel.rows {
+                    self.want_duration(self.list[pos]);
+                }
+                let mut column = canvas.copy(left, 0, width, view_bottom);
+                if column.len() == (width * view_bottom) as usize {
+                    self.draw_list(&mut Canvas::new(&mut column, width as u32, view_bottom as u32), text, &panel);
+                    canvas.paste(left, view_top, width, view_bottom - view_top, &column[(view_top * width) as usize..]);
+                }
+            }
+            self.inspector_list_drawing.set(false);
+        } else {
+            self.inspector_list.set(None);
+        }
         // Hits inside the content count only where it shows.
         inspector.drawn.extend(drawn.into_iter().filter(|(_, [_, y, _, h])| *y + *h > view_top && *y < view_bottom));
         // A sign that there is more below.
         if content_h - inspector.scroll > inspector.view_h {
             canvas.fill(inner, view_bottom - 1, inner_w, 1, MENU_EDGE_COLOR);
         }
-        let keys = if inspector.on_structure() { "↑↓ boxes  ·  → open  ·  ← close  ·  Tab next tab  ·  c copy JSON  ·  Esc" } else { "Tab next tab  ·  ↑↓ scroll  ·  click to copy  ·  c copy JSON  ·  Esc" };
-        let keys = clipped(text, keys, inner_w, small);
-        text.draw(canvas, inner, top + height - pad - small_line, small, DIM_TEXT_COLOR, &keys);
         inspector.kept = Some((key, canvas.copy(left, top, width, height)));
         if let Some(behind) = behind.filter(|behind| behind.len() == (width * height) as usize) {
             canvas.dissolve(left, top, width, height, &behind, through);
         }
+        inspector.transport = self.draw_transport(canvas, text, px, [left, top + height - transport_h, width, transport_h], inspector.picture);
         self.inspector = Some(inspector);
     }
 
@@ -1278,6 +1404,9 @@ impl App {
 /// panel drawn last is the panel.
 #[derive(Clone, PartialEq, Debug)]
 pub struct PanelKey {
+    pane: Pane,
+    /// For a tab whose figures keep changing: which half second it is.
+    tick: Option<u128>,
     tab: usize,
     scroll: i32,
     found: bool,

@@ -41,7 +41,7 @@ impl App {
             return None;
         }
         let (x, y, grip) = (x as i32, y as i32, self.grip());
-        if let Some(panel) = self.list_panel() {
+        if let Some(panel) = self.list_panel().filter(|panel| !panel.embedded) {
             let edge = if self.list_right { panel.left } else { panel.left + panel.width };
             if (x - edge).abs() <= grip && y < panel.bottom {
                 return Some(PanelEdge::List);

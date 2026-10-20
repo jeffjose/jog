@@ -186,7 +186,7 @@ impl App {
                 match what {
                     Popped::Inspector if pressed && *button == MouseButton::Left => {
                         let mouse = self.popouts[at].mouse;
-                        self.with_popout(what, |app| app.inspector_click(mouse.0, mouse.1));
+                        self.with_popout(what, |app| app.inspector_click(mouse.0, mouse.1, event_loop));
                     }
                     Popped::Inspector => {}
                     Popped::List if pressed && *button == MouseButton::Left => self.with_popout(what, |app| app.list_popout_press(event_loop)),

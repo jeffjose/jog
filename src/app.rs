@@ -70,6 +70,8 @@ mod scenes_strip;
 mod scripted;
 mod inspect;
 mod inspect_hdr;
+mod devtools;
+use devtools::Pane;
 mod track_editor;
 mod tracks;
 mod triaging;
@@ -1273,6 +1275,14 @@ pub struct App {
     /// The panels that go out in windows of their own when opened, and
     /// where each one's window last was: x, y, width, height.
     out: HashSet<Popped>,
+    /// The tab Inspect opens on, the one used last; and a command one of
+    /// its buttons asked for, run on the next turn of the event loop.
+    inspect_pane: Pane,
+    pending_command: Option<Command>,
+    /// Where Inspect's Files tab has the list, as left, top, width,
+    /// bottom; and whether it is being drawn there just now.
+    inspector_list: Cell<Option<[i32; 4]>>,
+    inspector_list_drawing: Cell<bool>,
     popout_at: HashMap<Popped, [i32; 4]>,
     strip_docked: bool,
     /// Whether files are being decided about one after another; what has
@@ -1857,6 +1867,10 @@ impl App {
             list_units: pins.list_width.unwrap_or(resize::PANEL_UNITS),
             inspector_units: pins.inspector_width.unwrap_or(resize::PANEL_UNITS),
             out: pins.out.clone(),
+            inspect_pane: pins.pane.unwrap_or_default(),
+            pending_command: None,
+            inspector_list: Cell::new(None),
+            inspector_list_drawing: Cell::new(false),
             popout_at: pins.at.clone(),
             edge_under: None,
             dialog_moved: RefCell::new(HashMap::new()),
@@ -3072,7 +3086,7 @@ impl App {
     fn stage(&self) -> (i32, (u32, u32)) {
         let (width, height) = self.window_size();
         let (mut left, mut width) = (0, width as i32);
-        if let Some(panel) = self.list_panel().filter(|_| self.list_pinned) {
+        if let Some(panel) = self.list_panel().filter(|panel| self.list_pinned && !panel.embedded) {
             width -= panel.width;
             left = if self.list_right { 0 } else { panel.width };
         }
@@ -3100,7 +3114,7 @@ impl App {
     /// How far in from the right edge of the window things there stand:
     /// by the width of the file list, when that is on the right.
     fn right_inset(&self) -> i32 {
-        self.list_panel().filter(|_| self.list_right).map_or(0, |panel| panel.width)
+        self.list_panel().filter(|panel| self.list_right && !panel.embedded).map_or(0, |panel| panel.width)
     }
 
     // ---- Shell commands -------------------------------------------------
@@ -3194,7 +3208,7 @@ impl App {
         let px = panel.px as i32;
         let side = px * 3 / 2;
         let right = panel.width - 4 * side - px / 2 - px;
-        Some([px / 2, px / 2, right - px / 2 - px / 3, side])
+        Some([px / 2, panel.head + px / 2, right - px / 2 - px / 3, side])
     }
 
     /// Puts the keyboard in the file list's search box, with whatever the
@@ -3582,12 +3596,16 @@ struct ListPanel {
     first: usize,
     rows: usize,
     px: u32,
+    /// Where its heading starts: the top of the window, or below the tabs
+    /// of Inspect, whose Files tab it is drawn in, `embedded`.
+    head: i32,
+    embedded: bool,
 }
 
 impl ListPanel {
     /// Whether a window position is on the list.
     fn holds(&self, x: f64, y: f64) -> bool {
-        (self.left..self.left + self.width).contains(&(x as i32)) && (y as i32) < self.bottom
+        (self.left..self.left + self.width).contains(&(x as i32)) && (self.head..self.bottom).contains(&(y as i32))
     }
 }
 
@@ -4132,6 +4150,11 @@ impl App {
     fn waiting(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         self.tend_popouts(event_loop);
+        // What one of Inspect's buttons asked for.
+        if let Some(command) = self.pending_command.take() {
+            self.execute(command, event_loop);
+            self.redraw();
+        }
         self.hitches.flush(Some(now));
         if self.settle_at.is_some_and(|at| at <= now) {
             self.settle_at = None;

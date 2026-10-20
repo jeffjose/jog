@@ -1,0 +1,367 @@
+//! Inspect as jog's developer tools: one panel to open, do everything in,
+//! and close. Its tabs bring together what jog has elsewhere (the file
+//! list, the tracks, the HDR charts, Convert and Compare, the debug
+//! figures) and add what only a power user wants (Issues); a transport bar
+//! along its foot plays and steps whatever tab is up. Everything stays
+//! where it was as well.
+
+use super::inspect::{Card, Hit};
+use super::*;
+
+/// The tabs, in order.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Pane {
+    Files,
+    #[default]
+    Overview,
+    Tracks,
+    Color,
+    Timeline,
+    Convert,
+    Compare,
+    Structure,
+    Metadata,
+    Performance,
+    Issues,
+}
+
+impl Pane {
+    pub const ALL: [Pane; 11] = [
+        Pane::Files,
+        Pane::Overview,
+        Pane::Tracks,
+        Pane::Color,
+        Pane::Timeline,
+        Pane::Convert,
+        Pane::Compare,
+        Pane::Structure,
+        Pane::Metadata,
+        Pane::Performance,
+        Pane::Issues,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Pane::Files => "Files",
+            Pane::Overview => "Overview",
+            Pane::Tracks => "Tracks",
+            Pane::Color => "Color",
+            Pane::Timeline => "Timeline",
+            Pane::Convert => "Convert",
+            Pane::Compare => "Compare",
+            Pane::Structure => "Structure",
+            Pane::Metadata => "Metadata",
+            Pane::Performance => "Performance",
+            Pane::Issues => "Issues",
+        }
+    }
+
+    /// Whether the tab has anything for a picture, or for a video.
+    pub fn applies(self, picture: bool) -> bool {
+        !(picture && matches!(self, Pane::Tracks | Pane::Timeline | Pane::Structure))
+    }
+
+    /// The tabs there are for a picture, or for a video.
+    pub fn shown(picture: bool) -> Vec<Pane> {
+        Pane::ALL.into_iter().filter(|pane| pane.applies(picture)).collect()
+    }
+
+    /// Which of the inspector's first tabs this one's cards and charts
+    /// are: a video's Summary, Streams, HDR, Structure, Tags; a picture's
+    /// Summary, EXIF, Color, XMP. None for one drawn afresh here.
+    pub fn legacy(self, picture: bool) -> Option<usize> {
+        match (self, picture) {
+            (Pane::Overview, _) => Some(0),
+            (Pane::Tracks, false) => Some(1),
+            (Pane::Color, _) => Some(2),
+            (Pane::Structure, false) => Some(3),
+            (Pane::Metadata, false) => Some(4),
+            (Pane::Metadata, true) => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Its name in the panels file, to open on it next time.
+    pub fn from_name(name: &str) -> Option<Pane> {
+        Pane::ALL.into_iter().find(|pane| pane.name().eq_ignore_ascii_case(name))
+    }
+}
+
+/// How bad an issue is.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Severity {
+    Note,
+    Warning,
+}
+
+impl App {
+    /// What is off about a file, as a careful look at it would find.
+    pub(super) fn issues(&self, found: &super::inspect::Inspection) -> Vec<(Severity, String)> {
+        let mut issues = Vec::new();
+        if let Some(video) = found.video() {
+            let missing = |key: &str| video[key].as_str().is_none_or(|value| value == "unknown");
+            if missing("color_primaries") || missing("color_transfer") || missing("color_space") {
+                issues.push((Severity::Warning, "Color not tagged: players guess its primaries, curve or matrix, and may guess wrong".to_string()));
+            }
+            let (rate, average) = (video["r_frame_rate"].as_str().unwrap_or_default(), video["avg_frame_rate"].as_str().unwrap_or_default());
+            if !rate.is_empty() && !average.is_empty() && rate != average && average != "0/0" {
+                issues.push((Severity::Note, format!("Variable frame rate: {rate} at most, {average} on average")));
+            }
+            let transfer = video["color_transfer"].as_str().unwrap_or_default();
+            let hdr = found.hdr.as_ref();
+            if transfer == "smpte2084" && hdr.is_some_and(|hdr| hdr.mastering.is_none()) && found.side("Mastering display metadata").is_none() {
+                issues.push((Severity::Note, "PQ without mastering display metadata: tone mapping has to guess the peak".to_string()));
+            }
+            if transfer == "smpte2084" && hdr.is_some_and(|hdr| hdr.light.is_none()) && found.side("Content light level metadata").is_none() {
+                issues.push((Severity::Note, "PQ without MaxCLL and MaxFALL".to_string()));
+            }
+            if transfer != "smpte2084" && transfer != "arib-std-b67" && hdr.is_some_and(|hdr| !hdr.hdr10plus.is_empty() || !hdr.agtm.is_empty()) {
+                issues.push((Severity::Warning, "HDR metadata in a video not coded as HDR".to_string()));
+            }
+        }
+        // An MP4 whose index is at its end has to be read through before
+        // it can play from a server.
+        if let Ok(nodes) = found.tree.as_ref() {
+            let order: Vec<&str> = nodes.iter().map(|node| node.name.as_str()).collect();
+            if let (Some(moov), Some(mdat)) = (order.iter().position(|name| *name == "moov"), order.iter().position(|name| *name == "mdat")) {
+                if moov > mdat {
+                    issues.push((Severity::Note, "Index (moov) after the media: not quick to start over a network".to_string()));
+                }
+            }
+        }
+        if let Some(picture) = found.picture.as_ref() {
+            if picture.icc.is_none() && picture.color.cicp.is_none() && picture.color.png_gamma.is_none() {
+                issues.push((Severity::Note, "No color profile: shown as sRGB".to_string()));
+            }
+        }
+        issues
+    }
+
+    /// The Issues tab's cards.
+    pub(super) fn issue_cards(&self, found: &super::inspect::Inspection) -> Vec<Card> {
+        let issues = self.issues(found);
+        let mut card = Card::new(format!("Issues · {}", issues.len()));
+        if issues.is_empty() {
+            card.row("Found", Some("Nothing off".into()));
+        }
+        for (severity, words) in issues {
+            card.row(if severity == Severity::Warning { "Warning" } else { "Note" }, Some(words));
+        }
+        vec![card]
+    }
+
+    /// The Performance tab's cards: the debug overlay's figures.
+    pub(super) fn performance_cards(&mut self) -> Vec<Card> {
+        let mut cards: Vec<Card> = self
+            .debug_groups()
+            .into_iter()
+            .map(|(title, rows)| {
+                let mut card = Card::new(title);
+                for (name, value) in rows {
+                    card.row(name, Some(value));
+                }
+                card
+            })
+            .collect();
+        let decoder = if crate::mpv::HWDEC.load(atomic::Ordering::Relaxed) { "GPU where it can, else CPU" } else { "CPU (--no-hwdec)" };
+        let mut playback = Card::new("Playback");
+        playback.row("Decoding", Some(decoder.to_string()));
+        cards.insert(0, playback);
+        cards
+    }
+}
+
+/// An action row: a pill the width of the panel, its words, what it runs.
+pub(super) struct Action {
+    pub words: String,
+    pub hit: Hit,
+}
+
+impl App {
+    /// The Convert tab's actions, for a picture or a video.
+    pub(super) fn convert_actions(&self, picture: bool) -> Vec<(String, Vec<Action>)> {
+        use crate::convert::Format;
+        use crate::transcode::{Codec, Container, Target};
+        let run = |words: &str, command: Command| Action { words: words.to_string(), hit: Hit::Run(command) };
+        if picture {
+            vec![
+                ("Convert".to_string(), vec![run("Open the Convert window…   K", Command::ConvertPanel)]),
+                (
+                    "At once, with the settings last used".to_string(),
+                    [("JPEG XL", Format::Jxl), ("AVIF", Format::Avif), ("JPEG", Format::Jpeg), ("PNG", Format::Png), ("WebP", Format::WebP)]
+                        .into_iter()
+                        .map(|(name, format)| run(name, Command::Convert(format)))
+                        .collect(),
+                ),
+                ("Save".to_string(), vec![run("Save a copy   S", Command::Save)]),
+            ]
+        } else {
+            let video = |words: &str, codec, container| run(words, Command::ConvertVideo(Target::new(codec, container)));
+            vec![
+                (
+                    "Convert the video".to_string(),
+                    vec![
+                        video("MP4  ·  H.264", Codec::H264, Container::Mp4),
+                        video("MP4  ·  HEVC", Codec::Hevc, Container::Mp4),
+                        video("MKV  ·  AV1", Codec::Av1, Container::Mkv),
+                        video("WebM  ·  AV1", Codec::Av1, Container::WebM),
+                        run("Cancel the encode", Command::CancelEncode),
+                    ],
+                ),
+                ("Save".to_string(), vec![run("Save this frame   S", Command::Save), run("Edit tracks…", Command::EditTracks)]),
+            ]
+        }
+    }
+
+    /// The Compare tab's actions.
+    pub(super) fn compare_actions(&self) -> Vec<(String, Vec<Action>)> {
+        let marked = self.marks.len();
+        let words = match marked {
+            0 => "Mark a file (x), then compare it with this one".to_string(),
+            1 => "Compare with the marked file".to_string(),
+            n => format!("Compare the first two of {n} marked"),
+        };
+        vec![("Compare".to_string(), vec![Action { words, hit: Hit::Run(Command::Compare) }])]
+    }
+
+    /// Draws groups of action rows on `sub` from `y`; returns where they end.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_actions(&self, sub: &mut Canvas, text: &mut Text, px: u32, groups: &[(String, Vec<Action>)], inner_w: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
+        let pad = px as i32;
+        let small = (px * 5 / 6).max(11);
+        let small_line = Text::line_height(small);
+        let line = Text::line_height(px);
+        let x = pad * 3 / 2;
+        let row_h = line + pad / 2;
+        let mut y = y;
+        for (title, actions) in groups {
+            text.draw(sub, x, y, small, DIM_TEXT_COLOR, &title.to_uppercase());
+            y += small_line + pad / 3;
+            for action in actions {
+                let place = [x + offset.0, y + offset.1, inner_w, row_h];
+                let over = (place[0]..place[0] + place[2]).contains(&mouse.0) && (place[1]..place[1] + place[3]).contains(&mouse.1);
+                sub.round_fill(x, y, inner_w, row_h, row_h / 2, if over { accent() } else { 0x26262B }, 256);
+                text.draw(sub, x + pad, y + (row_h - line) / 2, px, if over { on_accent() } else { TEXT_COLOR }, &action.words);
+                drawn.push((action.hit.clone(), place));
+                y += row_h + pad / 3;
+            }
+            y += pad / 2;
+        }
+        y
+    }
+
+    /// The Timeline tab: chapters and sections kept, each a row to click
+    /// to go there.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_timeline(&mut self, sub: &mut Canvas, text: &mut Text, px: u32, inner_w: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
+        let entries = self.entries();
+        let pad = px as i32;
+        let line = Text::line_height(px);
+        let small = (px * 5 / 6).max(11);
+        let small_line = Text::line_height(small);
+        let x = pad * 3 / 2;
+        let row_h = line + pad / 3;
+        let rows = entries.len().max(1) as i32;
+        let card_h = pad + small_line + pad / 2 + rows * row_h + pad / 2;
+        sub.round_fill(x, y, inner_w, card_h, pad / 2, 0x26262B, 256);
+        text.draw(sub, x + pad, y + pad, small, DIM_TEXT_COLOR, &format!("CHAPTERS AND SECTIONS · {}", entries.len()));
+        let mut ry = y + pad + small_line + pad / 2;
+        if entries.is_empty() {
+            text.draw(sub, x + pad, ry, px, DIM_TEXT_COLOR, "None · mark one with Shift+A and Shift+B");
+        }
+        for entry in &entries {
+            let place = [x + offset.0, ry + offset.1, inner_w, row_h];
+            if (place[0]..place[0] + place[2]).contains(&mouse.0) && (place[1]..place[1] + place[3]).contains(&mouse.1) {
+                sub.round_fill(x + pad / 2, ry, inner_w - pad, row_h, pad / 4, 0x3A3A40, 256);
+            }
+            text.draw(sub, x + pad, ry, px, DIM_TEXT_COLOR, &format!("{} – {}", clock(entry.start), clock(entry.end)));
+            let kind = if entry.kept { "section" } else { "chapter" };
+            let title = entry.title.clone().unwrap_or_else(|| kind.to_string());
+            text.draw(sub, x + pad + px as i32 * 9, ry, px, TEXT_COLOR, &title);
+            drawn.push((Hit::Seek(entry.start), place));
+            ry += row_h;
+        }
+        y + card_h + pad
+    }
+
+    /// The transport bar along the inspector's foot, drawn every frame:
+    /// a video's file, seek and play buttons with its time on a thin bar,
+    /// its loop and sound; a picture's previous and next. Returns its hits.
+    pub(super) fn draw_transport(&self, canvas: &mut Canvas, text: &mut Text, px: u32, [left, top, width, height]: [i32; 4], picture: bool) -> Vec<(Hit, [i32; 4])> {
+        let pad = px as i32;
+        let side = pad * 3 / 2;
+        let mouse = (self.mouse.0 as i32, self.mouse.1 as i32);
+        canvas.fill(left, top, width, height, 0x121317);
+        canvas.fill(left, top, width, 1, MENU_EDGE_COLOR);
+        let y = top + (height - side) / 2;
+        let mut x = left + pad / 2;
+        let mut hits = Vec::new();
+        let paused = self.player.as_ref().is_none_or(|player| player.flag("pause") != Some(false));
+        let mut buttons: Vec<(Command, &str, bool)> = vec![(Command::Previous, commands::icons::SKIP_BACK, false)];
+        if !picture {
+            buttons.push((Command::SeekBack, commands::icons::REWIND, false));
+            buttons.push((Command::PlayPause, if paused { commands::icons::PLAY } else { commands::icons::PAUSE }, true));
+            buttons.push((Command::SeekForward, commands::icons::FAST_FORWARD, false));
+        }
+        buttons.push((Command::Next, commands::icons::SKIP_FORWARD, false));
+        for (command, icon, main) in buttons {
+            let place = Button { x, y, width: side, height: side, command };
+            let over = (x..x + side).contains(&mouse.0) && (y..y + side).contains(&mouse.1);
+            draw::round_button(canvas, text, &place, icon, px, over, main, false);
+            hits.push((Hit::Run(command), [x, y, side, side]));
+            x += side + pad / 3;
+        }
+        // At the right: loop and sound, for a video.
+        let mut right = left + width - pad / 2;
+        if !picture {
+            for (command, icon, on) in [
+                (Command::ToggleMute, if self.muted { commands::icons::VOLUME_X } else { commands::icons::VOLUME_2 }, self.muted),
+                (Command::CycleLoop, if self.looping == Looping::File { commands::icons::REPEAT_1 } else { commands::icons::REPEAT }, self.looping != Looping::Off),
+            ] {
+                right -= side;
+                let place = Button { x: right, y, width: side, height: side, command };
+                let over = (right..right + side).contains(&mouse.0) && (y..y + side).contains(&mouse.1);
+                draw::round_button(canvas, text, &place, icon, px, over, on, false);
+                hits.push((Hit::Run(command), [right, y, side, side]));
+                right -= pad / 3;
+            }
+        }
+        // Between them: the time along, and a thin bar to click or drag on.
+        let small = (px * 5 / 6).max(11);
+        let words = match self.video_time() {
+            Some((at, length)) if !picture => format!("{} / {}", clock(at), clock(length)),
+            _ => format!("{} / {}", self.pos + 1, self.list.len()),
+        };
+        let words_w = text.width(&words, small);
+        let time_x = right - pad / 2 - words_w;
+        text.draw(canvas, time_x, top + (height - Text::line_height(small)) / 2, small, DIM_TEXT_COLOR, &words);
+        let (bar_x, bar_w) = (x + pad / 3, time_x - pad - x - pad / 3);
+        if bar_w > pad * 2 {
+            let bar_h = (pad / 4).max(3);
+            let bar_y = top + (height - bar_h) / 2;
+            canvas.round_fill(bar_x, bar_y, bar_w, bar_h, bar_h / 2, 0x2C2D35, 256);
+            let along = match self.video_time() {
+                Some((at, length)) if !picture && length > 0.0 => at / length,
+                _ => (self.pos + 1) as f64 / self.list.len().max(1) as f64,
+            };
+            let done = (f64::from(bar_w) * along.clamp(0.0, 1.0)) as i32;
+            canvas.round_fill(bar_x, bar_y, done.max(bar_h), bar_h, bar_h / 2, accent_soft(), 256);
+            if !picture {
+                hits.push((Hit::Scrub(bar_x, bar_w), [bar_x, top, bar_w, height]));
+            }
+        }
+        hits
+    }
+}
+
+impl App {
+    /// Whether Inspect's Files tab is up where the list is being drawn or
+    /// answered: the main window, or Inspect's own if it is out.
+    pub(super) fn files_tab_up(&self) -> bool {
+        if self.inspector_list_drawing.get() {
+            return true;
+        }
+        let here = (self.drawing_popout == Some(Popped::Inspector)) == self.popped(Popped::Inspector);
+        here && self.inspector.as_ref().is_some_and(|inspector| inspector.pane() == Pane::Files)
+    }
+}

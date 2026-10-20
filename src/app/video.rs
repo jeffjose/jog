@@ -145,7 +145,7 @@ impl App {
         let (end, buttons) = (width as i32, self.bar_buttons().len() as i32);
         let right = unit * 7 + buttons * unit * 9 / 4;
         // Beside the file list when that is up, not under it.
-        let left = self.list_panel().filter(|_| !self.list_right).map_or(0, |panel| panel.width);
+        let left = self.list_panel().filter(|panel| !self.list_right && !panel.embedded).map_or(0, |panel| panel.width);
         let end = end - self.right_inset();
         SeekBar { x: left + unit * 13, width: (end - left - unit * 13 - right).max(1), middle: base - unit * 2, unit, left, end, buttons }
     }

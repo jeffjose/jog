@@ -27,6 +27,8 @@ pub(super) struct Saved {
     /// The panels out in windows of their own, and where each one was.
     pub out: std::collections::HashSet<super::Popped>,
     pub at: std::collections::HashMap<super::Popped, [i32; 4]>,
+    /// The tab Inspect was last on.
+    pub pane: Option<super::Pane>,
 }
 
 /// The panels as last left. The strip's height scale is set as it is read.
@@ -54,6 +56,7 @@ pub(super) fn load() -> Saved {
         inspector_width: number("inspector-width"),
         out,
         at,
+        pane: value("inspect-tab").and_then(super::Pane::from_name),
     }
 }
 
@@ -103,13 +106,14 @@ impl App {
         }
         let word = |pinned: bool| if pinned { "pinned" } else { "over" };
         let text = format!(
-            "list={}\ninspector={}\nstrip={}\nlist-width={:.1}\ninspector-width={:.1}\nstrip-height={:.2}\n{}",
+            "list={}\ninspector={}\nstrip={}\nlist-width={:.1}\ninspector-width={:.1}\nstrip-height={:.2}\ninspect-tab={}\n{}",
             word(self.list_pinned),
             word(self.inspector_pinned),
             word(self.strip_docked),
             self.list_units,
             self.inspector_units,
             super::resize::strip_scale(),
+            self.inspect_pane.name(),
             super::Popped::ALL
                 .into_iter()
                 .map(|what| {

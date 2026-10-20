@@ -672,7 +672,8 @@ impl App {
 
         let blocks = [&exif, &actions, &toast, &error, &footer, &time];
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty() && top_left.is_empty() && debug.is_empty();
-        let panel = if viewing { self.list_panel() } else { None };
+        // In Inspect's Files tab, it is drawn there instead.
+        let panel = if viewing { self.list_panel().filter(|panel| !panel.embedded) } else { None };
         let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some() || self.compare.is_some() || self.track_picker.is_some() || self.inspector.is_some() || self.track_editor.is_some();
         // The filmstrip has words of its own: the lengths of its videos.
         let boxes = boxes || self.palette.is_some() || strip.is_some() || scene_strip.is_some() || self.overview.is_some() || self.triage_on;
@@ -1693,6 +1694,16 @@ impl App {
     /// Where the file list goes, when it is open: down the left side, above
     /// the filmstrip, with the file on view kept in the middle.
     pub(super) fn list_panel(&self) -> Option<ListPanel> {
+        // In Inspect's Files tab, in the part of it that tab has.
+        if let Some([left, head, width, bottom]) = self.inspector_list.get().filter(|_| self.files_tab_up()) {
+            let px = ui_px(self.window_size().1);
+            let row_height = Text::line_height(px) + px as i32 / 2;
+            let top = head + Text::line_height(px) * 2 + px as i32 * 3;
+            let rows = (((bottom - top) / row_height).max(1) as usize).min(self.list.len());
+            let scrolled = self.list_scroll.filter(|(pos, len, _)| (*pos, *len) == (self.pos, self.list.len()));
+            let first = scrolled.map_or(self.pos.saturating_sub(rows / 2), |(_, _, first)| first).min(self.list.len() - rows);
+            return Some(ListPanel { left, width, bottom, top, row_height, first, rows, px, head, embedded: true });
+        }
         if !self.show_list || self.grid.is_some() {
             return None;
         }
@@ -1714,7 +1725,7 @@ impl App {
         let first = scrolled.map_or(self.pos.saturating_sub(rows / 2), |(_, _, first)| first).min(self.list.len() - rows);
         let panel_width = if out { width as i32 } else { panel_width(width as i32, px, self.list_units) };
         let left = if self.list_right { width as i32 - panel_width } else { 0 };
-        Some(ListPanel { left, width: panel_width, bottom, top, row_height, first, rows, px })
+        Some(ListPanel { left, width: panel_width, bottom, top, row_height, first, rows, px, head: 0, embedded: false })
     }
 
     /// Asks for the length of a video, once; `Event::Duration` brings it.
@@ -1861,16 +1872,16 @@ impl App {
         let px = panel.px as i32;
         // The cross, at the right of the heading.
         let side = px * 3 / 2;
-        let mut buttons = vec![Button { x: panel.width - side - px / 2, y: px / 2, width: side, height: side, command: Command::ToggleList }];
+        let mut buttons = vec![Button { x: panel.width - side - px / 2, y: panel.head + px / 2, width: side, height: side, command: Command::ToggleList }];
         // Beside it, the search: a button that opens the box to type in,
         // or, with the list narrowed, the one that widens it again.
         let beside = if self.list_searching() { Command::ShowAllHere } else { Command::ListSearch };
-        buttons.push(Button { x: panel.width - 2 * side - px / 2 - px / 3, y: px / 2, width: side, height: side, command: beside });
+        buttons.push(Button { x: panel.width - 2 * side - px / 2 - px / 3, y: panel.head + px / 2, width: side, height: side, command: beside });
         // Then the pin, which stands the list beside the picture and not
         // over it, and the one that moves it to the other side.
         // And the loop, for the whole list: off, this video, or all of them.
         for (at, command) in [(2, Command::ListPin), (3, Command::ListFlip), (4, Command::CycleLoop), (5, Command::ListPopOut)] {
-            buttons.push(Button { x: panel.width - (at + 1) * side - px / 2 - at * px / 3, y: px / 2, width: side, height: side, command });
+            buttons.push(Button { x: panel.width - (at + 1) * side - px / 2 - at * px / 3, y: panel.head + px / 2, width: side, height: side, command });
         }
         // The orders, sharing the width of the row under the heading.
         let orders = [Command::SortBy(Sort::Name), Command::SortBy(Sort::Newest), Command::SortBy(Sort::Smallest), Command::Shuffle, Command::ReverseOrder];
@@ -1878,6 +1889,20 @@ impl App {
         let width = (panel.width - px - gap * (orders.len() as i32 - 1)) / orders.len() as i32;
         let top = panel.top - px / 2 - px / 2 - height;
         buttons.extend(orders.into_iter().enumerate().map(|(at, command)| Button { x: px / 2 + at as i32 * (width + gap), y: top, width, height, command }));
+        // In Inspect's Files tab, the list is a tab: what closes, pins,
+        // flips or pops it out is Inspect's to do. Search and loop stay, in
+        // the corner.
+        if panel.embedded {
+            let side = px * 3 / 2;
+            let mut round = 0;
+            buttons.retain(|button| !matches!(button.command, Command::ToggleList | Command::ListPin | Command::ListFlip | Command::ListPopOut));
+            for button in &mut buttons {
+                if matches!(button.command, Command::ListSearch | Command::ShowAllHere | Command::CycleLoop) {
+                    button.x = panel.width - (round + 1) * side - px / 2 - round * px / 3;
+                    round += 1;
+                }
+            }
+        }
         buttons
     }
 
@@ -1906,11 +1931,14 @@ impl App {
         // Pinned, it is beside the picture and has a ground of its own;
         // otherwise it lies over the picture, which shows through darkly.
         match self.list_pinned {
+            _ if panel.embedded => {}
             true => canvas.fill(0, 0, panel.width, panel.bottom, GRID_COLOR),
             false => canvas.shade(0, 0, panel.width, panel.bottom, 36),
         }
         // A line down the side that faces the picture.
-        canvas.fill(if self.list_right { 0 } else { panel.width - 1 }, 0, 1, panel.bottom, MENU_EDGE_COLOR);
+        if !panel.embedded {
+            canvas.fill(if self.list_right { 0 } else { panel.width - 1 }, 0, 1, panel.bottom, MENU_EDGE_COLOR);
+        }
 
         // The heading: how many files, and what they are narrowed to, with
         // a cross at its right to close the list. Under it a row of
@@ -1953,7 +1981,7 @@ impl App {
             None => {
                 let heading = format!("{} files", self.list.len());
                 let heading = clipped(text, &heading, panel.width - px as i32 * 10, px);
-                text.draw(canvas, pad * 2, px as i32 * 3 / 4, px, TEXT_COLOR, &heading);
+                text.draw(canvas, pad * 2, panel.head + px as i32 * 3 / 4, px, TEXT_COLOR, &heading);
             }
         }
         canvas.fill(pad, panel.top - pad / 2, panel.width - 2 * pad, 1, MENU_EDGE_COLOR);

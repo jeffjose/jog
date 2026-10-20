@@ -389,7 +389,7 @@ impl App {
         // On the inspector's panel, its own; beside it, the video's.
         if self.over_inspector(x, y) {
             if button == MouseButton::Left && pressed {
-                self.inspector_click(x, y);
+                self.inspector_click(x, y, event_loop);
             }
             return;
         }
@@ -627,7 +627,9 @@ impl App {
         if self.compare.is_some() {
             return self.compare_wheel(lines);
         }
-        if self.over_inspector(self.mouse.0, self.mouse.1) {
+        // Over Inspect, its Files tab's list scrolls as the list does.
+        let on_list = self.list_panel().is_some_and(|panel| panel.embedded && panel.holds(self.mouse.0, self.mouse.1));
+        if self.over_inspector(self.mouse.0, self.mouse.1) && !on_list {
             return self.inspector_wheel(lines);
         }
         // In the find box it scrolls the list of matches, and what then
