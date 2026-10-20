@@ -46,6 +46,7 @@ use crate::ui::{self, Canvas, Text};
 mod convert_panel;
 mod convert_tab;
 mod compare_tab;
+mod glossary;
 use convert_panel::{ConvertPanel, PanelSource};
 mod section;
 use section::{Edge, EntryFrames, Section, StripTab};

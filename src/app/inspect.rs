@@ -901,6 +901,7 @@ impl App {
                             info
                         });
                         let mut blocks: Vec<Block> = Vec::new();
+                        let mut tips: Vec<super::glossary::Tip> = Vec::new();
                         match inspector.pane {
                             Pane::Overview => blocks.push(Block::Hero),
                             Pane::Issues => blocks.push(Block::Issues),
@@ -937,7 +938,7 @@ impl App {
                                 Block::HdrHero => self.draw_hdr_hero(&mut sub, text, px, info.as_ref(), column_w, top),
                                 Block::Issues => self.draw_issues(&mut sub, text, px, found, column_w, top),
                                 Block::Card(card) => self.draw_card(&mut sub, text, px, card, column_w, top, offset, mouse, &mut drawn),
-                                Block::Anatomy => self.draw_anatomy(&mut sub, text, px, found, column_w, top),
+                                Block::Anatomy => self.draw_anatomy(&mut sub, text, px, found, column_w, top, &mut tips),
                                 Block::Tracks => self.draw_track_choices(&mut sub, text, px, inspector.id, column_w, top, offset, mouse, &mut drawn),
                                 Block::PictureCharts => match found.picture.as_ref() {
                                     Some(picture) => self.draw_picture_charts(&mut sub, text, px, picture, column_w, top),
@@ -970,6 +971,8 @@ impl App {
                             }
                         }
                         content_h = heights.into_iter().max().unwrap_or(0);
+                        // What the thing under the pointer means, over all.
+                        super::glossary::draw_tip(&mut sub, text, px, &tips, (mouse.0 - offset.0, mouse.1 - offset.1));
                     }
                 }
             }

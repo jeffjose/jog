@@ -5,6 +5,7 @@
 //! along its foot plays and steps whatever tab is up. Everything stays
 //! where it was as well.
 
+use super::glossary::{Role, Tip};
 use super::inspect::{Card, Hit};
 use super::*;
 
@@ -530,7 +531,7 @@ impl App {
     /// padding: the container, its streams, each one's codec, and a
     /// video's color and HDR within that.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn draw_anatomy(&self, sub: &mut Canvas, text: &mut Text, px: u32, found: &super::inspect::Inspection, inner_w: i32, y: i32) -> i32 {
+    pub(super) fn draw_anatomy(&self, sub: &mut Canvas, text: &mut Text, px: u32, found: &super::inspect::Inspection, inner_w: i32, y: i32, tips: &mut Vec<Tip>) -> i32 {
         let streams = found.streams();
         if streams.is_empty() {
             return y;
@@ -543,29 +544,40 @@ impl App {
         let container = found.probe["format"]["format_long_name"].as_str().or(found.probe["format"]["format_name"].as_str()).unwrap_or("file").to_string();
         // Each stream's layers, outermost first: what it is, then within it
         // its codec, then for a video its color and its HDR.
-        let layers: Vec<Vec<(String, u32)>> = streams
+        // Each layer: its words, its color, and for its tooltip a title and
+        // each term with what it is.
+        type Layer = (String, u32, &'static str, Vec<(Role, String)>);
+        let layers: Vec<Vec<Layer>> = streams
             .iter()
             .map(|stream| {
                 let kind = word(&stream["codec_type"]).unwrap_or_else(|| "stream".into());
-                let mut layers = vec![(format!("#{} {kind}", stream["index"]), 0x2E3A55)];
-                let mut codec = word(&stream["codec_name"]).unwrap_or_default().to_uppercase();
+                let mut layers: Vec<Layer> = vec![(format!("#{} {kind}", stream["index"]), 0x2E3A55, "The stream", vec![(Role::Stream, kind.clone())])];
+                let codec_name = word(&stream["codec_name"]).unwrap_or_default();
+                let mut codec = codec_name.to_uppercase();
+                let mut terms = vec![(Role::Codec, codec_name)];
                 if let Some(profile) = word(&stream["profile"]) {
                     codec.push_str(&format!(" · {profile}"));
+                    terms.push((Role::Profile, profile));
                 }
                 if let (Some(w), Some(h)) = (stream["width"].as_i64(), stream["height"].as_i64()) {
                     codec.push_str(&format!(" · {w}×{h}"));
+                    terms.push((Role::Size, format!("{w}×{h}")));
                 }
                 if let Some(channels) = stream["channels"].as_i64() {
                     codec.push_str(&format!(" · {channels} ch"));
+                    terms.push((Role::Channels, word(&stream["channel_layout"]).unwrap_or_else(|| format!("{channels} ch"))));
                 }
-                layers.push((codec, 0x3A3354));
+                layers.push((codec, 0x3A3354, "Its codec", terms));
                 if kind == "video" {
-                    let color = [word(&stream["color_primaries"]), word(&stream["color_transfer"]), word(&stream["color_space"]), word(&stream["pix_fmt"])].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-                    if !color.is_empty() {
-                        layers.push((color, 0x2F4A44));
+                    let parts = [(Role::Primaries, word(&stream["color_primaries"])), (Role::Transfer, word(&stream["color_transfer"])), (Role::Matrix, word(&stream["color_space"])), (Role::Pixels, word(&stream["pix_fmt"]))];
+                    let terms: Vec<(Role, String)> = parts.into_iter().filter_map(|(role, term)| Some((role, term?))).collect();
+                    if !terms.is_empty() {
+                        let color = terms.iter().map(|(_, term)| term.as_str()).collect::<Vec<_>>().join(" · ");
+                        layers.push((color, 0x2F4A44, "Its color", terms));
                     }
                     if let Some(hdr) = found.hdr.as_ref().filter(|hdr| hdr.is_hdr()) {
-                        layers.push((hdr.badges().join(" · "), 0x553A2E));
+                        let badges = hdr.badges();
+                        layers.push((badges.join(" · "), 0x553A2E, "Its HDR", badges.into_iter().map(|badge| (Role::Hdr, badge)).collect()));
                     }
                 }
                 layers
@@ -574,7 +586,7 @@ impl App {
         // Boxes nest by a little each layer; streams stack inside the file.
         let inset = pad / 2;
         let label_h = small_line + pad / 3;
-        let stream_h = |layers: &Vec<(String, u32)>| layers.len() as i32 * (label_h + inset) + inset;
+        let stream_h = |layers: &Vec<Layer>| layers.len() as i32 * (label_h + inset) + inset;
         let inside: i32 = layers.iter().map(stream_h).sum::<i32>() + inset * (layers.len() as i32 + 1);
         let card_h = pad + small_line + pad / 2 + label_h + inside + pad;
         sub.round_fill(x, y, inner_w, card_h, pad / 2, WELL, 256);
@@ -584,6 +596,7 @@ impl App {
         let file_h = label_h + inside;
         sub.round_fill(fx, fy, fw, file_h, pad / 3, 0x1B2233, 256);
         sub.round_outline(fx, fy, fw, file_h, pad / 3, 1, 0x3E63DD);
+        tips.push(Tip::new([fx, fy, fw, file_h], "The container", vec![(Role::Container, container.clone())]));
         let container = clipped(text, &container, fw - inset * 2, small);
         text.draw(sub, fx + inset, fy + pad / 6, small, TEXT_COLOR, &container);
         fy += label_h + inset;
@@ -592,9 +605,10 @@ impl App {
             let mut bw = fw - inset * 2;
             let mut by = fy;
             let mut bh = stream_h(stream);
-            for (words, color) in stream {
+            for (words, color, title, terms) in stream {
                 sub.round_fill(bx, by, bw, bh, pad / 3, *color, 256);
                 sub.round_outline(bx, by, bw, bh, pad / 3, 1, 0x4A4A55);
+                tips.push(Tip::new([bx, by, bw, bh], title, terms.clone()));
                 let words = clipped(text, words, bw - inset * 2, small);
                 text.draw(sub, bx + inset, by + pad / 6, small, TEXT_COLOR, &words);
                 bx += inset;
