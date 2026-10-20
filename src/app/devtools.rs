@@ -23,10 +23,11 @@ pub enum Pane {
     Metadata,
     Performance,
     Issues,
+    Console,
 }
 
 impl Pane {
-    pub const ALL: [Pane; 11] = [
+    pub const ALL: [Pane; 12] = [
         Pane::Files,
         Pane::Overview,
         Pane::Tracks,
@@ -38,6 +39,7 @@ impl Pane {
         Pane::Metadata,
         Pane::Performance,
         Pane::Issues,
+        Pane::Console,
     ];
 
     pub fn name(self) -> &'static str {
@@ -53,6 +55,7 @@ impl Pane {
             Pane::Metadata => "Metadata",
             Pane::Performance => "Performance",
             Pane::Issues => "Issues",
+            Pane::Console => "Console",
         }
     }
 
@@ -450,5 +453,138 @@ impl App {
             video.track_words = words;
         }
         self.redraw();
+    }
+}
+
+impl App {
+    /// The Console tab: what jog has said, the latest first, with how long
+    /// ago; and the ways to tell it something.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_console(&self, sub: &mut Canvas, text: &mut Text, px: u32, inner_w: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
+        let run = |words: &str, command: Command| Action { words: words.to_string(), hit: Hit::Run(command) };
+        let actions = vec![("Tell jog".to_string(), vec![run("Run a command…   Ctrl+P", Command::CommandPalette), run("Run a shell command on it…   !", Command::Shell), run("Repeat the last   .", Command::RepeatShell)])];
+        let mut y = self.draw_actions(sub, text, px, &actions, inner_w, y, offset, mouse, drawn);
+        let pad = px as i32;
+        let line = Text::line_height(px);
+        let small = (px * 5 / 6).max(11);
+        let small_line = Text::line_height(small);
+        let x = pad * 3 / 2;
+        let shown: Vec<&(Instant, String)> = self.messages.iter().rev().take(200).collect();
+        let row_h = line + pad / 4;
+        let card_h = pad + small_line + pad / 2 + shown.len().max(1) as i32 * row_h + pad / 2;
+        sub.round_fill(x, y, inner_w, card_h, pad / 2, 0x26262B, 256);
+        text.draw(sub, x + pad, y + pad, small, DIM_TEXT_COLOR, &format!("MESSAGES · {}", self.messages.len()));
+        let mut ry = y + pad + small_line + pad / 2;
+        if shown.is_empty() {
+            text.draw(sub, x + pad, ry, px, DIM_TEXT_COLOR, "Nothing yet");
+        }
+        let when_w = px as i32 * 4;
+        for (at, words) in shown {
+            let ago = at.elapsed().as_secs();
+            let when = match ago {
+                0..=59 => format!("{ago}s"),
+                60..=3599 => format!("{}m", ago / 60),
+                _ => format!("{}h", ago / 3600),
+            };
+            text.draw(sub, x + pad, ry, small, DIM_TEXT_COLOR, &when);
+            let words = clipped(text, words, inner_w - pad * 2 - when_w, px);
+            text.draw(sub, x + pad + when_w, ry, px, TEXT_COLOR, &words);
+            ry += row_h;
+        }
+        y += card_h + pad;
+        y
+    }
+
+    /// The Color tab's graphs of the picture on view, as toggles.
+    pub(super) fn scope_actions(&self) -> Vec<(String, Vec<Action>)> {
+        let names = ["Histogram", "Histogram in rows", "Waveform", "RGB parade", "Vectorscope"];
+        let rows = names
+            .iter()
+            .enumerate()
+            .map(|(at, name)| Action { words: format!("{}  {name}", if self.scopes.get(at).copied().unwrap_or(false) { "●" } else { "○" }), hit: Hit::Run(Command::Scope(at)) })
+            .collect();
+        vec![("Graphs of the frame on view".to_string(), rows)]
+    }
+
+    /// The Overview's anatomy: what the file is made of, as boxes within
+    /// boxes, the way a browser draws an element's margin, border and
+    /// padding: the container, its streams, each one's codec, and a
+    /// video's color and HDR within that.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_anatomy(&self, sub: &mut Canvas, text: &mut Text, px: u32, found: &super::inspect::Inspection, inner_w: i32, y: i32) -> i32 {
+        let streams = found.streams();
+        if streams.is_empty() {
+            return y;
+        }
+        let pad = px as i32;
+        let small = (px * 5 / 6).max(11);
+        let small_line = Text::line_height(small);
+        let x = pad * 3 / 2;
+        let word = |value: &serde_json::Value| value.as_str().map(str::to_string).filter(|v| !v.is_empty() && v != "unknown");
+        let container = found.probe["format"]["format_long_name"].as_str().or(found.probe["format"]["format_name"].as_str()).unwrap_or("file").to_string();
+        // Each stream's layers, outermost first: what it is, then within it
+        // its codec, then for a video its color and its HDR.
+        let layers: Vec<Vec<(String, u32)>> = streams
+            .iter()
+            .map(|stream| {
+                let kind = word(&stream["codec_type"]).unwrap_or_else(|| "stream".into());
+                let mut layers = vec![(format!("#{} {kind}", stream["index"]), 0x2E3A55)];
+                let mut codec = word(&stream["codec_name"]).unwrap_or_default().to_uppercase();
+                if let Some(profile) = word(&stream["profile"]) {
+                    codec.push_str(&format!(" · {profile}"));
+                }
+                if let (Some(w), Some(h)) = (stream["width"].as_i64(), stream["height"].as_i64()) {
+                    codec.push_str(&format!(" · {w}×{h}"));
+                }
+                if let Some(channels) = stream["channels"].as_i64() {
+                    codec.push_str(&format!(" · {channels} ch"));
+                }
+                layers.push((codec, 0x3A3354));
+                if kind == "video" {
+                    let color = [word(&stream["color_primaries"]), word(&stream["color_transfer"]), word(&stream["color_space"]), word(&stream["pix_fmt"])].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+                    if !color.is_empty() {
+                        layers.push((color, 0x2F4A44));
+                    }
+                    if let Some(hdr) = found.hdr.as_ref().filter(|hdr| hdr.is_hdr()) {
+                        layers.push((hdr.badges().join(" · "), 0x553A2E));
+                    }
+                }
+                layers
+            })
+            .collect();
+        // Boxes nest by a little each layer; streams stack inside the file.
+        let inset = pad / 2;
+        let label_h = small_line + pad / 3;
+        let stream_h = |layers: &Vec<(String, u32)>| layers.len() as i32 * (label_h + inset) + inset;
+        let inside: i32 = layers.iter().map(stream_h).sum::<i32>() + inset * (layers.len() as i32 + 1);
+        let card_h = pad + small_line + pad / 2 + label_h + inside + pad;
+        sub.round_fill(x, y, inner_w, card_h, pad / 2, 0x26262B, 256);
+        text.draw(sub, x + pad, y + pad, small, DIM_TEXT_COLOR, "ANATOMY");
+        let (fx, fw) = (x + pad, inner_w - pad * 2);
+        let mut fy = y + pad + small_line + pad / 2;
+        let file_h = label_h + inside;
+        sub.round_fill(fx, fy, fw, file_h, pad / 3, 0x1B2233, 256);
+        sub.round_outline(fx, fy, fw, file_h, pad / 3, 1, 0x3E63DD);
+        let container = clipped(text, &container, fw - inset * 2, small);
+        text.draw(sub, fx + inset, fy + pad / 6, small, TEXT_COLOR, &container);
+        fy += label_h + inset;
+        for stream in &layers {
+            let mut bx = fx + inset;
+            let mut bw = fw - inset * 2;
+            let mut by = fy;
+            let mut bh = stream_h(stream);
+            for (words, color) in stream {
+                sub.round_fill(bx, by, bw, bh, pad / 3, *color, 256);
+                sub.round_outline(bx, by, bw, bh, pad / 3, 1, 0x4A4A55);
+                let words = clipped(text, words, bw - inset * 2, small);
+                text.draw(sub, bx + inset, by + pad / 6, small, TEXT_COLOR, &words);
+                bx += inset;
+                bw -= inset * 2;
+                by += label_h;
+                bh -= label_h + inset;
+            }
+            fy += stream_h(stream) + inset;
+        }
+        y + card_h + pad
     }
 }

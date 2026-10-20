@@ -11,7 +11,7 @@ use super::*;
 
 /// What was found in a file.
 pub struct Inspection {
-    probe: Value,
+    pub(super) probe: Value,
     pub(super) hdr: Option<crate::hdrmeta::Info>,
     /// The first video frame's side data: what the bitstream carries
     /// that the container may not, HDR10 values written by the encoder.
@@ -52,7 +52,7 @@ impl Inspection {
         Ok(Inspection { probe, hdr: crate::hdrmeta::read(path), first_frame, tree: crate::boxes::read(path), picture: None })
     }
 
-    fn streams(&self) -> &[Value] {
+    pub(super) fn streams(&self) -> &[Value] {
         self.probe["streams"].as_array().map_or(&[], Vec::as_slice)
     }
 
@@ -725,6 +725,8 @@ impl App {
         // Performance's figures change all the time: drawn again twice a second.
         let tick = match inspector.pane {
             Pane::Performance => Some(self.perf.arrived.elapsed().as_millis() / 500),
+            Pane::Console => Some(self.messages.len() as u128 * 1000 + self.perf.arrived.elapsed().as_secs() as u128 / 30),
+            Pane::Color => Some(self.scopes.iter().enumerate().map(|(at, on)| u128::from(*on) << at).sum()),
             // What is playing, as the info line says it.
             Pane::Tracks => Some(self.video.as_ref().and_then(|video| video.track_words.as_ref()).map_or(0, |words| words.bytes().fold(0u128, |hash, byte| hash.wrapping_mul(31).wrapping_add(u128::from(byte))))),
             // The list lights up under the pointer and plays along: every frame.
@@ -801,9 +803,12 @@ impl App {
             used += if used > 0 { gap } else { 0 } + w;
             rows.last_mut().expect("a row").push(at);
         }
-        for row in &rows {
+        let full = rows.len();
+        for (number, row) in rows.iter().enumerate() {
             let natural: i32 = row.iter().map(|at| widths[*at]).sum::<i32>() + gap * (row.len() as i32 - 1);
-            let extra = (room - natural) / row.len() as i32;
+            // Rows are filled out to the width, all but a last one of a few.
+            let short = full > 1 && number == full - 1 && natural < room * 2 / 3;
+            let extra = if short { 0 } else { (room - natural) / row.len() as i32 };
             let mut x = left + pad / 2;
             for at in row {
                 let tab_w = widths[*at] + extra;
@@ -856,6 +861,8 @@ impl App {
                         Pane::Compare => self.draw_actions(&mut sub, text, px, &self.compare_actions(), inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
                         Pane::Timeline => self.draw_timeline(&mut sub, text, px, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
                         Pane::Tracks => self.draw_track_choices(&mut sub, text, px, inspector.id, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
+                        Pane::Console => self.draw_console(&mut sub, text, px, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
+                        Pane::Overview => self.draw_anatomy(&mut sub, text, px, found, inner_w, content_h - inspector.scroll) + inspector.scroll,
                         _ => content_h,
                     };
                     // The HDR tab: a bar for each HDR10+ scene, its brightest.
@@ -880,6 +887,10 @@ impl App {
                     // A picture's color tab: its curves and its gain map, drawn.
                     if let Some(picture) = found.picture.as_ref().filter(|_| inspector.picture && inspector.tab == 2) {
                         content_h = self.draw_picture_charts(&mut sub, text, px, picture, inner_w, content_h - inspector.scroll) + inspector.scroll;
+                    }
+                    // And the graphs of the frame on view, to turn on and off.
+                    if inspector.pane == Pane::Color {
+                        content_h = self.draw_actions(&mut sub, text, px, &self.scope_actions(), inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll;
                     }
                     if inspector.tab == 4 && !inspector.picture {
                         content_h = self.draw_chapters(&mut sub, text, px, found, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll;
