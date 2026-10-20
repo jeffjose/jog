@@ -202,6 +202,8 @@ pub(super) enum Hit {
     Node(Vec<usize>),
     /// A choice on the Convert tab.
     Convert(super::convert_tab::Knob),
+    /// A file that crashed the player, to be tried again.
+    Forget(std::path::PathBuf),
 }
 
 pub struct Inspector {
@@ -503,6 +505,21 @@ impl App {
             }
             Hit::Run(command) => self.pending_command = Some(command),
             Hit::Scrub(..) | Hit::Convert(_) => {}
+            Hit::Forget(path) => {
+                crate::mpv::forget_crash(&path);
+                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                self.toast(format!("Forgotten · {name} tries the GPU again"));
+                // The one playing is opened again where it is, to try now.
+                let playing = self.video.as_ref().is_some_and(|video| std::path::absolute(&self.files[video.id]).ok().as_ref() == Some(&path));
+                if let (true, Some(player)) = (playing, &self.player) {
+                    self.enter_at = player.number("time-pos");
+                    self.resume_paused = player.flag("pause") == Some(true);
+                    self.video = None;
+                }
+                // One that was not playable may be now.
+                self.unplayable_said = None;
+                self.sync_video();
+            }
             Hit::Track(audio, id) => self.choose_track(audio, id),
             Hit::Close => self.inspector = None,
             Hit::Pin => self.toggle_inspector_pin(),
@@ -1044,8 +1061,18 @@ impl App {
                         match other {
                             DrawerPane::Console => drop(self.draw_console(&mut sub, text, px, drawer_inner, 0, (left, body_top), mouse, &mut hits)),
                             _ => {
+                                // The files that crashed a player, to forget,
+                                // first: the one thing here to do.
+                                let crashes = self.crash_actions();
+                                let top = match crashes.is_empty() {
+                                    true => 0,
+                                    false => {
+                                        super::devtools::set_flow_x(pad * 3 / 2);
+                                        self.draw_actions(&mut sub, text, px, &crashes, drawer_inner, pad / 2, (left, body_top), mouse, &mut hits)
+                                    }
+                                };
                                 let cards = self.performance_cards();
-                                self.draw_cards(&mut sub, text, px, &cards, drawer_inner, (left, body_top), mouse, &mut hits, 0);
+                                self.draw_cards(&mut sub, text, px, &cards, drawer_inner, (left, body_top), mouse, &mut hits, top);
                             }
                         }
                         canvas.paste(left, body_top, width, h, &sheet);

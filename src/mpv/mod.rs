@@ -19,13 +19,15 @@ mod crashes;
 mod engine;
 mod helper;
 mod host;
+mod processes;
 mod wire;
 
 use std::sync::atomic::AtomicBool;
 
-pub use crashes::{crashed_on, Crash};
+pub use crashes::{all_crashes, crashed_on, forget_crash, Crash};
 pub use helper::main as player_main;
 pub use host::Player;
+pub use processes::{crashes_this_run, usage};
 
 /// The argument that starts jog as a player process rather than as jog.
 pub const PLAYER_ARG: &str = "--player";

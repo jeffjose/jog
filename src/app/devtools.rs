@@ -201,11 +201,73 @@ impl App {
                 card
             })
             .collect();
-        let decoder = if crate::mpv::HWDEC.load(atomic::Ordering::Relaxed) { "GPU where it can, else CPU" } else { "CPU (--no-hwdec)" };
+        // The decoder for the video on view: the GPU's, which kind, or the
+        // CPU's, and why.
         let mut playback = Card::new("Playback");
-        playback.row("Decoding", Some(decoder.to_string()));
+        let playing = self.video.as_ref().map(|video| &self.files[video.id]);
+        let crashed = playing.and_then(|path| crate::mpv::crashed_on(path));
+        let current = self.player.as_ref().and_then(|player| player.text("hwdec-current")).filter(|decoder| !decoder.is_empty() && decoder != "no");
+        let decoder = match (crate::mpv::HWDEC.load(atomic::Ordering::Relaxed), crashed, current, playing) {
+            (false, ..) => "CPU · --no-hwdec".to_string(),
+            (_, Some(_), ..) => "CPU · it crashed the GPU's decoder".to_string(),
+            (_, _, Some(decoder), _) => format!("GPU · {decoder}"),
+            (_, _, None, Some(_)) => "CPU · no GPU decoder for it".to_string(),
+            (_, _, None, None) => "GPU where it can, else CPU".to_string(),
+        };
+        playback.row("Decoding", Some(decoder));
+        let crashes = crate::mpv::crashes_this_run();
+        if crashes > 0 {
+            playback.row("Crashed", Some(format!("{crashes} {} this run · jog went on", if crashes == 1 { "player" } else { "players" })));
+        }
         cards.insert(0, playback);
+        // Each player process, which it is, and what it takes.
+        let mut players = Card::new("Players");
+        let pid = |player: Option<&Player>| player.map(Player::pid);
+        let (main, spare, preview) = (pid(self.player.as_ref()), pid(self.spare.as_ref().map(|spare| &spare.player)), pid(self.preview.as_ref()));
+        for usage in crate::mpv::usage() {
+            let name = match usage.pid {
+                pid if Some(pid) == main => "Playing",
+                pid if Some(pid) == spare => "Next, held",
+                pid if Some(pid) == preview => "Seek preview",
+                _ => match usage.role {
+                    crate::mpv::Role::Preview => "Scenes, grid",
+                    _ => "Step back",
+                },
+            };
+            let cpu = usage.cpu.map_or("…".to_string(), |cpu| format!("{:.1} {}", cpu / 100.0, if (cpu / 100.0 - 1.0).abs() < 0.05 { "core" } else { "cores" }));
+            let memory = usage.memory.map(|bytes| format!(" · {}", meta::human_size(bytes))).unwrap_or_default();
+            let up = match usage.age.as_secs() {
+                seconds @ 0..=59 => format!("{seconds} s"),
+                seconds @ 60..=3599 => format!("{} min", seconds / 60),
+                seconds => format!("{} h", seconds / 3600),
+            };
+            players.row(name, Some(format!("{cpu}{memory} · up {up} · pid {}", usage.pid)));
+        }
+        if !players.rows.is_empty() {
+            cards.insert(1, players);
+        }
         cards
+    }
+
+    /// The files that crashed a player, each to be forgotten and tried on
+    /// the GPU again.
+    pub(super) fn crash_actions(&self) -> Vec<(String, Vec<Action>)> {
+        let crashes = crate::mpv::all_crashes();
+        if crashes.is_empty() {
+            return Vec::new();
+        }
+        let rows = crashes
+            .into_iter()
+            .map(|(path, crash)| {
+                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let what = match crash {
+                    crate::mpv::Crash::Gpu => "on the CPU",
+                    crate::mpv::Crash::Software => "not played",
+                };
+                Action { words: format!("{name}  ·  {what}  ·  forget"), hit: Hit::Forget(path) }
+            })
+            .collect();
+        vec![("Crashed the player".to_string(), rows)]
     }
 }
 

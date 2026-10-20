@@ -136,6 +136,7 @@ impl Player {
         if debug {
             eprintln!("jog: {:>7.1?} mpv   player process {pid} started ({})", started.elapsed(), role.word());
         }
+        super::processes::started(pid, role);
 
         let shared = Arc::new(Shared {
             known: Mutex::new(vec![None; WATCHED.len()]),
@@ -163,6 +164,12 @@ impl Player {
             gpu: Cell::new(gpu),
             watching: matches!(role, Role::Playback { .. }),
         })
+    }
+
+    /// The player process's id, for telling which it is among those
+    /// running.
+    pub fn pid(&self) -> i32 {
+        self.pid
     }
 
     /// Whether the player process is gone: everything asked of it after
@@ -578,7 +585,9 @@ fn listen(socket: OwnedFd, mut child: std::process::Child, shared: Arc<Shared>, 
     shared.gone.store(true, Ordering::SeqCst);
     shared.waiting.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     let status = child.wait();
-    if shared.quitting.load(Ordering::SeqCst) {
+    let crashed = !shared.quitting.load(Ordering::SeqCst);
+    super::processes::ended(child.id() as i32, crashed);
+    if !crashed {
         return;
     }
     let how = match &status {
