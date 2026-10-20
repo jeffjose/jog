@@ -52,6 +52,8 @@ mod hitch;
 mod filework;
 mod panels;
 mod resize;
+mod popout;
+use popout::Popped;
 use resize::PanelEdge;
 use panels::StripButton;
 use filework::Work;
@@ -1262,6 +1264,16 @@ pub struct App {
     /// of the one drawn last frame, to take hold of.
     dialog_moved: RefCell<HashMap<&'static str, (i32, i32)>>,
     dialog_header: Cell<Option<(&'static str, [i32; 4])>>,
+    /// Panels out in windows of their own; one asked for, made on the next
+    /// turn of the event loop; and whether one of them is being drawn or
+    /// answered just now, rather than the main window.
+    popouts: Vec<popout::Popout>,
+    popout_wanted: Option<Popped>,
+    drawing_popout: bool,
+    /// Whether the inspector goes out in a window of its own when opened,
+    /// and where that window last was: x, y, width, height.
+    inspector_out: bool,
+    popout_at: Option<[i32; 4]>,
     strip_docked: bool,
     /// Whether files are being decided about one after another; what has
     /// been decided, read when first asked about; and what has been found
@@ -1840,14 +1852,19 @@ impl App {
             list_right: options.list_right,
             // Pinned or not as last time, unless the config or the command
             // line pins the list.
-            list_pinned: options.list_pinned || pins.0.unwrap_or(false),
-            inspector_pinned: pins.1.unwrap_or(false),
-            list_units: pins.3.unwrap_or(resize::PANEL_UNITS),
-            inspector_units: pins.4.unwrap_or(resize::PANEL_UNITS),
+            list_pinned: options.list_pinned || pins.list.unwrap_or(false),
+            inspector_pinned: pins.inspector.unwrap_or(false),
+            list_units: pins.list_width.unwrap_or(resize::PANEL_UNITS),
+            inspector_units: pins.inspector_width.unwrap_or(resize::PANEL_UNITS),
+            inspector_out: pins.inspector_out,
+            popout_at: pins.inspector_at,
             edge_under: None,
             dialog_moved: RefCell::new(HashMap::new()),
             dialog_header: Cell::new(None),
-            strip_docked: pins.2.unwrap_or(false),
+            popouts: Vec::new(),
+            popout_wanted: None,
+            drawing_popout: false,
+            strip_docked: pins.strip.unwrap_or(false),
             triage_on: false,
             triage: RefCell::new(None),
             verdicts: RefCell::new(HashMap::new()),
@@ -1971,6 +1988,10 @@ impl App {
         self.print_marked();
         self.hitches.summary();
         filework::finish();
+        // Where a popped-out panel's window was left.
+        if !self.popouts.is_empty() {
+            self.save_panels_now();
+        }
         self.finish_frames();
         self.players().for_each(Player::settle);
         crate::transcode::abandon();
@@ -1986,6 +2007,7 @@ impl App {
             self.asked.set(true);
             window.request_redraw();
         }
+        self.redraw_popouts();
     }
 
     fn toast(&mut self, message: impl Into<String>) {
@@ -3865,8 +3887,12 @@ impl ApplicationHandler<Event> for App {
         self.hitch_turn(began, what);
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let began = Instant::now();
+        // A panel's own window, popped out.
+        if self.popout_event(id, &event, event_loop) {
+            return self.hitch_turn(began, "a popped-out panel");
+        }
         let what = match &event {
             WindowEvent::RedrawRequested => "drawing".to_string(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
@@ -4099,6 +4125,7 @@ impl App {
 
     fn waiting(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        self.tend_popouts(event_loop);
         self.hitches.flush(Some(now));
         if self.settle_at.is_some_and(|at| at <= now) {
             self.settle_at = None;

@@ -857,7 +857,8 @@ impl App {
         if self.track_editor.is_some() {
             self.draw_track_editor(canvas, &mut text, px);
         }
-        if self.inspector.is_some() {
+        // Popped out, it is drawn in its own window instead.
+        if self.inspector.is_some() && !self.popped(Popped::Inspector) {
             self.draw_inspector(canvas, &mut text, px);
         }
         // Over the panels, which a box can be opened from.

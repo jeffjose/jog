@@ -272,6 +272,13 @@ impl App {
         if let Err(error) = std::fs::write(&snapshot.path, ppm) {
             eprintln!("jog: cannot write {}: {error}", snapshot.path.display());
         }
+        // A panel popped out, in its own window, beside it: `x.ppm` and
+        // `x.popout.ppm`.
+        if let Some((size, pixels)) = self.popout_pixels() {
+            let mut ppm = format!("P6 {} {} 255\n", size.0, size.1).into_bytes();
+            ppm.extend(pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
+            let _ = std::fs::write(snapshot.path.with_extension("popout.ppm"), ppm);
+        }
         event_loop.exit();
     }
 

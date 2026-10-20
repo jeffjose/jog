@@ -147,6 +147,8 @@ pub(super) enum Hit {
     CopyAll,
     /// Docks the panel beside the picture, or lets it float over it.
     Pin,
+    /// Out into a window of its own, or back.
+    PopOut,
     /// The HDR tab: the headroom up or down, and the 2094-50 curves as
     /// gain rather than output.
     Headroom(bool),
@@ -247,6 +249,10 @@ impl App {
             let _ = proxy.send_event(Event::Inspected(id, Inspection::read(&path)));
         });
         self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false });
+        // Out in its own window, if that is where it was last.
+        if self.inspector_out && !self.popped(Popped::Inspector) {
+            self.popout_wanted = Some(Popped::Inspector);
+        }
         self.menu = None;
         self.redraw();
     }
@@ -398,6 +404,7 @@ impl App {
             }
             Hit::Close => self.inspector = None,
             Hit::Pin => self.toggle_inspector_pin(),
+            Hit::PopOut => self.toggle_popout(Popped::Inspector),
             Hit::Headroom(up) => self.hdr_headroom = (self.hdr_headroom + if up { 0.25 } else { -0.25 }).clamp(0.0, 6.0),
             Hit::GainView => {
                 if let Some(inspector) = &mut self.inspector {
@@ -625,8 +632,10 @@ impl App {
         let small_line = Text::line_height(small);
         // A column down the side the file list is not on, as wide as the
         // list and laid out as it is: over the picture, or pinned beside it.
-        let (width, height) = (panel_width(canvas.width, px, self.inspector_units), canvas.height);
-        let (left, top) = (if self.list_right { 0 } else { canvas.width - width }, 0);
+        // Popped out, the whole of its own window.
+        let popped = self.drawing_popout;
+        let (width, height) = (if popped { canvas.width } else { panel_width(canvas.width, px, self.inspector_units) }, canvas.height);
+        let (left, top) = (if self.list_right || popped { 0 } else { canvas.width - width }, 0);
         inspector.place = [left, top, width, height];
         // Nothing in it has changed: the panel as it was.
         // The pointer over the panel, as the panel is to be drawn: not by
@@ -638,7 +647,7 @@ impl App {
         // Over the picture it lets it show through faintly, as the file
         // list does there: the panel, kept whole, laid on with a little of
         // what is under it.
-        let through = if self.inspector_pinned { 0 } else { 24 };
+        let through = if self.inspector_pinned || popped { 0 } else { 24 };
         if let Some((_, pixels)) = inspector.kept.as_ref().filter(|(was, pixels)| *was == key && pixels.len() == (width * height) as usize) {
             canvas.dissolve(left, top, width, height, pixels, 256 - through);
             self.inspector = Some(inspector);
@@ -657,7 +666,14 @@ impl App {
         let side = pad * 3 / 2;
         let heading = format!("{}  Inspect", commands::icons::EYE);
         text.draw(canvas, inner, top + pad * 3 / 4, px, TEXT_COLOR, &heading);
-        let buttons = [(Hit::Close, commands::icons::X, false), (Hit::Pin, commands::icons::PIN, self.inspector_pinned), (Hit::CopyAll, commands::icons::BRACES, false)];
+        // Popped out, the pin has nothing to do; the pop-out button, lit,
+        // puts it back.
+        let mut buttons = vec![(Hit::Close, commands::icons::X, false)];
+        if !popped {
+            buttons.push((Hit::Pin, commands::icons::PIN, self.inspector_pinned));
+        }
+        buttons.push((Hit::PopOut, commands::icons::EXTERNAL_LINK, popped));
+        buttons.push((Hit::CopyAll, commands::icons::BRACES, false));
         let mut button_left = left + width;
         for (at, (hit, icon, on)) in buttons.into_iter().enumerate() {
             button_left = left + width - (at as i32 + 1) * side - pad / 2 - at as i32 * pad / 3;
@@ -1202,7 +1218,8 @@ fn picture_cards(picture: &crate::picmeta::Picture, tab: usize) -> Vec<Card> {
 impl App {
     /// Whether a window position is on the inspector's panel.
     pub(super) fn over_inspector(&self, x: f64, y: f64) -> bool {
-        self.inspector.as_ref().is_some_and(|inspector| {
+        // Popped out, it is not in the main window at all.
+        !self.popped(Popped::Inspector) && self.inspector.as_ref().is_some_and(|inspector| {
             let [left, top, w, h] = inspector.place;
             (left..left + w).contains(&(x as i32)) && (top..top + h).contains(&(y as i32))
         })
@@ -1213,7 +1230,7 @@ impl App {
     /// The inspector's width, and whether it stands on the left, for the
     /// picture or video to keep clear of it: the same sums it is drawn by.
     pub(super) fn inspector_room(&self) -> Option<(i32, bool)> {
-        self.inspector.as_ref().filter(|_| self.inspector_pinned)?;
+        self.inspector.as_ref().filter(|_| self.inspector_pinned && !self.popped(Popped::Inspector))?;
         let (width, height) = self.window_size();
         Some((panel_width(width as i32, ui_px(height), self.inspector_units), self.list_right))
     }

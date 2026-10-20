@@ -44,7 +44,7 @@ impl App {
                 return Some(PanelEdge::List);
             }
         }
-        if let Some([left, top, width, height]) = self.inspector.as_ref().map(|inspector| inspector.place()) {
+        if let Some([left, top, width, height]) = self.inspector.as_ref().filter(|_| !self.popped(Popped::Inspector)).map(|inspector| inspector.place()) {
             let edge = if self.list_right { left + width } else { left };
             if (x - edge).abs() <= grip && (top..top + height).contains(&y) {
                 return Some(PanelEdge::Inspector);
