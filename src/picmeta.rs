@@ -21,6 +21,8 @@ pub struct Picture {
     pub xmp: Vec<(String, String)>,
     /// An Ultra HDR photo's gain map: how to read it, and its size.
     pub gain: Option<(crate::ultrahdr::Meta, usize)>,
+    /// How its values are to be read as color: curves, primaries, coding points.
+    pub color: crate::colorinfo::Color,
 }
 
 pub fn read(path: &Path) -> Result<Picture, String> {
@@ -49,6 +51,13 @@ pub fn read(path: &Path) -> Result<Picture, String> {
         }
     }
     picture.icc = icc_profile(&bytes).map(|profile| (icc_name(&profile).unwrap_or_else(|| "unnamed".into()), profile.len()));
+    if let Some(profile) = icc_profile(&bytes) {
+        let _ = crate::colorinfo::read_icc(&profile, &mut picture.color);
+    }
+    if bytes.starts_with(b"\x89PNG") {
+        crate::colorinfo::read_png(&bytes, &mut picture.color);
+    }
+    crate::colorinfo::read_nclx(&bytes, &mut picture.color);
     picture.xmp = xmp(&bytes);
     picture.gain = crate::ultrahdr::find(&bytes).map(|(range, meta)| (meta, range.len()));
     Ok(picture)

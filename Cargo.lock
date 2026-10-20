@@ -951,6 +951,7 @@ dependencies = [
  "libc",
  "libloading 0.9.0",
  "memchr",
+ "miniz_oxide 0.8.9",
  "mozjpeg",
  "ravif",
  "rayon",

@@ -13,6 +13,7 @@ mod meta;
 mod mpv;
 mod ops;
 mod picmeta;
+mod colorinfo;
 mod options;
 mod positions;
 mod render;

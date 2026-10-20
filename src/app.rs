@@ -65,6 +65,7 @@ mod refresh;
 mod scenes_strip;
 mod scripted;
 mod inspect;
+mod inspect_hdr;
 mod track_editor;
 mod tracks;
 mod triaging;

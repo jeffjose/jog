@@ -136,12 +136,16 @@ impl Card {
 
 /// What a click on the inspector lands on.
 #[derive(Clone, PartialEq, Debug)]
-enum Hit {
+pub(super) enum Hit {
     Tab(usize),
     Copy(String),
     CopyAll,
     /// Docks the panel beside the picture, or lets it float over it.
     Pin,
+    /// The HDR tab: the headroom up or down, and the 2094-50 curves as
+    /// gain rather than output.
+    Headroom(bool),
+    GainView,
     Close,
     /// A scene of the HDR chart, or a chapter: that time in the video.
     Seek(f64),
@@ -172,6 +176,8 @@ pub struct Inspector {
     selected: Vec<usize>,
     follow: bool,
     drawn: Vec<(Hit, [i32; 4])>,
+    /// The 2094-50 curves shown as gain in stops rather than output.
+    gain: bool,
 }
 
 fn text_of(value: &Value) -> Option<String> {
@@ -235,7 +241,7 @@ impl App {
         std::thread::spawn(move || {
             let _ = proxy.send_event(Event::Inspected(id, Inspection::read(&path)));
         });
-        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new() });
+        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false });
         self.menu = None;
         self.redraw();
     }
@@ -387,6 +393,12 @@ impl App {
             }
             Hit::Close => self.inspector = None,
             Hit::Pin => self.toggle_inspector_pin(),
+            Hit::Headroom(up) => self.hdr_headroom = (self.hdr_headroom + if up { 0.25 } else { -0.25 }).clamp(0.0, 6.0),
+            Hit::GainView => {
+                if let Some(inspector) = &mut self.inspector {
+                    inspector.gain = !inspector.gain;
+                }
+            }
             Hit::Copy(value) => {
                 let said = if value.chars().count() > 40 { format!("{}…", value.chars().take(38).collect::<String>()) } else { value.clone() };
                 copy(self, value, said);
@@ -613,7 +625,9 @@ impl App {
         inspector.place = [left, top, width, height];
         // Nothing in it has changed: the panel as it was.
         let over = self.over_inspector(self.mouse.0, self.mouse.1).then_some(mouse);
-        let key = PanelKey { tab: inspector.tab, scroll: inspector.scroll, found: inspector.found.is_some(), selected: inspector.selected.clone(), open: inspector.open.len(), follow: inspector.follow, pointer: over, place: inspector.place, window: (canvas.width, canvas.height), pinned: self.inspector_pinned };
+        let hdr_info = inspector.found.as_ref().and_then(|found| found.as_ref().ok()).and_then(|found| found.hdr.as_ref());
+        let hdr = (inspector.tab == 2 && !inspector.picture).then(|| self.hdr_key(inspector.id, hdr_info, inspector.gain));
+        let key = PanelKey { tab: inspector.tab, scroll: inspector.scroll, found: inspector.found.is_some(), selected: inspector.selected.clone(), open: inspector.open.len(), follow: inspector.follow, pointer: over, place: inspector.place, window: (canvas.width, canvas.height), pinned: self.inspector_pinned, hdr };
         // Over the picture it lets it show through faintly, as the file
         // list does there: the panel, kept whole, laid on with a little of
         // what is under it.
@@ -628,8 +642,8 @@ impl App {
         canvas.fill(left, top, width, height, GRID_COLOR);
         canvas.fill(if self.list_right { left + width - 1 } else { left }, top, 1, height, MENU_EDGE_COLOR);
         inspector.drawn.clear();
-        let inner = left + pad;
-        let inner_w = width - pad * 2;
+        let inner = left + pad * 3 / 2;
+        let inner_w = width - pad * 3;
 
         // The heading, as the file list's: what and the file, then the
         // round buttons from the right: close, pin, copy as JSON.
@@ -692,10 +706,25 @@ impl App {
                     // The HDR tab: a bar for each HDR10+ scene, its brightest.
                     if inspector.tab == 2 && !inspector.picture {
                         content_h = self.draw_scene_chart(&mut sub, text, px, found, inner_w, content_h - inspector.scroll, offset, &mut drawn) + inspector.scroll;
+                        // The curves and the brightnesses, drawn.
+                        if let Some(info) = found.hdr.as_ref().filter(|info| info.is_hdr()) {
+                            // The static figures as ffprobe found them, where
+                            // jog's own reading has none.
+                            let mut info = info.clone();
+                            let mastering = found.side("Mastering display metadata");
+                            info.mastering = info.mastering.or_else(|| mastering.and_then(|m| Some((ratio(&m["max_luminance"])?, ratio(&m["min_luminance"])?))));
+                            let light = found.side("Content light level metadata");
+                            info.light = info.light.or_else(|| light.and_then(|l| Some((l["max_content"].as_u64()? as u32, l["max_average"].as_u64()? as u32))));
+                            content_h = self.draw_hdr_charts(&mut sub, text, px, inspector.id, &info, inner_w, content_h - inspector.scroll, offset, mouse, inspector.gain, &mut drawn) + inspector.scroll;
+                        }
                     }
                     if inspector.on_structure() {
                         let tree = TreeState { open: &inspector.open, selected: &inspector.selected, follow: &mut inspector.follow, scroll: &mut inspector.scroll, view_h: inspector.view_h };
                         content_h = self.draw_structure(&mut sub, text, px, found, tree, inner_w, offset, mouse, &mut drawn);
+                    }
+                    // A picture's color tab: its curves and its gain map, drawn.
+                    if let Some(picture) = found.picture.as_ref().filter(|_| inspector.picture && inspector.tab == 2) {
+                        content_h = self.draw_picture_charts(&mut sub, text, px, picture, inner_w, content_h - inspector.scroll) + inspector.scroll;
                     }
                     if inspector.tab == 4 && !inspector.picture {
                         content_h = self.draw_chapters(&mut sub, text, px, found, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll;
@@ -807,6 +836,7 @@ impl App {
         }
         sub.fill(cx, cy + chart_h, cw, 1, MENU_EDGE_COLOR);
         let caption = format!("{} scenes  ·  bar: brightest  ·  line: mean  ·  top {peak:.0} nits  ·  click one to go there", scenes.len());
+        let caption = clipped(text, &caption, cw, small);
         text.draw(sub, cx, cy + chart_h + pad / 2, small, DIM_TEXT_COLOR, &caption);
         y + card_h + pad
     }
@@ -1098,6 +1128,32 @@ fn picture_cards(picture: &crate::picmeta::Picture, tab: usize) -> Vec<Card> {
                 None => color.row("Profile", Some("None embedded  ·  shown as sRGB".into())),
             }
             color.row("EXIF color space", exif("ColorSpace"));
+            // What the profile and the file's own chunks say, read.
+            let c = &picture.color;
+            color.row("Profile", c.icc.clone());
+            for (channel, curve) in &c.curves {
+                let name = match channel {
+                    'R' => "Red curve",
+                    'G' => "Green curve",
+                    'B' => "Blue curve",
+                    _ => "Gray curve",
+                };
+                color.row(name, Some(curve.describe()));
+            }
+            if let Some([r, g, b, w]) = c.primaries {
+                let xy = |(x, y): (f64, f64)| format!("{x:.3}, {y:.3}");
+                color.row("Red", Some(xy(r)));
+                color.row("Green", Some(xy(g)));
+                color.row("Blue", Some(xy(b)));
+                color.row("White", Some(xy(w)));
+            }
+            if c.lut {
+                color.row("Mapping", Some("by lookup table".into()));
+            }
+            color.row("Peak", c.luminance.map(|nits| format!("{nits:.0} nits")));
+            color.row("Coding points", c.cicp.map(crate::colorinfo::cicp_words));
+            color.row("PNG gAMA", c.png_gamma.map(|g| format!("{g:.5}  ·  gamma {:.2}", 1.0 / g.max(1e-9))));
+            color.row("PNG sRGB", c.srgb_intent.map(|intent| ["perceptual", "relative colorimetric", "saturation", "absolute colorimetric"].get(usize::from(intent)).copied().unwrap_or("other").to_string()));
             let mut gain = Card::new("Ultra HDR gain map");
             match &picture.gain {
                 Some((meta, bytes)) => {
@@ -1209,4 +1265,6 @@ pub struct PanelKey {
     window: (i32, i32),
     /// Pinned beside the picture, or over it.
     pinned: bool,
+    /// The HDR tab's charts: the headroom, the metadata at the time on view.
+    hdr: Option<super::inspect_hdr::HdrKey>,
 }
