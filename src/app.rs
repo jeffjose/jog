@@ -3802,20 +3802,23 @@ struct Track {
     selected: bool,
 }
 
-/// The tracks of one kind, `audio` or `sub`, in the file a player has open.
+/// The tracks of one kind, `audio` or `sub`, in the file a player has open:
+/// from the track list the player keeps jog told of.
 fn tracks_of(player: &Player, kind: &str) -> Vec<Track> {
-    let count = player.number("track-list/count").unwrap_or(0.0) as usize;
-    let track = |n: usize| {
-        let field = |name: &str| player.text(&format!("track-list/{n}/{name}"));
-        if field("type")? != kind {
-            return None;
-        }
-        let id = player.number(&format!("track-list/{n}/id"))? as i64;
-        let named: Vec<String> = [field("lang"), field("title")].into_iter().flatten().collect();
-        let name = if named.is_empty() { format!("Track {id}") } else { named.join("  ") };
-        Some(Track { id, name, selected: player.flag(&format!("track-list/{n}/selected")) == Some(true) })
+    let kind = match kind {
+        "audio" => tracks::TrackKind::Audio,
+        "sub" => tracks::TrackKind::Sub,
+        _ => tracks::TrackKind::Video,
     };
-    (0..count).filter_map(track).collect()
+    tracks::track_list(player)
+        .into_iter()
+        .filter(|track| track.kind == kind)
+        .map(|track| {
+            let named: Vec<String> = [track.lang, track.title].into_iter().flatten().collect();
+            let name = if named.is_empty() { format!("Track {}", track.id) } else { named.join("  ") };
+            Track { id: track.id, name, selected: track.selected }
+        })
+        .collect()
 }
 
 /// Fills in an action template: `%f` is the path and `%n` the file name,
@@ -4148,7 +4151,10 @@ impl App {
     fn handle_window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => self.leave(event_loop),
-            WindowEvent::RedrawRequested => self.draw(),
+            WindowEvent::RedrawRequested => {
+                let _drawing = crate::mpv::drawing();
+                self.draw();
+            }
             WindowEvent::Resized(size) => {
                 if self.options.debug {
                     eprintln!("jog: window resized to {}x{}", size.width, size.height);

@@ -121,29 +121,88 @@ pub(crate) enum Known {
     Text(String),
 }
 
+/// Whether a watched property's change is told of as `PlayerEvent::Changed`,
+/// which has jog draw again; a quiet one is only kept, for when it is next
+/// read. One that changes with every frame and is only shown in passing,
+/// in the info overlay, is quiet.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Tell {
+    Loud,
+    Quiet,
+}
+
 /// The properties watched, with the kind each is. Their places here, from
 /// 1, are what mpv tags the change events with, and how the player
-/// process tells jog's of a change.
-pub(crate) const WATCHED: &[(&str, Kind)] = &[
-    ("eof-reached", Kind::Flag),
-    ("time-pos", Kind::Number),
-    ("duration", Kind::Number),
-    ("pause", Kind::Flag),
-    ("seeking", Kind::Flag),
-    ("vo-configured", Kind::Flag),
-    ("path", Kind::Text),
-    ("volume", Kind::Number),
-    ("track-list/count", Kind::Number),
-    ("video-format", Kind::Text),
-    ("video-params/gamma", Kind::Text),
-    ("video-params/primaries", Kind::Text),
-    ("container-fps", Kind::Number),
-    ("frame-drop-count", Kind::Number),
-    ("vo-drop-frame-count", Kind::Number),
+/// process tells jog's of a change. Every property jog reads while it
+/// draws is here, so that reading it never waits on the player: see
+/// `drawing`.
+pub(crate) const WATCHED: &[(&str, Kind, Tell)] = &[
+    ("eof-reached", Kind::Flag, Tell::Loud),
+    ("time-pos", Kind::Number, Tell::Loud),
+    ("duration", Kind::Number, Tell::Loud),
+    ("pause", Kind::Flag, Tell::Loud),
+    ("seeking", Kind::Flag, Tell::Loud),
+    ("vo-configured", Kind::Flag, Tell::Loud),
+    ("path", Kind::Text, Tell::Loud),
+    ("volume", Kind::Number, Tell::Loud),
+    ("track-list/count", Kind::Number, Tell::Loud),
+    ("video-format", Kind::Text, Tell::Loud),
+    ("video-params/gamma", Kind::Text, Tell::Loud),
+    ("video-params/primaries", Kind::Text, Tell::Loud),
+    ("container-fps", Kind::Number, Tell::Loud),
+    ("frame-drop-count", Kind::Number, Tell::Loud),
+    ("vo-drop-frame-count", Kind::Number, Tell::Loud),
+    // The tracks and chapters as a whole, as JSON: read a property at a
+    // time, they were a wait on the player for each of ten things about
+    // each track, with every drawing of the Tracks tab.
+    ("track-list", Kind::Text, Tell::Loud),
+    ("chapter-list", Kind::Text, Tell::Loud),
+    ("aid", Kind::Text, Tell::Loud),
+    ("sid", Kind::Text, Tell::Loud),
+    ("sub-delay", Kind::Number, Tell::Loud),
+    ("audio-delay", Kind::Number, Tell::Loud),
+    // What the info overlay shows of the video and how it plays.
+    ("width", Kind::Number, Tell::Quiet),
+    ("height", Kind::Number, Tell::Quiet),
+    ("video-params/pixelformat", Kind::Text, Tell::Quiet),
+    ("video-bitrate", Kind::Number, Tell::Quiet),
+    ("hwdec-current", Kind::Text, Tell::Quiet),
+    ("file-format", Kind::Text, Tell::Quiet),
+    ("estimated-vf-fps", Kind::Number, Tell::Quiet),
+    ("audio-codec-name", Kind::Text, Tell::Quiet),
+    ("audio-params/channel-count", Kind::Number, Tell::Quiet),
+    ("audio-params/samplerate", Kind::Number, Tell::Quiet),
+    ("audio-bitrate", Kind::Number, Tell::Quiet),
+    ("avsync", Kind::Number, Tell::Quiet),
+    ("demuxer-cache-duration", Kind::Number, Tell::Quiet),
 ];
 
 pub(crate) fn watched(property: &str) -> Option<usize> {
-    WATCHED.iter().position(|(name, _)| *name == property)
+    WATCHED.iter().position(|(name, ..)| *name == property)
+}
+
+thread_local! {
+    /// Whether this thread is drawing the window just now.
+    static DRAWING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks the time this thread is drawing the window, for as long as the
+/// value lives: a player asked for something then, which waits on the
+/// player, is told of on the terminal as a fault. Everything read while
+/// drawing is to be watched (`WATCHED`), and so known without asking.
+pub fn drawing() -> impl Drop {
+    struct Drawing(bool);
+    impl Drop for Drawing {
+        fn drop(&mut self) {
+            DRAWING.with(|drawing| drawing.set(self.0));
+        }
+    }
+    Drawing(DRAWING.with(|drawing| drawing.replace(true)))
+}
+
+/// Whether this thread is drawing the window just now.
+pub(crate) fn is_drawing() -> bool {
+    DRAWING.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]

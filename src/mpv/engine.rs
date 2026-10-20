@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use libloading::Library;
 
-use super::{watched, Known, PlayerEvent, Role, Signal, DEBUG, WATCHED};
+use super::{watched, Known, PlayerEvent, Role, Signal, Tell, DEBUG, WATCHED};
 
 const LIBRARY_NAMES: &[&str] = &["libmpv.so.2", "libmpv.so.1", "libmpv.so"];
 
@@ -295,7 +295,7 @@ impl Engine {
             // event for each straight away, and only signals when its
             // queue was empty.
             // A preview watches only the curve its file is coded on.
-            for (index, (name, kind)) in WATCHED.iter().enumerate() {
+            for (index, (name, kind, _)) in WATCHED.iter().enumerate() {
                 if matches!(role, Role::Playback { .. }) || *name == "video-params/gamma" {
                     (api.observe_property)(handle, index as u64 + 1, c_string(name).as_ptr(), format_of(*kind));
                 }
@@ -544,7 +544,11 @@ impl Engine {
                     // file being opened, nothing has changed.
                     if known[index] != value {
                         known[index] = value;
-                        events.push(if WATCHED[index].0 == "time-pos" { PlayerEvent::Moved } else { PlayerEvent::Changed });
+                        match WATCHED[index] {
+                            ("time-pos", ..) => events.push(PlayerEvent::Moved),
+                            (_, _, Tell::Loud) => events.push(PlayerEvent::Changed),
+                            (_, _, Tell::Quiet) => {}
+                        }
                     }
                 }
                 EVENT_COMMAND_REPLY if event.reply_userdata != 0 => events.push(PlayerEvent::Replied(event.reply_userdata, event.error >= 0)),

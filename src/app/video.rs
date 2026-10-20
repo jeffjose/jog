@@ -325,6 +325,7 @@ impl App {
         let speed = self.playing_speed().to_string();
         // The tracks and timing kept for it, told before it opens.
         let kept = self.kept_tracks(id);
+        let window = self.window_size();
         if let Some(player) = &mut self.player {
             let started = Instant::now();
             // Seeking one that is held somewhere else takes longer than
@@ -355,6 +356,12 @@ impl App {
                         player.choose_next(aid, sid, *sub_delay, *audio_delay);
                     }
                     player.play(&self.files[id], from, paused);
+                    // Its first frame drawn ahead too, in the player's own
+                    // process: the first draw at a size sets the conversion
+                    // up, a hundred milliseconds that are not the window's.
+                    if window.0 > 0 && window.1 > 0 {
+                        player.draw_ahead(Some(window));
+                    }
                     if self.options.debug {
                         eprintln!("jog: {:>7.1?} video asked for", started.elapsed());
                     }
@@ -401,11 +408,17 @@ impl App {
         let from = self.resume_from(next);
         let start = from.unwrap_or(0.0);
         let kept = self.kept_tracks(next);
+        let window = self.window_size();
         let Some(spare) = self.spare.as_mut().filter(|spare| spare.id != Some(next) || spare.from != start) else { return };
         if let Some((aid, sid, sub_delay, audio_delay)) = &kept {
             spare.player.choose_next(aid, sid, *sub_delay, *audio_delay);
         }
         spare.player.hold(&self.files[next], from);
+        // Its first frame drawn ahead at the window's size, so that taking
+        // over it has only to be copied in.
+        if window.0 > 0 && window.1 > 0 {
+            spare.player.draw_ahead(Some(window));
+        }
         (spare.id, spare.from) = (Some(next), start);
     }
 
@@ -423,6 +436,8 @@ impl App {
                 self.replace_player(Which::Spare(self.active ^ 1));
             }
             Signal::Events => {}
+            // Drawing its frame ahead, it has drawn it already.
+            Signal::Frame if spare.player.draws_ahead() => {}
             // Its frame is taken, which keeps it going, at the size it will
             // be drawn at when it takes over and on another thread: the
             // first draw at a size sets up the conversion, which for an HDR

@@ -87,6 +87,32 @@ fn a_crash_in_the_gpu_decoder_is_survived_and_the_video_played_on_the_cpu() {
 }
 
 #[test]
+fn drawing_never_waits_on_the_player() {
+    if !display() || !libmpv() {
+        return;
+    }
+    let Some(dir) = folder("drawing") else { return };
+    // Inspect up on its Tracks tab, and the info overlay: what reads most
+    // of the player while drawing.
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+    std::fs::write(dir.join("state/panels"), "inspector=pinned\ninspect-tab=Tracks\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_jog"))
+        .args(["--no-animations", "--no-positions", "-g", "640x400"])
+        .arg(dir.join("videos"))
+        .env("JOG_CONFIG", "/dev/null")
+        .env("JOG_STATE", dir.join("state"))
+        .env("JOG_SNAPSHOT", "/dev/null")
+        .env("JOG_SNAPSHOT_KEYS", "{F12}{Wait}i{Wait}")
+        .env("JOG_SNAPSHOT_WAIT", "1500")
+        .output()
+        .expect("jog runs");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{said}");
+    assert!(!said.contains("drawing waited on the player"), "a property read while drawing is not watched:\n{said}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_video_that_crashes_every_decoder_is_left_as_not_playable() {
     if !display() || !libmpv() {
         return;

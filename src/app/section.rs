@@ -57,6 +57,33 @@ fn kept_path() -> Option<PathBuf> {
 
 pub(super) type KeptSections = HashMap<PathBuf, Vec<Kept>>;
 
+/// The chapters from mpv's `chapter-list`, which it gives as JSON: when
+/// each starts, and its title, or its number for one with none.
+fn parse_chapters(list: &str) -> Vec<(f64, String)> {
+    let Ok(serde_json::Value::Array(chapters)) = serde_json::from_str(list) else { return Vec::new() };
+    chapters
+        .iter()
+        .take(200)
+        .enumerate()
+        .filter_map(|(n, chapter)| {
+            let title = chapter["title"].as_str().filter(|title| !title.is_empty()).map_or_else(|| format!("Chapter {}", n + 1), str::to_string);
+            Some((chapter["time"].as_f64()?, title))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chapters_read_from_the_players_list() {
+        let list = r#"[{"title":"Opening","time":0.000000},{"time":95.5},{"title":"","time":200}]"#;
+        assert_eq!(parse_chapters(list), vec![(0.0, "Opening".to_string()), (95.5, "Chapter 2".to_string()), (200.0, "Chapter 3".to_string())]);
+        assert!(parse_chapters("not json").is_empty());
+    }
+}
+
 fn read_kept() -> KeptSections {
     let text = kept_path().and_then(|path| std::fs::read_to_string(path).ok()).unwrap_or_default();
     let mut kept = KeptSections::new();
@@ -431,20 +458,10 @@ impl App {
         let path = self.files[id].clone();
         let kept = self.kept_sections.get_or_insert_with(read_kept).get(&path).into_iter().flatten();
         let mut entries: Vec<Entry> = kept.map(|kept| Entry { start: kept.a, end: kept.b, title: kept.name.clone(), kept: true }).collect();
-        // The file's chapters, read from the player once a video, when it
-        // has the file open: each is a wait on it, not to be made a frame
-        // until then.
+        // The file's chapters, once a video, when the player has the file
+        // open and has told of them.
         if video.showing && !self.chapters.contains_key(&id) {
-            let found = self.player.as_ref().map(|player| {
-                let count = player.number("chapter-list/count").unwrap_or(0.0) as usize;
-                (0..count.min(200))
-                    .filter_map(|n| {
-                        let time = player.number(&format!("chapter-list/{n}/time"))?;
-                        let title = player.text(&format!("chapter-list/{n}/title")).filter(|title| !title.is_empty()).unwrap_or_else(|| format!("Chapter {}", n + 1));
-                        Some((time, title))
-                    })
-                    .collect::<Vec<_>>()
-            });
+            let found = self.player.as_ref().and_then(|player| player.text("chapter-list")).map(|list| parse_chapters(&list));
             if let Some(found) = found {
                 self.chapters.insert(id, found);
             }

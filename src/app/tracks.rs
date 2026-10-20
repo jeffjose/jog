@@ -29,14 +29,21 @@ pub struct TrackInfo {
     pub selected: bool,
 }
 
-/// Every track of the file a player has open, in the file's order.
+/// Every track of the file a player has open, in the file's order: as the
+/// player keeps jog told of them, so reading them waits on nothing.
 pub fn track_list(player: &Player) -> Vec<TrackInfo> {
-    let count = player.number("track-list/count").unwrap_or(0.0) as usize;
-    (0..count)
-        .filter_map(|n| {
-            let text = |name: &str| player.text(&format!("track-list/{n}/{name}")).filter(|value| !value.is_empty());
-            let flag = |name: &str| player.flag(&format!("track-list/{n}/{name}")) == Some(true);
-            let kind = match text("type")?.as_str() {
+    player.text("track-list").map(|list| parse_tracks(&list)).unwrap_or_default()
+}
+
+/// The tracks from mpv's `track-list`, which it gives as JSON.
+fn parse_tracks(list: &str) -> Vec<TrackInfo> {
+    let Ok(serde_json::Value::Array(tracks)) = serde_json::from_str(list) else { return Vec::new() };
+    tracks
+        .iter()
+        .filter_map(|track| {
+            let text = |name: &str| track[name].as_str().filter(|value| !value.is_empty()).map(str::to_string);
+            let flag = |name: &str| track[name].as_bool() == Some(true);
+            let kind = match track["type"].as_str()? {
                 "video" => TrackKind::Video,
                 "audio" => TrackKind::Audio,
                 "sub" => TrackKind::Sub,
@@ -44,11 +51,11 @@ pub fn track_list(player: &Player) -> Vec<TrackInfo> {
             };
             Some(TrackInfo {
                 kind,
-                id: player.number(&format!("track-list/{n}/id"))? as i64,
+                id: track["id"].as_i64()?,
                 lang: text("lang"),
                 title: text("title"),
                 codec: text("codec").unwrap_or_default(),
-                channels: player.number(&format!("track-list/{n}/demux-channel-count")).map(|count| count as i64),
+                channels: track["demux-channel-count"].as_i64(),
                 default: flag("default"),
                 forced: flag("forced"),
                 external: flag("external"),
@@ -595,4 +602,21 @@ pub fn playing_words(tracks: &[TrackInfo], subtitles: bool) -> Option<String> {
     let audio = audio.map_or("No sound".to_string(), |t| format!("{}  {}", track_label(t), track_codec(t)));
     let sub = sub.map_or("CC off".to_string(), |t| format!("CC {}", track_label(t)));
     Some(format!("{audio}   ·   {sub}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tracks_read_from_the_players_list() {
+        // As mpv gives it, trimmed.
+        let list = r#"[{"id":1,"type":"video","default":true,"external":false,"selected":true,"codec":"hevc"},{"id":1,"type":"audio","title":"Surround","lang":"eng","default":true,"selected":true,"codec":"aac","demux-channel-count":6},{"id":2,"type":"sub","lang":"","forced":true,"external":true,"selected":false,"codec":"subrip"}]"#;
+        let tracks = parse_tracks(list);
+        assert_eq!(tracks.len(), 3);
+        assert_eq!((tracks[1].kind, tracks[1].id, tracks[1].channels, tracks[1].title.as_deref(), tracks[1].lang.as_deref()), (TrackKind::Audio, 1, Some(6), Some("Surround"), Some("eng")));
+        assert!(tracks[1].selected && tracks[1].default);
+        assert_eq!((tracks[2].kind, tracks[2].lang.as_deref(), tracks[2].forced, tracks[2].external), (TrackKind::Sub, None, true, true), "an empty language is none");
+        assert!(parse_tracks("").is_empty());
+    }
 }

@@ -266,8 +266,6 @@ impl Player {
     /// Opens a file and stops on the frame it would start at, so that it
     /// can be played at once when its turn comes. Does not wait for it.
     pub fn hold(&self, path: &Path, from: Option<f64>) {
-        // Held for later, its frames are not drawn ahead until it plays.
-        self.draw_ahead(None);
         self.opening(path);
         self.tell(&Request::Hold { path: path.as_os_str().as_bytes().to_vec(), from });
     }
@@ -305,6 +303,16 @@ impl Player {
     }
 
     fn get(&self, property: &str, kind: Kind) -> Option<Known> {
+        // Drawing waits on nothing: a property read then is to be watched.
+        // Said once a property, where it can be seen and put right.
+        if super::is_drawing() {
+            static SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
+            let mut said = SAID.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !said.iter().any(|name| name == property) {
+                said.push(property.to_string());
+                eprintln!("jog: drawing waited on the player for {property}, which is not watched");
+            }
+        }
         let started = Instant::now();
         let reply = self.ask(|id| Request::Get { id, name: property.into(), kind });
         if started.elapsed() > Duration::from_millis(2) && DEBUG.load(Ordering::Relaxed) {
@@ -379,9 +387,16 @@ impl Player {
         matches!(self.ask(|id| Request::FrameWaiting { id }), Some(Reply::Yes(true)))
     }
 
+    /// Whether each frame is drawn ahead, at a size.
+    pub fn draws_ahead(&self) -> bool {
+        self.ahead.get().is_some()
+    }
+
     /// Has each frame drawn at `size` as soon as it is ready, into slots
-    /// shared with this process, or with `None` no longer.
-    fn draw_ahead(&self, size: Option<(u32, u32)>) {
+    /// shared with this process, or with `None` no longer. A player
+    /// holding the next video ready has its first frame drawn so, at the
+    /// window's size, for it to be only copied in when it takes over.
+    pub fn draw_ahead(&self, size: Option<(u32, u32)>) {
         if self.ahead.get() == size || self.gone() {
             return;
         }
@@ -390,7 +405,7 @@ impl Player {
             // The states' block once; the slots made anew only to grow,
             // with room to spare, as the buffer is.
             if self.states.borrow().is_none() {
-                let Ok(states) = Mapped::create(wire::SLOTS * 4) else { return };
+                let Ok(states) = Mapped::create(wire::STATE_WORDS) else { return };
                 if wire::send(self.socket.as_fd(), &Request::Slots.encode(), Some(states.fd())).is_err() {
                     return;
                 }
@@ -436,10 +451,10 @@ impl Player {
         }
         let states = self.states.borrow();
         let Some(states) = states.as_ref() else { return false };
-        let Some((slot, count)) = wire::claim_newest(states, width, height) else {
-            // None drawn yet at this size: drawn now.
-            return self.render(pixels, width, height);
-        };
+        // None drawn yet of this file at this size: it is being drawn, and
+        // is told of when it is; meanwhile what is up stays up. Drawn here
+        // it would only wait behind that.
+        let Some((slot, count)) = wire::claim_newest(states, width, height) else { return false };
         if let Some(buffer) = self.slots.borrow().get(slot) {
             crate::ui::copy_into(&mut pixels[..wanted], &buffer.as_slice()[..wanted]);
         }
@@ -538,8 +553,12 @@ fn listen(socket: OwnedFd, mut child: std::process::Child, shared: Arc<Shared>, 
                         }
                     }
                 }
-                shared.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(events);
-                wake(Signal::Events);
+                // Only what is told of wakes jog: a quiet property changing
+                // is only kept, for when it is read.
+                if !events.is_empty() {
+                    shared.events.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(events);
+                    wake(Signal::Events);
+                }
             }
             Some(Notice::Frame) => wake(Signal::Frame),
             Some(Notice::Reply { id, reply }) => {

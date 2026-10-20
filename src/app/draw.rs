@@ -175,6 +175,8 @@ impl App {
     }
 
     pub(super) fn paint(&mut self, pixels: &mut [u32], window: (u32, u32)) {
+        // Drawing waits on nothing: see `mpv::drawing`.
+        let _drawing = crate::mpv::drawing();
         // The overview of workspaces takes the whole window.
         if self.overview.is_some() {
             self.scene_live = false;

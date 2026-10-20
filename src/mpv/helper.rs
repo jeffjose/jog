@@ -165,14 +165,23 @@ pub fn main(args: &[String]) -> ExitCode {
                 Request::ChooseNext { aid, sid, sub_delay, audio_delay } => engine.choose_next(&aid, &sid, sub_delay, audio_delay),
                 Request::Play { path, from, paused } => {
                     test_crash.check(&path, gpu);
+                    if let Some(states) = states.as_ref() {
+                        wire::opened(states);
+                    }
                     engine.play(Path::new(OsStr::from_bytes(&path)), from, paused);
                 }
                 Request::Hold { path, from } => {
                     test_crash.check(&path, gpu);
+                    if let Some(states) = states.as_ref() {
+                        wire::opened(states);
+                    }
                     engine.hold(Path::new(OsStr::from_bytes(&path)), from);
                 }
                 Request::Open { path } => {
                     test_crash.check(&path, gpu);
+                    if let Some(states) = states.as_ref() {
+                        wire::opened(states);
+                    }
                     engine.open(Path::new(OsStr::from_bytes(&path)));
                 }
                 Request::Stop => engine.stop(),
@@ -191,7 +200,7 @@ pub fn main(args: &[String]) -> ExitCode {
                     drop(buffer.take());
                     buffer = passed.and_then(|fd| Mapped::map(fd, pixels as usize).ok());
                 }
-                Request::Slots => states = passed.and_then(|fd| Mapped::map(fd, wire::SLOTS * 4).ok()),
+                Request::Slots => states = passed.and_then(|fd| Mapped::map(fd, wire::STATE_WORDS).ok()),
                 Request::Slot { index, pixels } => {
                     if let Some(slot) = slots.get_mut(index as usize) {
                         drop(slot.take());

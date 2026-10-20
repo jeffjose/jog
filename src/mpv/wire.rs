@@ -180,8 +180,10 @@ impl Mapped {
 /// jog's main thread only copies out the newest, rather than waiting on
 /// the drawing. Which buffer holds what, and who has it, is kept in a
 /// small block of shared memory both processes change atomically: for
-/// each slot its state, the width and height drawn at, and a count that
-/// says which frame is newest.
+/// each slot its state, the width and height drawn at, a count that says
+/// which frame is newest, and which file it is of; and after the slots,
+/// which file the player has open, counted up with each opened, so that
+/// a frame of the file before is never taken for one of this.
 pub const SLOTS: usize = 3;
 /// Nobody has it: the player process may draw into it.
 pub const FREE: u32 = 0;
@@ -192,22 +194,40 @@ pub const READY: u32 = 2;
 /// jog's process is copying it out.
 pub const READING: u32 = 3;
 
-/// What each slot's four numbers are, in order.
+/// What each slot's numbers are, in order.
 pub const STATE: usize = 0;
 pub const WIDTH: usize = 1;
 pub const HEIGHT: usize = 2;
 pub const COUNT: usize = 3;
+pub const FILE: usize = 4;
+const WORDS: usize = 5;
+/// How many numbers the block holds: the slots', then the file open.
+pub const STATE_WORDS: usize = SLOTS * WORDS + 1;
 
 impl Mapped {
     /// One of the numbers kept for `slot`, in shared memory made for the
     /// slots' states, to be changed atomically by either process.
     pub fn slot(&self, slot: usize, which: usize) -> &std::sync::atomic::AtomicU32 {
-        let at = slot * 4 + which;
+        self.word(slot * WORDS + which)
+    }
+
+    /// Which file the player has open, as counted in the block.
+    pub fn file(&self) -> &std::sync::atomic::AtomicU32 {
+        self.word(SLOTS * WORDS)
+    }
+
+    fn word(&self, at: usize) -> &std::sync::atomic::AtomicU32 {
         assert!(at < self.pixels);
         // SAFETY: within the mapping; an AtomicU32 has a u32's layout, and
         // the memory is only ever changed through atomics, by both ends.
         unsafe { &*self.pointer.add(at).cast::<std::sync::atomic::AtomicU32>() }
     }
+}
+
+/// The player process's side: another file opened. Frames drawn of the
+/// one before are no longer the newest of anything.
+pub fn opened(states: &Mapped) {
+    states.file().fetch_add(1, std::sync::atomic::Ordering::AcqRel);
 }
 
 /// The player process's side: a slot to draw the next frame into. A free
@@ -234,6 +254,7 @@ pub fn drawn(states: &Mapped, slot: usize, size: Option<(u32, u32)>, count: u32)
             states.slot(slot, WIDTH).store(width, Relaxed);
             states.slot(slot, HEIGHT).store(height, Relaxed);
             states.slot(slot, COUNT).store(count, Relaxed);
+            states.slot(slot, FILE).store(states.file().load(std::sync::atomic::Ordering::Acquire), Relaxed);
             // Last, and released: whoever sees it ready sees the rest.
             states.slot(slot, STATE).store(READY, Release);
         }
@@ -241,12 +262,15 @@ pub fn drawn(states: &Mapped, slot: usize, size: Option<(u32, u32)>, count: u32)
     }
 }
 
-/// jog's side: the count of the newest whole frame of this size, if any.
+/// jog's side: the count of the newest whole frame of this size, of the
+/// file open, if any.
 pub fn newest(states: &Mapped, width: u32, height: u32) -> Option<(usize, u32)> {
     use std::sync::atomic::Ordering::{Acquire, Relaxed};
+    let file = states.file().load(Acquire);
     (0..SLOTS)
         .filter(|slot| states.slot(*slot, STATE).load(Acquire) == READY)
         .filter(|slot| states.slot(*slot, WIDTH).load(Relaxed) == width && states.slot(*slot, HEIGHT).load(Relaxed) == height)
+        .filter(|slot| states.slot(*slot, FILE).load(Relaxed) == file)
         .map(|slot| (slot, states.slot(slot, COUNT).load(Relaxed)))
         .max_by_key(|(_, count)| *count)
 }
@@ -719,7 +743,7 @@ mod tests {
 
     #[test]
     fn the_newest_frame_is_taken_and_a_frame_being_read_is_not_drawn_over() {
-        let states = Mapped::create(SLOTS * 4).unwrap();
+        let states = Mapped::create(STATE_WORDS).unwrap();
         // Three frames drawn: each into a free slot.
         for count in 1..=3 {
             let slot = claim_to_draw(&states).unwrap();
@@ -740,6 +764,12 @@ mod tests {
         let slot = claim_to_draw(&states).unwrap();
         drawn(&states, slot, None, 0);
         assert_eq!(states.slot(slot, STATE).load(std::sync::atomic::Ordering::Relaxed), FREE);
+        // Another file opened: the frames of the one before are not its.
+        opened(&states);
+        assert_eq!(newest(&states, 1920, 1080), None);
+        let slot = claim_to_draw(&states).unwrap();
+        drawn(&states, slot, Some((1920, 1080)), 5);
+        assert_eq!(newest(&states, 1920, 1080).map(|(_, count)| count), Some(5));
     }
 
     #[test]

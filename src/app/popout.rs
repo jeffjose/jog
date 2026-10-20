@@ -156,7 +156,10 @@ impl App {
                 self.close_popout(what);
                 self.save_panels();
             }
-            WindowEvent::RedrawRequested => self.draw_popout(at),
+            WindowEvent::RedrawRequested => {
+                let _drawing = crate::mpv::drawing();
+                self.draw_popout(at);
+            }
             WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
                 let window = &self.popouts[at].window;
                 if let Ok(position) = window.outer_position() {
