@@ -37,6 +37,9 @@ impl App {
 
     /// The edge under the pointer, if any.
     pub(super) fn edge_at(&self, x: f64, y: f64) -> Option<PanelEdge> {
+        if self.drawing_popout.is_some() {
+            return None;
+        }
         let (x, y, grip) = (x as i32, y as i32, self.grip());
         if let Some(panel) = self.list_panel() {
             let edge = if self.list_right { panel.left } else { panel.left + panel.width };

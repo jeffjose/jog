@@ -1269,11 +1269,11 @@ pub struct App {
     /// answered just now, rather than the main window.
     popouts: Vec<popout::Popout>,
     popout_wanted: Option<Popped>,
-    drawing_popout: bool,
-    /// Whether the inspector goes out in a window of its own when opened,
-    /// and where that window last was: x, y, width, height.
-    inspector_out: bool,
-    popout_at: Option<[i32; 4]>,
+    drawing_popout: Option<Popped>,
+    /// The panels that go out in windows of their own when opened, and
+    /// where each one's window last was: x, y, width, height.
+    out: HashSet<Popped>,
+    popout_at: HashMap<Popped, [i32; 4]>,
     strip_docked: bool,
     /// Whether files are being decided about one after another; what has
     /// been decided, read when first asked about; and what has been found
@@ -1856,14 +1856,14 @@ impl App {
             inspector_pinned: pins.inspector.unwrap_or(false),
             list_units: pins.list_width.unwrap_or(resize::PANEL_UNITS),
             inspector_units: pins.inspector_width.unwrap_or(resize::PANEL_UNITS),
-            inspector_out: pins.inspector_out,
-            popout_at: pins.inspector_at,
+            out: pins.out.clone(),
+            popout_at: pins.at.clone(),
             edge_under: None,
             dialog_moved: RefCell::new(HashMap::new()),
             dialog_header: Cell::new(None),
             popouts: Vec::new(),
             popout_wanted: None,
-            drawing_popout: false,
+            drawing_popout: None,
             strip_docked: pins.strip.unwrap_or(false),
             triage_on: false,
             triage: RefCell::new(None),
@@ -2642,6 +2642,10 @@ impl App {
             ToggleWatch => self.set_watch(self.watch.is_none()),
             ToggleList => {
                 self.show_list = !self.show_list;
+                // Out in its own window, if that is where it was last.
+                if self.show_list {
+                    self.reopen_out(Popped::List);
+                }
                 self.apply_video_view();
                 self.list_search = None;
             }
@@ -2661,6 +2665,7 @@ impl App {
                 self.list_right = !self.list_right;
                 self.apply_video_view();
             }
+            ListPopOut => self.toggle_popout(Popped::List),
             // From the grid, the picture under its cursor; from the file
             // list, the row the menu was brought up on.
             OpenFromGrid | PlayFromGrid if self.grid.is_some() => self.open_from_grid(),
@@ -2987,6 +2992,7 @@ impl App {
             ToggleScenes => self.scenes_on,
             CycleSubtitles => self.subtitles,
             ListPin => self.list_pinned,
+            ListPopOut => self.popped(Popped::List),
             SortBy(sort) => self.sort == Some(sort),
             ReverseOrder => self.reversed,
             Shuffle => self.shuffled,

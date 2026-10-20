@@ -24,9 +24,9 @@ pub(super) struct Saved {
     /// Widths, in lines of text.
     pub list_width: Option<f64>,
     pub inspector_width: Option<f64>,
-    /// The inspector out in a window of its own, and where that was.
-    pub inspector_out: bool,
-    pub inspector_at: Option<[i32; 4]>,
+    /// The panels out in windows of their own, and where each one was.
+    pub out: std::collections::HashSet<super::Popped>,
+    pub at: std::collections::HashMap<super::Popped, [i32; 4]>,
 }
 
 /// The panels as last left. The strip's height scale is set as it is read.
@@ -38,18 +38,22 @@ pub(super) fn load() -> Saved {
     if let Some(scale) = number("strip-height") {
         super::resize::STRIP_SCALE.store((scale.clamp(0.6, 2.5) * 1000.0) as u32, atomic::Ordering::Relaxed);
     }
-    let at = value("inspector-window-at").and_then(|value| {
-        let parts: Vec<i32> = value.split(',').filter_map(|part| part.trim().parse().ok()).collect();
-        (parts.len() == 4 && parts[2] > 100 && parts[3] > 100).then(|| [parts[0], parts[1], parts[2], parts[3]])
-    });
+    let place = |name: &str| {
+        value(name).and_then(|value| {
+            let parts: Vec<i32> = value.split(',').filter_map(|part| part.trim().parse().ok()).collect();
+            (parts.len() == 4 && parts[2] > 100 && parts[3] > 100).then(|| [parts[0], parts[1], parts[2], parts[3]])
+        })
+    };
+    let out = super::Popped::ALL.into_iter().filter(|what| value(&format!("{}-window", what.name())) == Some("out")).collect();
+    let at = super::Popped::ALL.into_iter().filter_map(|what| Some((what, place(&format!("{}-window-at", what.name()))?))).collect();
     Saved {
         list: get("list"),
         inspector: get("inspector"),
         strip: get("strip"),
         list_width: number("list-width"),
         inspector_width: number("inspector-width"),
-        inspector_out: value("inspector-window") == Some("out"),
-        inspector_at: at,
+        out,
+        at,
     }
 }
 
@@ -99,15 +103,20 @@ impl App {
         }
         let word = |pinned: bool| if pinned { "pinned" } else { "over" };
         let text = format!(
-            "list={}\ninspector={}\nstrip={}\nlist-width={:.1}\ninspector-width={:.1}\nstrip-height={:.2}\ninspector-window={}\n{}",
+            "list={}\ninspector={}\nstrip={}\nlist-width={:.1}\ninspector-width={:.1}\nstrip-height={:.2}\n{}",
             word(self.list_pinned),
             word(self.inspector_pinned),
             word(self.strip_docked),
             self.list_units,
             self.inspector_units,
             super::resize::strip_scale(),
-            if self.inspector_out { "out" } else { "in" },
-            self.popout_at.map(|[x, y, w, h]| format!("inspector-window-at={x},{y},{w},{h}\n")).unwrap_or_default()
+            super::Popped::ALL
+                .into_iter()
+                .map(|what| {
+                    let at = self.popout_at.get(&what).map(|[x, y, w, h]| format!("{}-window-at={x},{y},{w},{h}\n", what.name())).unwrap_or_default();
+                    format!("{}-window={}\n{at}", what.name(), if self.out.contains(&what) { "out" } else { "in" })
+                })
+                .collect::<String>()
         );
         Some(text)
     }

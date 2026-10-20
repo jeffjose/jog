@@ -536,47 +536,14 @@ impl App {
                 let panel = self.list_panel().filter(|panel| panel.holds(x, y));
                 // The file list's own parts are measured from where it stands.
                 let within = x as i32 - self.list_panel().map_or(0, |panel| panel.left);
-                let inside = |b: &Button| (b.x..b.x + b.width).contains(&within) && (b.y..b.y + b.height).contains(&(y as i32));
                 // A click in the search box of the file list puts the
                 // keyboard there, and one anywhere else takes it away.
                 let in_field = self.list_field().is_some_and(|[fx, fy, w, h]| (fx..fx + w).contains(&within) && (fy..fy + h).contains(&(y as i32)));
                 if !in_field {
                     self.list_search = None;
                 }
-                if in_field {
-                    self.focus_list_search();
-                } else if let Some(command) = self.list_buttons().iter().find(|button| inside(button)).map(|button| button.command) {
-                    // One of the buttons at the head of the file list.
-                    self.execute(command, event_loop);
-                } else if let Some(pos) = self.list_loop_at(x, y) {
-                    // The loop before it has that video play again when it
-                    // ends, whatever the list's loop.
-                    self.toggle_file_loop(self.list[pos]);
-                } else if let Some(pos) = self.list_star_at(x, y) {
-                    // The star at the end of a row marks that file, or
-                    // takes its mark away.
-                    let id = self.list[pos];
-                    if !self.marks.remove(&id) {
-                        self.marks.insert(id);
-                    }
-                    self.redraw();
-                } else if panel.is_some() {
-                    // A click on a name goes to that file; with Shift it
-                    // marks the run to it, with Ctrl it marks it.
-                    let row = self.list_row_at(x, y);
-                    if let Some(pos) = row.filter(|_| self.modifiers.shift_key()) {
-                        self.mark_range(pos);
-                    } else if let Some(pos) = row.filter(|_| self.modifiers.control_key()) {
-                        self.mark_one(pos);
-                    } else if let Some(pos) = row {
-                        // The list and the strip stay as they are: the one
-                        // clicked is not brought to the middle.
-                        let first = self.list_panel().map(|panel| panel.first);
-                        let center = self.strip_center();
-                        self.go_to(pos, pos > self.pos);
-                        self.list_scroll = first.map(|first| (self.pos, self.list.len(), first));
-                        self.strip_scroll = center - self.pos as i64;
-                    }
+                if self.list_click(x, y, in_field, panel.is_some(), event_loop) {
+                    // The file list's, done.
                 } else if let Some(which) = self.strip_button_at(x, y) {
                     self.strip_button(which);
                 } else if self.scenes_shown() && y >= f64::from(strip.top) && self.strip_click(x, y, ui_px(height)) {
@@ -731,4 +698,52 @@ impl App {
         }
     }
 
+}
+
+impl App {
+    /// A click on the file list: in its search box, on a button at its
+    /// head, a row's loop or star, or a row. Whether it was any of them.
+    /// The main window's and the list's own, popped out, alike.
+    pub(super) fn list_click(&mut self, x: f64, y: f64, in_field: bool, on_panel: bool, event_loop: &ActiveEventLoop) -> bool {
+        let within = x as i32 - self.list_panel().map_or(0, |panel| panel.left);
+        let inside = |b: &Button| (b.x..b.x + b.width).contains(&within) && (b.y..b.y + b.height).contains(&(y as i32));
+        if in_field {
+            self.focus_list_search();
+        } else if let Some(command) = self.list_buttons().iter().find(|button| inside(button)).map(|button| button.command) {
+            // One of the buttons at the head of the file list.
+            self.execute(command, event_loop);
+        } else if let Some(pos) = self.list_loop_at(x, y) {
+            // The loop before it has that video play again when it
+            // ends, whatever the list's loop.
+            self.toggle_file_loop(self.list[pos]);
+        } else if let Some(pos) = self.list_star_at(x, y) {
+            // The star at the end of a row marks that file, or
+            // takes its mark away.
+            let id = self.list[pos];
+            if !self.marks.remove(&id) {
+                self.marks.insert(id);
+            }
+            self.redraw();
+        } else if on_panel {
+            // A click on a name goes to that file; with Shift it
+            // marks the run to it, with Ctrl it marks it.
+            let row = self.list_row_at(x, y);
+            if let Some(pos) = row.filter(|_| self.modifiers.shift_key()) {
+                self.mark_range(pos);
+            } else if let Some(pos) = row.filter(|_| self.modifiers.control_key()) {
+                self.mark_one(pos);
+            } else if let Some(pos) = row {
+                // The list and the strip stay as they are: the one
+                // clicked is not brought to the middle.
+                let first = self.list_panel().map(|panel| panel.first);
+                let center = self.strip_center();
+                self.go_to(pos, pos > self.pos);
+                self.list_scroll = first.map(|first| (self.pos, self.list.len(), first));
+                self.strip_scroll = center - self.pos as i64;
+            }
+        } else {
+            return false;
+        }
+        true
+    }
 }

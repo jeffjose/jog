@@ -215,6 +215,8 @@ pub enum Command {
     /// it to the other side of the window.
     ListPin,
     ListFlip,
+    /// Takes the file list out into a window of its own, or back.
+    ListPopOut,
     /// Drop a kept search without going back to where it was begun.
     ShowAllHere,
     /// The go-to box: type part of a name, pick a match, go to it.
@@ -522,6 +524,7 @@ pub fn command_icon(command: Command) -> &'static str {
         ListSearch => SEARCH,
         ListPin => PIN,
         ListFlip => REPLACE,
+        ListPopOut => EXTERNAL_LINK,
         ClearMarks => STAR_OFF,
         Shuffle => SHUFFLE,
         PlayPause => PLAY,

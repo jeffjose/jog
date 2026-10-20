@@ -1696,16 +1696,23 @@ impl App {
         if !self.show_list || self.grid.is_some() {
             return None;
         }
-        let (width, height) = self.window_size();
-        let px = ui_px(height);
-        let bottom = if self.band_shown() { Strip::for_height(height).top } else { height as i32 };
+        // Popped out, it is in its own window, across the whole of it, and
+        // not in the main one at all.
+        let out = self.drawing_popout == Some(Popped::List);
+        if out != self.popped(Popped::List) {
+            return None;
+        }
+        let main = self.window_size();
+        let (width, height) = if out { self.popout_size().unwrap_or(main) } else { main };
+        let px = ui_px(main.1);
+        let bottom = if !out && self.band_shown() { Strip::for_height(height).top } else { height as i32 };
         let row_height = Text::line_height(px) + px as i32 / 2;
         // Above the rows: a heading, and under it the buttons for the order.
         let top = Text::line_height(px) * 2 + px as i32 * 3;
         let rows = (((bottom - top) / row_height).max(1) as usize).min(self.list.len());
         let scrolled = self.list_scroll.filter(|(pos, len, _)| (*pos, *len) == (self.pos, self.list.len()));
         let first = scrolled.map_or(self.pos.saturating_sub(rows / 2), |(_, _, first)| first).min(self.list.len() - rows);
-        let panel_width = panel_width(width as i32, px, self.list_units);
+        let panel_width = if out { width as i32 } else { panel_width(width as i32, px, self.list_units) };
         let left = if self.list_right { width as i32 - panel_width } else { 0 };
         Some(ListPanel { left, width: panel_width, bottom, top, row_height, first, rows, px })
     }
@@ -1862,7 +1869,7 @@ impl App {
         // Then the pin, which stands the list beside the picture and not
         // over it, and the one that moves it to the other side.
         // And the loop, for the whole list: off, this video, or all of them.
-        for (at, command) in [(2, Command::ListPin), (3, Command::ListFlip), (4, Command::CycleLoop)] {
+        for (at, command) in [(2, Command::ListPin), (3, Command::ListFlip), (4, Command::CycleLoop), (5, Command::ListPopOut)] {
             buttons.push(Button { x: panel.width - (at + 1) * side - px / 2 - at * px / 3, y: px / 2, width: side, height: side, command });
         }
         // The orders, sharing the width of the row under the heading.
@@ -1953,7 +1960,7 @@ impl App {
         for button in &buttons {
             let over = (button.x..button.x + button.width).contains(&mouse.0) && (button.y..button.y + button.height).contains(&mouse.1);
             let on = self.is_checked(button.command);
-            if matches!(button.command, Command::ToggleList | Command::ListSearch | Command::ShowAllHere | Command::ListPin | Command::ListFlip | Command::CycleLoop) {
+            if matches!(button.command, Command::ToggleList | Command::ListSearch | Command::ShowAllHere | Command::ListPin | Command::ListFlip | Command::CycleLoop | Command::ListPopOut) {
                 // The round buttons at the head of every panel.
                 let icon = match button.command {
                     Command::ListSearch => commands::icons::SEARCH,
@@ -1962,6 +1969,7 @@ impl App {
                     Command::ListFlip => commands::icons::REPLACE,
                     Command::CycleLoop if self.looping == Looping::File => commands::icons::REPEAT_1,
                     Command::CycleLoop => commands::icons::REPEAT,
+                    Command::ListPopOut => commands::icons::EXTERNAL_LINK,
                     _ => commands::icons::X,
                 };
                 round_button(canvas, text, button, icon, px, over, on, false);

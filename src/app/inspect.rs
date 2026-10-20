@@ -250,9 +250,7 @@ impl App {
         });
         self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false });
         // Out in its own window, if that is where it was last.
-        if self.inspector_out && !self.popped(Popped::Inspector) {
-            self.popout_wanted = Some(Popped::Inspector);
-        }
+        self.reopen_out(Popped::Inspector);
         self.menu = None;
         self.redraw();
     }
@@ -633,7 +631,7 @@ impl App {
         // A column down the side the file list is not on, as wide as the
         // list and laid out as it is: over the picture, or pinned beside it.
         // Popped out, the whole of its own window.
-        let popped = self.drawing_popout;
+        let popped = self.drawing_popout == Some(Popped::Inspector);
         let (width, height) = (if popped { canvas.width } else { panel_width(canvas.width, px, self.inspector_units) }, canvas.height);
         let (left, top) = (if self.list_right || popped { 0 } else { canvas.width - width }, 0);
         inspector.place = [left, top, width, height];
@@ -1218,8 +1216,9 @@ fn picture_cards(picture: &crate::picmeta::Picture, tab: usize) -> Vec<Card> {
 impl App {
     /// Whether a window position is on the inspector's panel.
     pub(super) fn over_inspector(&self, x: f64, y: f64) -> bool {
-        // Popped out, it is not in the main window at all.
-        !self.popped(Popped::Inspector) && self.inspector.as_ref().is_some_and(|inspector| {
+        // Popped out, it is not in the main window at all; nor is the main
+        // window's what a popped-out one is answering.
+        self.drawing_popout.is_none() && !self.popped(Popped::Inspector) && self.inspector.as_ref().is_some_and(|inspector| {
             let [left, top, w, h] = inspector.place;
             (left..left + w).contains(&(x as i32)) && (top..top + h).contains(&(y as i32))
         })
