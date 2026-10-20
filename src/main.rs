@@ -43,6 +43,18 @@ use app::{App, Event};
 use loader::Loader;
 use options::{ConvertTo, Parsed};
 
+/// jog's version and the commit it was built from: `0.1.0-abc1234`, with
+/// `-dirty` when the tree had changes not committed. Just the version where
+/// it was built without git.
+pub fn version() -> String {
+    // Unset where git could not be asked, or vergen's stand-in.
+    let Some(sha) = option_env!("VERGEN_GIT_SHA").filter(|sha| !sha.is_empty() && !sha.contains("VERGEN")) else {
+        return env!("CARGO_PKG_VERSION").to_string();
+    };
+    let dirty = if option_env!("VERGEN_GIT_DIRTY") == Some("true") { "-dirty" } else { "" };
+    format!("{}-{sha}{dirty}", env!("CARGO_PKG_VERSION"))
+}
+
 fn main() -> ExitCode {
     // Started by jog itself to run a video player in a process of its own:
     // that, and nothing else.
@@ -64,7 +76,7 @@ fn main() -> ExitCode {
             }
         },
         Ok(Parsed::Version) => {
-            println!("jog {}", env!("CARGO_PKG_VERSION"));
+            println!("jog {}", version());
             return ExitCode::SUCCESS;
         }
         Err(error) => {

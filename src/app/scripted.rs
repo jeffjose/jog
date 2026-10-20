@@ -210,7 +210,7 @@ impl App {
             _ => "an unknown display",
         };
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-        println!("jog {} benchmark: {} files, a {width}x{height} window on {backend}, {cores} cores", env!("CARGO_PKG_VERSION"), self.list.len());
+        println!("jog {} benchmark: {} files, a {width}x{height} window on {backend}, {cores} cores", crate::version(), self.list.len());
         println!();
         println!("{:<24} {:<32} {:>8} {:>8} {:>8} {:>5}", "scene", "metric", "median", "p90", "max", "n");
         // Scenes in the order they were played; within one, the metrics

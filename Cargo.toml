@@ -45,3 +45,6 @@ strip = true
 # Decoding in an unoptimised build is unusably slow.
 [profile.dev.package."*"]
 opt-level = 3
+
+[build-dependencies]
+vergen-gitcl = "10.0.3"
