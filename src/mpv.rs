@@ -165,9 +165,10 @@ pub struct Player {
     known: Mutex<Vec<Option<Known>>>,
     /// Whether this player watches them: a preview player does not.
     watching: bool,
-    /// Whether the file open is HLG, and the filters the viewer has asked
-    /// for, to turn or mirror it: see `set_filter`.
-    hlg: Cell<bool>,
+    /// The HDR transfer of the file open, "hlg" or "pq", for the filter it
+    /// needs, and the filters the viewer has asked for, to turn or mirror
+    /// it: see `set_filter`.
+    hdr: Cell<Option<&'static str>>,
     view_filter: RefCell<String>,
     /// The tracks and delays the next file opened starts with, when one
     /// was chosen for it: audio, subtitles ("no" for none), then the
@@ -209,6 +210,12 @@ enum Known {
     Number(f64),
     Text(String),
 }
+
+/// A PQ video brought down to SDR: to linear light, where 100 nits is
+/// SDR's white, into BT.709's primaries, tone mapped (Hable, its peak from
+/// the frame's own metadata) and back to BT.709. 16 ms a 1080p frame on
+/// one core, on the player's filter thread, not the window's.
+const PQ_TO_SDR: &str = "lavfi=[zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p]";
 
 fn watched(property: &str) -> Option<usize> {
     WATCHED.iter().position(|(name, _)| *name == property)
@@ -360,7 +367,7 @@ impl Player {
             }
             let known = Mutex::new(vec![None; WATCHED.len()]);
             let watching = matches!(role, Role::Playback { .. });
-            Ok(Player { api, handle, render, known, watching, hlg: Cell::new(false), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), drawing: std::sync::Arc::new(Mutex::new(())), _wake: wake, _library: library })
+            Ok(Player { api, handle, render, known, watching, hdr: Cell::new(None), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), drawing: std::sync::Arc::new(Mutex::new(())), _wake: wake, _library: library })
         }
     }
 
@@ -483,11 +490,17 @@ impl Player {
     /// An HLG video comes out of the software renderer white, with the
     /// brightest parts gone magenta and cyan: mpv 0.34 converts HLG with no
     /// tone mapping, and clips. HLG was made to look right on an SDR screen
-    /// as it is, so the player is told it is SDR and converts nothing.
+    /// as it is, so the player is told it is SDR and converts nothing. PQ
+    /// is not made so, and clipped it is nearly all white: it is tone
+    /// mapped to SDR on the way, by `PQ_TO_SDR`.
     fn apply_filter(&self) {
         let view = self.view_filter.borrow();
-        let hlg = self.hlg.get().then_some("format=gamma=bt.1886");
-        let filters: Vec<&str> = hlg.into_iter().chain((!view.is_empty()).then_some(view.as_str())).collect();
+        let hdr = match self.hdr.get() {
+            Some("hlg") => Some("format=gamma=bt.1886"),
+            Some(_) => Some(PQ_TO_SDR),
+            None => None,
+        };
+        let filters: Vec<&str> = hdr.into_iter().chain((!view.is_empty()).then_some(view.as_str())).collect();
         self.set("vf", &filters.join(","));
     }
 
@@ -592,8 +605,12 @@ impl Player {
                         events.push(PlayerEvent::AtEnd);
                     }
                     if WATCHED[index].0 == "video-params/gamma" {
-                        let hlg = matches!(&value, Some(Known::Text(gamma)) if gamma == "hlg");
-                        if hlg != self.hlg.replace(hlg) {
+                        let hdr = match &value {
+                            Some(Known::Text(gamma)) if gamma == "hlg" => Some("hlg"),
+                            Some(Known::Text(gamma)) if gamma == "pq" => Some("pq"),
+                            _ => None,
+                        };
+                        if hdr != self.hdr.replace(hdr) {
                             self.apply_filter();
                         }
                     }
