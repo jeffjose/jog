@@ -1940,9 +1940,13 @@ impl App {
             true => canvas.fill(0, 0, panel.width, panel.bottom, GRID_COLOR),
             false => canvas.shade(0, 0, panel.width, panel.bottom, 36),
         }
-        // A line down the side that faces the picture.
+        // A line down the side that faces the picture: in the accent, and
+        // wider, while the list has the arrow keys.
         if !panel.embedded {
-            canvas.fill(if self.list_right { 0 } else { panel.width - 1 }, 0, 1, panel.bottom, MENU_EDGE_COLOR);
+            let (width, color) = if self.list_keys { (2, accent()) } else { (1, MENU_EDGE_COLOR) };
+            canvas.fill(if self.list_right { 0 } else { panel.width - width }, 0, width, panel.bottom, color);
+        } else if self.list_keys {
+            canvas.fill(0, panel.top, 2, panel.bottom - panel.top, accent());
         }
 
         // The heading: how many files, and what they are narrowed to, with

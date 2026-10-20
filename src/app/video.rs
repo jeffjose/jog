@@ -1037,6 +1037,13 @@ impl App {
     /// Where playback is and how long the video is, in seconds.
     pub(super) fn video_time(&self) -> Option<(f64, f64)> {
         let (player, video) = (self.player.as_ref()?, self.video.as_ref()?);
+        // Until the player says it has this file open, what it says of the
+        // time is of the file before: going to another while one was paused
+        // halfway, the bar stood at half before it went back to the start.
+        let open = player.text("path").is_some_and(|open| std::path::Path::new(&open) == self.files[video.id].as_path());
+        if !open {
+            return None;
+        }
         let length = player.number("duration").filter(|length| *length > 0.0)?;
         // A frame kept from before a pause, on show: its own time. Straight
         // after a seek mpv still reports where it was.

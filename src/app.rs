@@ -1289,6 +1289,8 @@ pub struct App {
     /// where an unpinned list lies over the picture.
     list_right: bool,
     list_pinned: bool,
+    /// The file list has the arrow keys: it was clicked on last.
+    list_keys: bool,
     /// Whether the inspector stands beside the picture rather than over it,
     /// and likewise the strip along the bottom below it.
     inspector_pinned: bool,
@@ -1927,7 +1929,9 @@ impl App {
             // Pinned or not as last time, unless the config or the command
             // line pins the list.
             list_pinned: options.list_pinned || pins.list.unwrap_or(false),
-            inspector_pinned: pins.inspector.unwrap_or(false),
+            list_keys: false,
+            // Inspect beside the picture unless left over it: it is read alongside.
+            inspector_pinned: pins.inspector.unwrap_or(true),
             list_units: pins.list_width.unwrap_or(resize::PANEL_UNITS),
             inspector_units: pins.inspector_width.unwrap_or(resize::PANEL_UNITS),
             out: pins.out.clone(),

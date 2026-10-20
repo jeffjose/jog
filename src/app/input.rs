@@ -55,6 +55,11 @@ impl App {
         if self.track_editor.is_some() {
             return self.track_editor_key(key);
         }
+        // The file list clicked on last has the arrow keys: up and down go
+        // through it, opening each file as they come to it.
+        if self.list_keys && self.modifiers.is_empty() && self.palette.is_none() && self.menu.is_none() && self.list_search.is_none() && self.list_key(key.clone()) {
+            return;
+        }
         if self.inspector.is_some() {
             // What the inspector does not take goes on to the video.
             if self.inspector_key(key.clone()) {
@@ -343,8 +348,48 @@ impl App {
         self.redraw();
     }
 
+    /// A key while the file list has the arrow keys; whether it took it.
+    /// Up and down go to the file before and after in the list, as far as
+    /// its ends; Page Up and Down a page of rows; Home and End its first
+    /// and last; Escape gives the keys back to the picture.
+    fn list_key(&mut self, key: Key<&str>) -> bool {
+        let Some(panel) = self.list_panel() else {
+            self.list_keys = false;
+            return false;
+        };
+        let last = self.list.len().saturating_sub(1);
+        let page = panel.rows.saturating_sub(1).max(1);
+        let to = match key {
+            Key::Named(NamedKey::ArrowUp) => self.pos.saturating_sub(1),
+            Key::Named(NamedKey::ArrowDown) => (self.pos + 1).min(last),
+            Key::Named(NamedKey::PageUp) => self.pos.saturating_sub(page),
+            Key::Named(NamedKey::PageDown) => (self.pos + page).min(last),
+            Key::Named(NamedKey::Home) => 0,
+            Key::Named(NamedKey::End) => last,
+            Key::Named(NamedKey::Escape) => {
+                self.list_keys = false;
+                self.redraw();
+                return true;
+            }
+            _ => return false,
+        };
+        if to != self.pos {
+            self.go_to(to, to > self.pos);
+        }
+        true
+    }
+
     pub(super) fn mouse_button(&mut self, button: MouseButton, pressed: bool, event_loop: &ActiveEventLoop) {
         let (x, y) = self.mouse;
+        // The arrow keys go where the last click was: to the file list after
+        // a click on it, to the picture after a click anywhere else.
+        if button == MouseButton::Left && pressed {
+            let on_list = self.list_panel().is_some_and(|panel| panel.holds(x, y));
+            if on_list != self.list_keys {
+                self.list_keys = on_list;
+                self.redraw();
+            }
+        }
         // A panel's edge taken hold of, or let go of.
         if button == MouseButton::Left {
             if !pressed && matches!(self.drag, Some(Drag::Resize(_))) {
