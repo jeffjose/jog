@@ -117,3 +117,46 @@ impl App {
         }
     }
 }
+
+impl App {
+    /// How far a dialog has been moved from the middle of the window.
+    pub(super) fn dialog_offset(&self, which: &'static str) -> (i32, i32) {
+        self.dialog_moved.borrow().get(which).copied().unwrap_or((0, 0))
+    }
+
+    /// Where a dialog of `size` stands in a window of `window`: in the
+    /// middle, moved as it was dragged, and kept inside. Notes its heading,
+    /// `header` high, as the part to take hold of.
+    pub(super) fn place_dialog(&self, which: &'static str, window: (i32, i32), size: (i32, i32), header: i32) -> (i32, i32) {
+        let (dx, dy) = self.dialog_offset(which);
+        let left = ((window.0 - size.0) / 2 + dx).clamp(0, (window.0 - size.0).max(0));
+        let top = ((window.1 - size.1) / 2 + dy).clamp(0, (window.1 - size.1).max(0));
+        self.dialog_header.set(Some((which, [left, top, size.0, header])));
+        (left, top)
+    }
+
+    /// Takes hold of a dialog's heading, away from its buttons.
+    pub(super) fn grab_dialog(&mut self, x: f64, y: f64) -> bool {
+        let Some((which, [left, top, width, height])) = self.dialog_header.get() else { return false };
+        let (xi, yi) = (x as i32, y as i32);
+        if !((left..left + width).contains(&xi) && (top..top + height).contains(&yi)) || self.on_dialog_button(xi, yi) {
+            return false;
+        }
+        self.drag = Some(Drag::Move { which, from: (x, y), start: self.dialog_offset(which) });
+        true
+    }
+
+    /// Whether a point is on one of the open dialog's own buttons.
+    fn on_dialog_button(&self, x: i32, y: i32) -> bool {
+        let on = |[left, top, w, h]: [i32; 4]| (left..left + w).contains(&x) && (top..top + h).contains(&y);
+        self.convert_panel.as_ref().is_some_and(|panel| panel.hits().iter().any(|place| on(*place)))
+            || self.track_editor.as_ref().is_some_and(|editor| editor.hits().iter().any(|place| on(*place)))
+    }
+
+    /// The dialog held follows the pointer.
+    pub(super) fn move_dialog(&mut self, which: &'static str, from: (f64, f64), start: (i32, i32), x: f64, y: f64) {
+        let offset = (start.0 + (x - from.0) as i32, start.1 + (y - from.1) as i32);
+        self.dialog_moved.borrow_mut().insert(which, offset);
+        self.redraw();
+    }
+}

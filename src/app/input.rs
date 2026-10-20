@@ -125,6 +125,9 @@ impl App {
             self.drag_edge_to(edge, x, y);
             return;
         }
+        if let Some(Drag::Move { which, from, start }) = self.drag {
+            return self.move_dialog(which, from, start, x, y);
+        }
         self.edge_cursor(x, y);
         // The button held down and then moved is a drag, not a hold; and
         // the loupe goes where the pointer does.
@@ -251,7 +254,7 @@ impl App {
         match &mut self.drag {
             Some(Drag::Pan) => self.pan(dx, dy),
             // Only in the grid, which is dealt with above.
-            Some(Drag::Pages | Drag::Resize(_)) => {}
+            Some(Drag::Pages | Drag::Resize(_) | Drag::Move { .. }) => {}
             Some(Drag::Zoom { start_x, start_scale, anchor, moved }) => {
                 *moved = true;
                 let (scale, anchor) = (*start_scale * ((x - *start_x) / 300.0).exp(), *anchor);
@@ -310,7 +313,11 @@ impl App {
             if !pressed && matches!(self.drag, Some(Drag::Resize(_))) {
                 return self.let_go_of_edge();
             }
-            if pressed && self.grab_edge(x, y) {
+            if !pressed && matches!(self.drag, Some(Drag::Move { .. })) {
+                self.drag = None;
+                return;
+            }
+            if pressed && (self.grab_edge(x, y) || self.grab_dialog(x, y)) {
                 return;
             }
         }

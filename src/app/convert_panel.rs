@@ -42,6 +42,13 @@ enum Hit {
     Preview,
 }
 
+impl ConvertPanel {
+    /// Where its buttons and the rest it answers clicks on were drawn.
+    pub(super) fn hits(&self) -> Vec<[i32; 4]> {
+        self.drawn.iter().map(|(_, place)| *place).collect()
+    }
+}
+
 pub struct ConvertPanel {
     id: usize,
     format: Format,
@@ -560,7 +567,8 @@ impl App {
         let small_line = Text::line_height(small);
         let width = (canvas.width * 3 / 4).clamp((px as i32 * 40).min(canvas.width - 2 * pad), canvas.width - 2 * pad);
         let height = (canvas.height * 7 / 8).min(canvas.height - 2 * pad);
-        let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
+        // In the middle, or where it was moved to by its heading.
+        let (left, top) = self.place_dialog("convert", (canvas.width, canvas.height), (width, height), pad * 2 + line);
         panel_box(canvas, left, top, width, height, pad);
         let inner = left + 3 * pad / 2;
         let inner_w = width - 3 * pad;

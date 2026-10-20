@@ -49,6 +49,13 @@ enum Hit {
     Close,
 }
 
+impl TrackEditor {
+    /// Where its buttons and rows were drawn.
+    pub(super) fn hits(&self) -> Vec<[i32; 4]> {
+        self.drawn.iter().map(|(_, place)| *place).collect()
+    }
+}
+
 pub struct TrackEditor {
     id: usize,
     rows: Vec<EditRow>,
@@ -501,16 +508,18 @@ impl App {
     pub(super) fn draw_track_editor(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
         let mouse = (self.mouse.0 as i32, self.mouse.1 as i32);
         let name = self.track_editor.as_ref().map(|editor| self.name_of(editor.id)).unwrap_or_default();
-        let Some(editor) = &mut self.track_editor else { return };
+        let Some(rows) = self.track_editor.as_ref().map(|editor| editor.rows.len()) else { return };
         let pad = px as i32;
         let line = Text::line_height(px);
         let small = (px * 5 / 6).max(11);
         let small_line = Text::line_height(small);
         let row_h = line + pad * 2 / 3;
         let width = (px as i32 * 52).min(canvas.width - 4 * pad);
-        let rows_h = editor.rows.len().max(1) as i32 * (row_h + pad / 4);
+        let rows_h = rows.max(1) as i32 * (row_h + pad / 4);
         let height = (pad + line + pad + small_line + pad / 2 + rows_h + pad / 2 + pad / 2 + line + pad / 2 + small_line + pad).min(canvas.height - 2 * pad);
-        let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
+        // In the middle, or where it was moved to by its heading.
+        let (left, top) = self.place_dialog("tracks", (canvas.width, canvas.height), (width, height), pad * 2 + line);
+        let Some(editor) = &mut self.track_editor else { return };
         panel(canvas, left, top, width, height, pad * 2 / 3);
         editor.drawn.clear();
         let inner = left + pad * 3 / 2;

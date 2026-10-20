@@ -1258,6 +1258,10 @@ pub struct App {
     list_units: f64,
     inspector_units: f64,
     edge_under: Option<PanelEdge>,
+    /// How far each dialog has been moved from the middle, and the heading
+    /// of the one drawn last frame, to take hold of.
+    dialog_moved: RefCell<HashMap<&'static str, (i32, i32)>>,
+    dialog_header: Cell<Option<(&'static str, [i32; 4])>>,
     strip_docked: bool,
     /// Whether files are being decided about one after another; what has
     /// been decided, read when first asked about; and what has been found
@@ -1382,6 +1386,9 @@ enum Drag {
     Pages,
     /// Dragging a panel's edge, to make it wider or the strip taller.
     Resize(PanelEdge),
+    /// Moving a dialog by its heading: which, where the pointer took hold
+    /// and how far it had been moved then.
+    Move { which: &'static str, from: (f64, f64), start: (i32, i32) },
 }
 
 struct Menu {
@@ -1838,6 +1845,8 @@ impl App {
             list_units: pins.3.unwrap_or(resize::PANEL_UNITS),
             inspector_units: pins.4.unwrap_or(resize::PANEL_UNITS),
             edge_under: None,
+            dialog_moved: RefCell::new(HashMap::new()),
+            dialog_header: Cell::new(None),
             strip_docked: pins.2.unwrap_or(false),
             triage_on: false,
             triage: RefCell::new(None),

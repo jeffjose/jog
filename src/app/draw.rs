@@ -365,6 +365,8 @@ impl App {
     }
 
     pub(super) fn draw_overlays(&mut self, canvas: &mut Canvas) {
+        // The dialog drawn this frame, if any, says where its heading is.
+        self.dialog_header.set(None);
         let (width, height) = (canvas.width, canvas.height);
         let px = ui_px(height as u32);
         let margin = px as i32;
