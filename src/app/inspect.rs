@@ -164,6 +164,8 @@ pub(super) enum Hit {
     Pin,
     /// Out into a window of its own, or back.
     PopOut,
+    /// Docked along the bottom, or down the side.
+    Dock,
     /// A command, as from a key or the menu: the transport bar's and the
     /// action rows', run on the next turn of the event loop.
     Run(Command),
@@ -471,6 +473,7 @@ impl App {
             Hit::Track(audio, id) => self.choose_track(audio, id),
             Hit::Close => self.inspector = None,
             Hit::Pin => self.toggle_inspector_pin(),
+            Hit::Dock => self.toggle_inspector_dock(),
             Hit::PopOut => self.toggle_popout(Popped::Inspector),
             Hit::Headroom(up) => self.hdr_headroom = (self.hdr_headroom + if up { 0.25 } else { -0.25 }).clamp(0.0, 6.0),
             Hit::GainView => {
@@ -701,8 +704,15 @@ impl App {
         // list and laid out as it is: over the picture, or pinned beside it.
         // Popped out, the whole of its own window.
         let popped = self.drawing_popout == Some(Popped::Inspector);
-        let (width, height) = (if popped { canvas.width } else { panel_width(canvas.width, px, self.inspector_units) }, canvas.height);
-        let (left, top) = (if self.list_right || popped { 0 } else { canvas.width - width }, 0);
+        // Docked along the bottom: across the window, under the picture.
+        let bottom = self.inspector_bottom && !popped;
+        let (width, height) = match (popped, bottom) {
+            (true, _) => (canvas.width, canvas.height),
+            (false, true) => (canvas.width, self.inspector_height(canvas.height)),
+            (false, false) => (panel_width(canvas.width, px, self.inspector_units), canvas.height),
+        };
+        let left = if self.list_right || popped || bottom { 0 } else { canvas.width - width };
+        let top = if bottom { canvas.height - height } else { 0 };
         inspector.place = [left, top, width, height];
         // Nothing in it has changed: the panel as it was.
         // The pointer over the panel, as the panel is to be drawn: not by
@@ -735,7 +745,11 @@ impl App {
         let behind = (through > 0).then(|| canvas.copy(left, top, width, height));
 
         canvas.fill(left, top, width, height, GRID_COLOR);
-        canvas.fill(if self.list_right { left + width - 1 } else { left }, top, 1, height, MENU_EDGE_COLOR);
+        if bottom {
+            canvas.fill(left, top, width, 1, MENU_EDGE_COLOR);
+        } else {
+            canvas.fill(if self.list_right { left + width - 1 } else { left }, top, 1, height, MENU_EDGE_COLOR);
+        }
         inspector.drawn.clear();
         let inner = left + pad * 3 / 2;
         let inner_w = width - pad * 3;
@@ -750,6 +764,8 @@ impl App {
         let mut buttons = vec![(Hit::Close, commands::icons::X, false)];
         if !popped {
             buttons.push((Hit::Pin, commands::icons::PIN, self.inspector_pinned));
+            // Down the side or along the bottom, as a browser's tools dock.
+            buttons.push((Hit::Dock, commands::icons::LAYOUT_GRID, self.inspector_bottom));
         }
         buttons.push((Hit::PopOut, if popped { commands::icons::POP_IN } else { commands::icons::EXTERNAL_LINK }, false));
         buttons.push((Hit::CopyAll, commands::icons::BRACES, false));
@@ -1363,9 +1379,30 @@ impl App {
     /// The inspector's width, and whether it stands on the left, for the
     /// picture or video to keep clear of it: the same sums it is drawn by.
     pub(super) fn inspector_room(&self) -> Option<(i32, bool)> {
-        self.inspector.as_ref().filter(|_| self.inspector_pinned && !self.popped(Popped::Inspector))?;
+        self.inspector.as_ref().filter(|_| self.inspector_pinned && !self.inspector_bottom && !self.popped(Popped::Inspector))?;
         let (width, height) = self.window_size();
         Some((panel_width(width as i32, ui_px(height), self.inspector_units), self.list_right))
+    }
+
+    /// How tall the inspector is, docked along the bottom.
+    pub(super) fn inspector_height(&self, window_height: i32) -> i32 {
+        let px = f64::from(ui_px(window_height as u32));
+        ((self.inspector_rows * px) as i32).clamp((px * 12.0) as i32, window_height * 2 / 3)
+    }
+
+    /// The room the inspector takes along the bottom, pinned there.
+    pub(super) fn inspector_bottom_room(&self) -> Option<i32> {
+        self.inspector.as_ref().filter(|_| self.inspector_pinned && self.inspector_bottom && !self.popped(Popped::Inspector))?;
+        Some(self.inspector_height(self.window_size().1 as i32))
+    }
+
+    /// Docks the inspector along the bottom, or back down the side;
+    /// remembered for next time.
+    pub(super) fn toggle_inspector_dock(&mut self) {
+        self.inspector_bottom = !self.inspector_bottom;
+        self.save_panels();
+        self.apply_video_view();
+        self.redraw();
     }
 
     /// Pins the inspector beside the picture, which makes room for it, or

@@ -48,9 +48,16 @@ impl App {
             }
         }
         if let Some([left, top, width, height]) = self.inspector.as_ref().filter(|_| !self.popped(Popped::Inspector)).map(|inspector| inspector.place()) {
-            let edge = if self.list_right { left + width } else { left };
-            if (x - edge).abs() <= grip && (top..top + height).contains(&y) {
-                return Some(PanelEdge::Inspector);
+            // Along the bottom, its top edge; down the side, the one by the picture.
+            if self.inspector_bottom {
+                if (y - top).abs() <= grip && (left..left + width).contains(&x) {
+                    return Some(PanelEdge::Inspector);
+                }
+            } else {
+                let edge = if self.list_right { left + width } else { left };
+                if (x - edge).abs() <= grip && (top..top + height).contains(&y) {
+                    return Some(PanelEdge::Inspector);
+                }
             }
         }
         if !self.strip_buttons().is_empty() {
@@ -83,6 +90,7 @@ impl App {
         match edge {
             PanelEdge::List => self.list_units = units(!self.list_right),
             // The inspector stands on the side the list is not.
+            PanelEdge::Inspector if self.inspector_bottom => self.inspector_rows = ((f64::from(height) - y) / px).clamp(12.0, f64::from(height) * 2.0 / 3.0 / px),
             PanelEdge::Inspector => self.inspector_units = units(self.list_right),
             PanelEdge::Strip => {
                 let usual = f64::from(Strip::usual_height(height));
@@ -112,6 +120,7 @@ impl App {
         self.edge_under = edge;
         let icon = match edge {
             Some(PanelEdge::Strip) => CursorIcon::NsResize,
+            Some(PanelEdge::Inspector) if self.inspector_bottom => CursorIcon::NsResize,
             Some(_) => CursorIcon::EwResize,
             None => CursorIcon::Default,
         };

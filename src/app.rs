@@ -1278,6 +1278,10 @@ pub struct App {
     /// The tab Inspect opens on, the one used last; and a command one of
     /// its buttons asked for, run on the next turn of the event loop.
     inspect_pane: Pane,
+    /// Inspect docked along the bottom rather than down the side, and how
+    /// tall it is there, in lines of text.
+    inspector_bottom: bool,
+    inspector_rows: f64,
     pending_command: Option<Command>,
     /// Where Inspect's Files tab has the list, as left, top, width,
     /// bottom; and whether it is being drawn there just now.
@@ -1868,6 +1872,8 @@ impl App {
             inspector_units: pins.inspector_width.unwrap_or(resize::PANEL_UNITS),
             out: pins.out.clone(),
             inspect_pane: pins.pane.unwrap_or_default(),
+            inspector_bottom: pins.bottom,
+            inspector_rows: pins.rows.unwrap_or(24.0),
             pending_command: None,
             inspector_list: Cell::new(None),
             inspector_list_drawing: Cell::new(false),
@@ -3099,6 +3105,8 @@ impl App {
         }
         // The strip along the bottom, pinned below it.
         let height = if self.band_docked() { (height as i32 - Strip::for_height(height).height).max(1) as u32 } else { height };
+        // And Inspect, docked along the bottom.
+        let height = self.inspector_bottom_room().map_or(height, |room| (height as i32 - room).max(1) as u32);
         (left, (width.max(1) as u32, height))
     }
 

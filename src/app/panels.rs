@@ -29,6 +29,9 @@ pub(super) struct Saved {
     pub at: std::collections::HashMap<super::Popped, [i32; 4]>,
     /// The tab Inspect was last on.
     pub pane: Option<super::Pane>,
+    /// Inspect along the bottom, and how tall, in lines of text.
+    pub bottom: bool,
+    pub rows: Option<f64>,
 }
 
 /// The panels as last left. The strip's height scale is set as it is read.
@@ -57,6 +60,8 @@ pub(super) fn load() -> Saved {
         out,
         at,
         pane: value("inspect-tab").and_then(super::Pane::from_name),
+        bottom: value("inspect-dock") == Some("bottom"),
+        rows: number("inspect-height"),
     }
 }
 
@@ -106,7 +111,7 @@ impl App {
         }
         let word = |pinned: bool| if pinned { "pinned" } else { "over" };
         let text = format!(
-            "list={}\ninspector={}\nstrip={}\nlist-width={:.1}\ninspector-width={:.1}\nstrip-height={:.2}\ninspect-tab={}\n{}",
+            "list={}\ninspector={}\nstrip={}\nlist-width={:.1}\ninspector-width={:.1}\nstrip-height={:.2}\ninspect-tab={}\ninspect-dock={}\ninspect-height={:.1}\n{}",
             word(self.list_pinned),
             word(self.inspector_pinned),
             word(self.strip_docked),
@@ -114,6 +119,8 @@ impl App {
             self.inspector_units,
             super::resize::strip_scale(),
             self.inspect_pane.name(),
+            if self.inspector_bottom { "bottom" } else { "side" },
+            self.inspector_rows,
             super::Popped::ALL
                 .into_iter()
                 .map(|what| {
