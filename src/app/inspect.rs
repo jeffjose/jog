@@ -334,7 +334,7 @@ impl App {
             }
         }
         match key {
-            Key::Named(NamedKey::Escape | NamedKey::F3) | Key::Character("q") => self.inspector = None,
+            Key::Named(NamedKey::Escape | NamedKey::F3) => self.inspector = None,
             Key::Named(NamedKey::Tab | NamedKey::ArrowRight) if !shift => (inspector.tab, inspector.scroll) = ((inspector.tab + 1) % inspector.tabs().len(), 0),
             Key::Named(NamedKey::Tab | NamedKey::ArrowLeft) => (inspector.tab, inspector.scroll) = ((inspector.tab + inspector.tabs().len() - 1) % inspector.tabs().len(), 0),
             Key::Named(NamedKey::ArrowDown) => inspector.scroll += step,
