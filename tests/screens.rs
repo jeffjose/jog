@@ -142,5 +142,5 @@ fn compare_difference() {
 
 #[test]
 fn convert_panel() {
-    check("convert", "{Ctrl+k}>convert with{Enter}{Wait}{Wait}{Wait}", 900);
+    check("convert", "{Ctrl+k}>convert…{Enter}{Wait}{Wait}{Wait}", 900);
 }
