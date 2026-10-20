@@ -384,7 +384,10 @@ impl App {
             return;
         };
         // Played faster or slower, frames come that much more or less often.
-        let speed = player.number("speed").filter(|speed| *speed > 0.0).unwrap_or(1.0);
+        // The speed is jog's own setting: asked of the player, it waited on
+        // the player's core, tens of milliseconds just after a frame came
+        // late, which made the next late too.
+        let speed = Some(self.playing_speed()).filter(|speed| *speed > 0.0).unwrap_or(1.0);
         let gap = gap.map(|(gap, period)| (gap, period.div_f64(speed))).filter(|(gap, period)| *gap > period.mul_f64(LATE).max(LEAST));
         if gap.is_none() && dropped == 0.0 {
             return;
