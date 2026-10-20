@@ -243,7 +243,7 @@ impl App {
         let id = self.list[self.focus()];
         let path = self.files[id].clone();
         if files::is_video(&path) {
-            return self.toast("Videos: File > Convert");
+            return self.toast("Videos · right-click › Convert");
         }
         let (jobs, inbox) = mpsc::channel::<(u64, Format, Settings)>();
         let proxy = self.proxy.clone();

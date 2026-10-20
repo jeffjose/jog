@@ -343,7 +343,9 @@ impl App {
             }
         }
         match key {
-            Key::Named(NamedKey::Escape | NamedKey::F3) => self.inspector = None,
+            Key::Named(NamedKey::Escape | NamedKey::F3 | NamedKey::F12) => self.inspector = None,
+            // The keys that open it close it too, as a browser's do.
+            Key::Character("I" | "i") if self.modifiers.control_key() && self.modifiers.shift_key() => self.inspector = None,
             Key::Named(NamedKey::Tab | NamedKey::ArrowRight) if !shift => (inspector.tab, inspector.scroll) = ((inspector.tab + 1) % inspector.tabs().len(), 0),
             Key::Named(NamedKey::Tab | NamedKey::ArrowLeft) => (inspector.tab, inspector.scroll) = ((inspector.tab + inspector.tabs().len() - 1) % inspector.tabs().len(), 0),
             Key::Named(NamedKey::ArrowDown) => inspector.scroll += step,

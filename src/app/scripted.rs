@@ -44,7 +44,10 @@ impl App {
                     repeating = name.starts_with("Held+");
                     let (held, name) = match name.split_once('+') {
                         Some(("Shift", name)) => (ModifiersState::SHIFT, name),
-                        Some(("Ctrl", name)) => (ModifiersState::CONTROL, name),
+                        Some(("Ctrl", name)) => match name.strip_prefix("Shift+") {
+                            Some(name) => (ModifiersState::CONTROL | ModifiersState::SHIFT, name),
+                            None => (ModifiersState::CONTROL, name),
+                        },
                         Some(("Held" | "Down" | "Up", name)) => (ModifiersState::empty(), name),
                         _ => (ModifiersState::empty(), name),
                     };
@@ -94,6 +97,7 @@ impl App {
                         "F2" => Key::Named(NamedKey::F2),
                         "F3" => Key::Named(NamedKey::F3),
                         "F5" => Key::Named(NamedKey::F5),
+                        "F12" => Key::Named(NamedKey::F12),
                         // `{Ctrl+k}`: a letter with a modifier held.
                         letter if letter.chars().count() == 1 => Key::Character(letter),
                         _ => continue,

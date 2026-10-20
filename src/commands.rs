@@ -274,7 +274,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             NamedKey::Tab if modifiers.control_key() => NextWorkspace,
             NamedKey::Tab => ToggleMenu,
             NamedKey::F2 => Rename,
-            NamedKey::F3 => Inspect,
+            NamedKey::F3 | NamedKey::F12 => Inspect,
             NamedKey::F5 => Reload,
             _ => return None,
         },
@@ -314,6 +314,8 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "t" => ToggleFilmstrip,
             "D" => Delete,
             "o" if modifiers.control_key() => TravelBack,
+            // Inspect, as a browser opens its developer tools.
+            "I" | "i" if modifiers.control_key() && modifiers.shift_key() => Inspect,
             "i" if modifiers.control_key() => TravelForward,
             "i" => ToggleInfo,
             "I" => ToggleDebug,
@@ -618,6 +620,10 @@ pub const MENU: &[Option<MenuItem>] = &[
     item("Shuffle", "z", Command::Shuffle),
     item("Workspaces", "G", Command::Overview),
     item("Go to workspace…", "@", Command::WorkspaceList),
+    // A window of its own for a picture; the formats, for a video.
+    image_item("Convert…", "K", Command::ConvertPanel),
+    submenu("Convert to", CONVERT_PICTURE, Applies::Images),
+    submenu("Convert", CONVERT_VIDEO, Applies::Videos),
     item("Run a command on it…", "!", Command::Shell),
     item("Repeat last command", ".", Command::RepeatShell),
     submenu("Triage", TRIAGE, Applies::Always),
@@ -635,6 +641,29 @@ pub const MENU: &[Option<MenuItem>] = &[
     None,
     item("Keyboard shortcuts", "?", Command::ToggleHelp),
     item("Quit", "q", Command::Quit),
+    None,
+    // Last, as a browser has it.
+    item("Inspect", "Ctrl+Shift+I", Command::Inspect),
+];
+
+/// A picture converted at once, as one of these, with the settings last
+/// used; the Convert window tries them first.
+const CONVERT_PICTURE: &[Option<MenuItem>] = &[
+    image_item("JPEG XL", "", Command::Convert(Format::Jxl)),
+    image_item("AVIF", "", Command::Convert(Format::Avif)),
+    image_item("JPEG", "", Command::Convert(Format::Jpeg)),
+    image_item("PNG", "", Command::Convert(Format::Png)),
+    image_item("WebP", "", Command::Convert(Format::WebP)),
+];
+
+/// A video converted whole, as one of these; Cancel stops it.
+const CONVERT_VIDEO: &[Option<MenuItem>] = &[
+    video_item("MP4  ·  H.264", "", Command::ConvertVideo(Target::new(Codec::H264, Container::Mp4))),
+    video_item("MP4  ·  HEVC", "", Command::ConvertVideo(Target::new(Codec::Hevc, Container::Mp4))),
+    video_item("MKV  ·  AV1", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::Mkv))),
+    video_item("WebM  ·  AV1", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::WebM))),
+    None,
+    item("Cancel the encode", "", Command::CancelEncode),
 ];
 
 /// A stretch of a video marked between A and B: kept, saved, named.
@@ -783,16 +812,6 @@ const FILE: &[Option<MenuItem>] = &[
     item("Copy to…", "", Command::CopyToAsk),
     item("Move to…", "", Command::MoveToAsk),
     item("Rename", "F2", Command::Rename),
-    image_item("Convert to JPEG XL", "", Command::Convert(Format::Jxl)),
-    image_item("Convert to AVIF", "", Command::Convert(Format::Avif)),
-    image_item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
-    image_item("Convert to PNG", "", Command::Convert(Format::Png)),
-    image_item("Convert to WebP", "", Command::Convert(Format::WebP)),
-    image_item("Convert with settings…", "K", Command::ConvertPanel),
-    video_item("Convert to MP4 (H.264)", "", Command::ConvertVideo(Target::new(Codec::H264, Container::Mp4))),
-    video_item("Convert to MP4 (HEVC)", "", Command::ConvertVideo(Target::new(Codec::Hevc, Container::Mp4))),
-    video_item("Convert to MKV (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::Mkv))),
-    video_item("Convert to WebM (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::WebM))),
     item("Cancel the encode", "", Command::CancelEncode),
     image_item("Compare with marked", "", Command::Compare),
     item("Inspect metadata", "F3", Command::Inspect),
@@ -845,7 +864,9 @@ pub const GRID_MENU: &[Option<MenuItem>] = &[
     item("Copy to…", "", Command::CopyToAsk),
     item("Move to…", "", Command::MoveToAsk),
     item("Rename", "F2", Command::Rename),
-    image_item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
+    image_item("Convert…", "K", Command::ConvertPanel),
+    submenu("Convert to", CONVERT_PICTURE, Applies::Images),
+    submenu("Convert", CONVERT_VIDEO, Applies::Videos),
     None,
     item("Copy file name", "c", Command::CopyName),
     item("Copy full path", "C", Command::CopyPath),
@@ -880,7 +901,9 @@ pub const LIST_MENU: &[Option<MenuItem>] = &[
     item("Copy to…", "", Command::CopyToAsk),
     item("Move to…", "", Command::MoveToAsk),
     item("Rename", "F2", Command::Rename),
-    image_item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
+    image_item("Convert…", "K", Command::ConvertPanel),
+    submenu("Convert to", CONVERT_PICTURE, Applies::Images),
+    submenu("Convert", CONVERT_VIDEO, Applies::Videos),
     None,
     item("Copy file name", "c", Command::CopyName),
     item("Copy full path", "C", Command::CopyPath),
@@ -947,16 +970,9 @@ pub const MARK_MENU: &[Option<MenuItem>] = &[
     item("Copy for the shell", "Y", Command::CopyShell),
     item("Save list to a file", "L", Command::SaveFilelist),
     None,
-    image_item("Convert to JPEG XL", "", Command::Convert(Format::Jxl)),
-    image_item("Convert to AVIF", "", Command::Convert(Format::Avif)),
-    image_item("Convert to JPEG", "", Command::Convert(Format::Jpeg)),
-    image_item("Convert to PNG", "", Command::Convert(Format::Png)),
-    image_item("Convert to WebP", "", Command::Convert(Format::WebP)),
-    image_item("Convert with settings…", "K", Command::ConvertPanel),
-    video_item("Convert to MP4 (H.264)", "", Command::ConvertVideo(Target::new(Codec::H264, Container::Mp4))),
-    video_item("Convert to MP4 (HEVC)", "", Command::ConvertVideo(Target::new(Codec::Hevc, Container::Mp4))),
-    video_item("Convert to MKV (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::Mkv))),
-    video_item("Convert to WebM (AV1)", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::WebM))),
+    image_item("Convert…", "K", Command::ConvertPanel),
+    submenu("Convert to", CONVERT_PICTURE, Applies::Images),
+    submenu("Convert", CONVERT_VIDEO, Applies::Videos),
     image_item("Compare the two", "", Command::Compare),
     None,
     item("Move to trash", "Ctrl+Del", Command::Trash),
