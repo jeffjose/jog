@@ -71,6 +71,12 @@ pub struct Hdr10Plus {
     /// Bezier anchors after it.
     pub knee: (f64, f64),
     pub anchors: Vec<f64>,
+    /// How the scene's brightest is spread: each percentage of its pixels
+    /// and the brightest of them, in tenths of a nit; and the share of its
+    /// pixels that are bright, out of 1023. Kept as stored, to be written
+    /// again when the video is converted.
+    pub distribution: Vec<(u8, u32)>,
+    pub bright: u16,
 }
 
 impl Hdr10Plus {
@@ -276,11 +282,11 @@ fn parse_hdr10plus(payload: &[u8]) -> Option<Hdr10Plus> {
     let tenths = |value: u64| value as f64 / 10.0;
     let maxscl = [tenths(bits.read(17)?), tenths(bits.read(17)?), tenths(bits.read(17)?)];
     let average = tenths(bits.read(17)?);
+    let mut distribution = Vec::new();
     for _ in 0..bits.read(4)? {
-        bits.read(7)?;
-        bits.read(17)?;
+        distribution.push((bits.read(7)? as u8, bits.read(17)? as u32));
     }
-    bits.read(10)?;
+    let bright = bits.read(10)? as u16;
     if bits.flag()? {
         matrix(&mut bits)?;
     }
@@ -291,7 +297,7 @@ fn parse_hdr10plus(payload: &[u8]) -> Option<Hdr10Plus> {
             anchors.push(bits.read(10)? as f64 / 1023.0);
         }
     }
-    Some(Hdr10Plus { target, maxscl, average, knee, anchors })
+    Some(Hdr10Plus { target, maxscl, average, knee, anchors, distribution, bright })
 }
 
 /// A 16-bit value scaled down, as 2094-50 stores its numbers.
@@ -634,10 +640,18 @@ mod mp4 {
         }
         let samples = sample_table(file, &tables, timescale)?;
         for (at, offset, size) in samples {
-            // The metadata comes before the picture in a sample: its head is
-            // enough, and far less to read from a long film.
+            // An AV1 sample is gone through a unit at a time, each one's
+            // head read and the pictures passed over: its metadata may come
+            // after a hidden frame tens of kilobytes long, which reading the
+            // sample's head alone missed, a frame in four.
+            if let Kind::Av1 = kind {
+                av1_sample(file, offset, size, at, info);
+                continue;
+            }
+            // In HEVC the metadata comes before the picture in a sample: its
+            // head is enough, and far less to read from a long film.
             let wanted = match kind {
-                Kind::Av1 | Kind::Hevc => size.min(4096),
+                Kind::Hevc => size.min(4096),
                 _ => size,
             };
             let mut data = vec![0; wanted as usize];
@@ -645,7 +659,8 @@ mod mp4 {
                 continue;
             }
             match &kind {
-                Kind::Av1 => av1_obus(&data, at, info),
+                // Read above, a unit at a time.
+                Kind::Av1 => {}
                 Kind::Hevc => hevc_nals(&data, at, info),
                 Kind::It35(t35) => take_payload(info, *t35, &data, at, "metadata track (it35)"),
                 Kind::Mebx(keys) => {
@@ -759,32 +774,40 @@ mod mp4 {
     }
 
     /// The metadata OBUs of an AV1 sample that carry T.35 messages.
-    fn av1_obus(data: &[u8], at: f64, info: &mut Info) {
-        let mut pos = 0;
-        while pos < data.len() {
-            let header = data[pos];
+    /// The AV1 units of the sample at `offset`, `size` bytes long, read from
+    /// the file a head at a time: only metadata is read whole.
+    fn av1_sample(file: &mut File, offset: u64, size: u64, at: f64, info: &mut Info) {
+        let mut pos = 0u64;
+        while pos < size {
+            // A head: the header byte, its extension, and a size of up to 8.
+            let mut head = [0u8; 10];
+            let want = (size - pos).min(head.len() as u64) as usize;
+            if file.seek(SeekFrom::Start(offset + pos)).is_err() || file.read_exact(&mut head[..want]).is_err() {
+                return;
+            }
+            let header = head[0];
             let kind = header >> 3 & 0x0F;
-            let extended = header & 0x04 != 0;
-            let has_size = header & 0x02 != 0;
-            let mut body = pos + 1 + usize::from(extended);
-            let size = match has_size {
-                true => match data.get(body..).and_then(leb128) {
-                    Some((size, used)) => {
-                        body += used;
-                        size as usize
+            let mut body = 1 + u64::from(header & 0x04 != 0);
+            let length = match header & 0x02 != 0 {
+                true => match head.get(body as usize..want).and_then(leb128) {
+                    Some((length, used)) => {
+                        body += used as u64;
+                        length
                     }
                     None => return,
                 },
-                false => data.len() - body,
+                false => size - pos - body,
             };
-            let Some(obu) = data.get(body..body + size) else { return };
-            // OBU_METADATA, of type ITU-T T.35.
-            if kind == 5 {
-                if let Some((4, used)) = leb128(obu) {
-                    take_t35(info, &obu[used..], at, "AV1 bitstream (metadata OBU)");
+            // OBU_METADATA: read whole, and its T.35 taken.
+            if kind == 5 && length <= 1 << 16 {
+                let mut obu = vec![0; length as usize];
+                if file.seek(SeekFrom::Start(offset + pos + body)).is_ok() && file.read_exact(&mut obu).is_ok() {
+                    if let Some((4, used)) = leb128(&obu) {
+                        take_t35(info, &obu[used..], at, "AV1 bitstream (metadata OBU)");
+                    }
                 }
             }
-            pos = body + size;
+            pos += body + length;
         }
     }
 
@@ -1044,7 +1067,7 @@ mod tests {
 
     #[test]
     fn hdr10plus_tone_runs_from_nothing_to_the_peak() {
-        let curve = Hdr10Plus { target: 400.0, maxscl: [0.0; 3], average: 0.0, knee: (0.1, 0.2), anchors: vec![0.5, 0.8] };
+        let curve = Hdr10Plus { target: 400.0, maxscl: [0.0; 3], average: 0.0, knee: (0.1, 0.2), anchors: vec![0.5, 0.8], distribution: Vec::new(), bright: 0 };
         assert!(curve.tone(0.0).abs() < 1e-9);
         assert!((curve.tone(0.05) - 0.1).abs() < 1e-9);
         assert!((curve.tone(1.0) - 1.0).abs() < 1e-9);

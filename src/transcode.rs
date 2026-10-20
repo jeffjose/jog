@@ -305,27 +305,149 @@ struct Probe {
     has_audio: bool,
     /// HDR, which an 8-bit animation has to be tone mapped from.
     hdr: bool,
+    /// Frames a second, as the video's own rate gives it: what frame of
+    /// the output a time is, for HDR10+ written again a frame at a time.
+    fps: f64,
 }
 
 fn probe(path: &Path) -> Probe {
     let output = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", "format=duration:stream=codec_type,pix_fmt,color_transfer", "-of", "default=nw=1"])
+        .args(["-v", "error", "-show_entries", "format=duration:stream=codec_type,pix_fmt,color_transfer,avg_frame_rate", "-of", "default=nw=1"])
         .arg(path)
         .stdin(Stdio::null())
         .output();
     let text = output.map(|output| String::from_utf8_lossy(&output.stdout).into_owned()).unwrap_or_default();
     let field = |key: &'static str| text.lines().filter_map(move |line| line.strip_prefix(key));
+    // The first that is a rate: sound has none, as 0/0.
+    let fps = field("avg_frame_rate=").find_map(|rate| {
+        let (n, d) = rate.split_once('/')?;
+        let fps = n.parse::<f64>().ok()? / d.parse::<f64>().ok().filter(|d| *d > 0.0)?;
+        (fps > 0.0).then_some(fps)
+    });
     Probe {
         seconds: field("duration=").find_map(|value| value.parse().ok()).unwrap_or(0.0),
         deep: field("pix_fmt=").any(|format| format.contains("10") || format.contains("12")),
         has_audio: field("codec_type=").any(|kind| kind == "audio"),
         hdr: field("color_transfer=").any(|transfer| transfer == "smpte2084" || transfer == "arib-std-b67"),
+        fps: fps.unwrap_or(30.0),
     }
+}
+
+/// HDR10+ for x265 to write (`dhdr10-info`), as the JSON it reads: for
+/// each frame of the output, from `from` to `to` seconds of the video at
+/// `fps`, the metadata the video has at that time, with a scene for each
+/// run of frames that share it. None when the video has no HDR10+.
+pub fn hdr10plus_json(info: &crate::hdrmeta::Info, (from, to): (f64, f64), fps: f64) -> Option<String> {
+    use serde_json::json;
+    if info.hdr10plus.is_empty() || to <= from || fps <= 0.0 {
+        return None;
+    }
+    let frames = ((to - from) * fps).round() as usize;
+    let mut scenes = Vec::new();
+    let (mut scene, mut first) = (0usize, Vec::new());
+    let mut last: Option<&crate::hdrmeta::Hdr10Plus> = None;
+    for frame in 0..frames {
+        // The middle of the frame, clear of where one meets the next.
+        let at = from + (frame as f64 + 0.5) / fps;
+        let Some(plus) = info.hdr10plus_at(at) else { continue };
+        if last.is_some_and(|last| last != plus) {
+            scene += 1;
+        }
+        if last != Some(plus) {
+            first.push(frame);
+        }
+        last = Some(plus);
+        // Back to the numbers as stored: tenths of a nit, and the curve's
+        // points out of 4095 and 1023.
+        let tenths = |nits: f64| (nits * 10.0).round() as u64;
+        scenes.push(json!({
+            "NumberOfWindows": 1,
+            "TargetedSystemDisplayMaximumLuminance": plus.target.round() as u64,
+            "LuminanceParameters": {
+                "MaxScl": plus.maxscl.map(tenths),
+                "AverageRGB": tenths(plus.average),
+                "LuminanceDistributions": {
+                    "DistributionIndex": plus.distribution.iter().map(|(share, _)| share).collect::<Vec<_>>(),
+                    "DistributionValues": plus.distribution.iter().map(|(_, value)| value).collect::<Vec<_>>(),
+                },
+            },
+            "BezierCurveData": {
+                "KneePointX": (plus.knee.0 * 4095.0).round() as u64,
+                "KneePointY": (plus.knee.1 * 4095.0).round() as u64,
+                "Anchors": plus.anchors.iter().map(|anchor| (anchor * 1023.0).round() as u64).collect::<Vec<_>>(),
+            },
+            "SceneId": scene,
+            "SceneFrameIndex": frame - first.last().copied().unwrap_or(0),
+            "SequenceFrameIndex": frame,
+        }));
+    }
+    if scenes.is_empty() {
+        return None;
+    }
+    let lengths: Vec<usize> = first.windows(2).map(|pair| pair[1] - pair[0]).chain(first.last().map(|start| frames - start)).collect();
+    let whole = json!({
+        "JSONInfo": { "HDR10plusProfile": "B", "Version": "1.0" },
+        "SceneInfo": scenes,
+        "SceneInfoSummary": { "SceneFirstFrameIndex": first, "SceneFrameNumbers": lengths },
+        "ToolInfo": { "Tool": "jog", "Version": env!("CARGO_PKG_VERSION") },
+    });
+    Some(whole.to_string())
+}
+
+/// A file written for ffmpeg to read, gone when this is.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// What has to be written down beside ffmpeg's arguments to carry the
+/// video's HDR metadata into `target`: its HDR10+, for x265, which reads
+/// it from a file. The HDR10 figures ffmpeg passes on by itself.
+fn carried(path: &Path, (from, to): (f64, f64), target: &Target, knobs: &Knobs, probe: &Probe) -> Option<Scratch> {
+    if target.codec != Codec::Hevc || !probe.hdr || knobs.to_sdr {
+        return None;
+    }
+    let info = crate::hdrmeta::read(path)?;
+    let to = if to > from { to } else { probe.seconds };
+    let json = hdr10plus_json(&info, (from, to), probe.fps)?;
+    static FILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = std::env::temp_dir().join(format!("jog-hdr10plus-{}-{count}.json", std::process::id()));
+    std::fs::write(&file, json).ok()?;
+    Some(Scratch(file))
+}
+
+/// What a conversion keeps of a video's HDR, and what it cannot: each kind
+/// the video has, and whether it is kept, with why not when not. For the
+/// Convert tab to say before it is begun.
+pub fn hdr_kept(info: &crate::hdrmeta::Info, target: &Target, knobs: &Knobs) -> Vec<(&'static str, Result<(), &'static str>)> {
+    let sdr = knobs.to_sdr || target.codec == Codec::H264;
+    let mut kept = Vec::new();
+    if info.mastering.is_some() || info.light.is_some() {
+        kept.push(("HDR10", if sdr { Err("taken to SDR") } else { Ok(()) }));
+    }
+    if !info.hdr10plus.is_empty() {
+        kept.push((
+            "HDR10+",
+            match (sdr, target.codec) {
+                (true, _) => Err("taken to SDR"),
+                (false, Codec::Hevc) => Ok(()),
+                _ => Err("HEVC only"),
+            },
+        ));
+    }
+    if !info.agtm.is_empty() {
+        kept.push(("2094-50", Err("no encoder writes it yet")));
+    }
+    kept
 }
 
 /// The arguments for ffmpeg, from after `-i input` to before the output;
 /// `turn` the filters that turn the picture as it is shown, if any.
-fn arguments(target: &Target, settings: &VideoSettings, knobs: &Knobs, probe: &Probe, turn: Option<String>) -> Result<Vec<String>, String> {
+fn arguments(target: &Target, settings: &VideoSettings, knobs: &Knobs, probe: &Probe, turn: Option<String>, hdr10plus: Option<&Path>) -> Result<Vec<String>, String> {
     let mut args: Vec<String> = Vec::new();
     let mut push = |items: &[&str]| args.extend(items.iter().map(|item| item.to_string()));
     // The first video, all the sound, and in MKV the subtitles too; the
@@ -335,7 +457,9 @@ fn arguments(target: &Target, settings: &VideoSettings, knobs: &Knobs, probe: &P
         push(&["-map", "0:s?", "-c:s", "copy"]);
     }
     let crf = knobs.crf(target.codec, settings).to_string();
-    let sdr = knobs.to_sdr && probe.hdr;
+    // H.264 is 8-bit, and HDR in 8 bits is banded and shown gray: it is always
+    // taken to SDR, however it is asked for.
+    let sdr = (knobs.to_sdr || target.codec == Codec::H264) && probe.hdr;
     match target.codec {
         Codec::H264 => {
             if !has("libx264") {
@@ -355,6 +479,10 @@ fn arguments(target: &Target, settings: &VideoSettings, knobs: &Knobs, probe: &P
             // Apple's players want HEVC in MP4 tagged so.
             if target.container == Container::Mp4 {
                 push(&["-tag:v", "hvc1"]);
+            }
+            // The video's HDR10+, written again a frame at a time.
+            if let Some(json) = hdr10plus.filter(|_| !sdr) {
+                push(&["-x265-params", &format!("dhdr10-info={}", json.display())]);
             }
         }
         Codec::Av1 => {
@@ -379,6 +507,13 @@ fn arguments(target: &Target, settings: &VideoSettings, knobs: &Knobs, probe: &P
     }
     if sdr {
         filters.push(tone_map(probe).trim_end_matches(',').to_string());
+        // Taken to SDR, it says nothing of HDR: the encoders would write the
+        // HDR figures they are handed, and a player see HDR that is not.
+        if has_filter("sidedata") {
+            for kind in ["MASTERING_DISPLAY_METADATA", "CONTENT_LIGHT_LEVEL", "DYNAMIC_HDR_PLUS", "DOVI_METADATA", "DOVI_RPU_BUFFER"] {
+                filters.push(format!("sidedata=mode=delete:type={kind}"));
+            }
+        }
         push(&["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]);
     }
     filters.retain(|filter| !filter.is_empty());
@@ -448,7 +583,8 @@ pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, knobs: 
         return Err(format!("{} is there already", output.display()));
     }
     let probe = probe(path);
-    let args = arguments(target, settings, knobs, &probe, turn_filter(transform))?;
+    let carry = carried(path, (0.0, probe.seconds), target, knobs, &probe);
+    let args = arguments(target, settings, knobs, &probe, turn_filter(transform), carry.as_ref().map(|carry| carry.0.as_path()))?;
     run(path, &[], &args, target.container.muxer(), &output, probe.seconds, progress)
 }
 
@@ -473,7 +609,8 @@ pub fn trial(path: &Path, (from, to): (f64, f64), target: &Target, settings: &Vi
     let length = seconds.min(to - from).max(0.1);
     let start = from + ((to - from) - length).max(0.0) / 2.0;
     let mut args = vec!["-t".to_string(), format!("{length:.3}")];
-    args.extend(arguments(target, settings, knobs, &probe, turn_filter(transform))?);
+    let carry = carried(path, (start, start + length), target, knobs, &probe);
+    args.extend(arguments(target, settings, knobs, &probe, turn_filter(transform), carry.as_ref().map(|carry| carry.0.as_path()))?);
     static TRIALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let count = TRIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let output = std::env::temp_dir().join(format!("jog-trial-{}-{count}.{}", std::process::id(), target.container.extension()));
@@ -693,15 +830,21 @@ pub fn clip_output(path: &Path, a: f64, b: f64, clip: &Clip) -> PathBuf {
 /// Takes HDR down to SDR, for an 8-bit animation: without it an HLG or PQ
 /// video comes out gray and washed out. Nothing for SDR, or an ffmpeg
 /// without zscale.
+/// The filters the ffmpeg on the PATH has, asked once.
+fn filters() -> &'static str {
+    static FOUND: OnceLock<String> = OnceLock::new();
+    FOUND.get_or_init(|| {
+        let output = Command::new("ffmpeg").args(["-hide_banner", "-filters"]).stdin(Stdio::null()).output();
+        output.map(|output| String::from_utf8_lossy(&output.stdout).into_owned()).unwrap_or_default()
+    })
+}
+
+fn has_filter(name: &str) -> bool {
+    filters().lines().any(|line| line.split_whitespace().nth(1) == Some(name))
+}
+
 fn tone_map(probe: &Probe) -> &'static str {
-    let has_zscale = || {
-        static FOUND: OnceLock<bool> = OnceLock::new();
-        *FOUND.get_or_init(|| {
-            let output = Command::new("ffmpeg").args(["-hide_banner", "-filters"]).stdin(Stdio::null()).output();
-            output.is_ok_and(|output| String::from_utf8_lossy(&output.stdout).lines().any(|line| line.split_whitespace().nth(1) == Some("zscale")))
-        })
-    };
-    if probe.hdr && has_zscale() {
+    if probe.hdr && has_filter("zscale") {
         "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p,"
     } else {
         ""
@@ -724,6 +867,8 @@ pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, k
     // copying does from the keyframe before and encoding to the frame.
     let mut before = to_strings(&["-ss", &format!("{a:.3}")]);
     let mut args = to_strings(&["-t", &format!("{length:.3}")]);
+    // HDR10+ written down for x265, for as long as it encodes.
+    let _carry: Option<Scratch>;
     let muxer = match clip {
         Clip::Quick => {
             // Copied as it is, the turn goes in as how to show it.
@@ -742,7 +887,8 @@ pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, k
             if let Some(problem) = target.problem(settings) {
                 return Err(problem);
             }
-            args.extend(arguments(target, settings, knobs, &probe, turn_filter(transform))?);
+            _carry = carried(path, (a, b), target, knobs, &probe);
+            args.extend(arguments(target, settings, knobs, &probe, turn_filter(transform), _carry.as_ref().map(|carry| carry.0.as_path()))?);
             target.container.muxer()
         }
         Clip::Gif => {
@@ -874,8 +1020,8 @@ mod tests {
     #[test]
     fn knobs_at_rest_change_nothing() {
         let settings = VideoSettings::default();
-        let probe = Probe { seconds: 10.0, deep: true, has_audio: false, hdr: true };
-        let joined = |target: Target, knobs: &Knobs| arguments(&target, &settings, knobs, &probe, None).map(|args| args.join(" "));
+        let probe = Probe { seconds: 10.0, deep: true, has_audio: false, hdr: true, fps: 30.0 };
+        let joined = |target: Target, knobs: &Knobs| arguments(&target, &settings, knobs, &probe, None, None).map(|args| args.join(" "));
         let Ok(plain) = joined(Target::new(Codec::Hevc, Container::Mkv), &Knobs::default()) else { return };
         assert!(plain.contains("-preset medium -crf 22"), "{plain}");
         assert!(!plain.contains("-vf"), "{plain}");
@@ -885,6 +1031,37 @@ mod tests {
         assert!(turned.contains("scale=-2:'min(ih,720)'"), "{turned}");
         assert!(turned.contains("-color_trc bt709"), "{turned}");
         assert_eq!(turned.matches("-vf").count(), 1, "one chain of filters: {turned}");
+    }
+
+    #[test]
+    fn hdr10plus_is_written_for_every_frame_with_a_scene_for_each_run() {
+        use crate::hdrmeta::{Hdr10Plus, Info, Timed};
+        let scene = |peak: f64| Hdr10Plus { target: 400.0, maxscl: [peak, peak, peak], average: 12.5, knee: (0.25, 0.5), anchors: vec![0.5], distribution: vec![(1, 10), (99, 2000)], bright: 0 };
+        // Two scenes, at 0 s and 1 s, in a video of 10 frames a second.
+        let info = Info { hdr10plus: vec![Timed { at: 0.0, value: scene(100.0) }, Timed { at: 1.0, value: scene(500.0) }], ..Info::default() };
+        let json: serde_json::Value = serde_json::from_str(&hdr10plus_json(&info, (0.5, 1.5), 10.0).unwrap()).unwrap();
+        let frames = json["SceneInfo"].as_array().unwrap();
+        assert_eq!(frames.len(), 10, "a frame from 0.5 s to 1.5 s at 10 a second");
+        assert_eq!(frames[4]["LuminanceParameters"]["MaxScl"][0], 1000, "tenths of a nit, as stored");
+        assert_eq!(frames[5]["LuminanceParameters"]["MaxScl"][0], 5000, "the second scene from 1 s on");
+        assert_eq!((frames[4]["SceneId"].as_u64(), frames[5]["SceneId"].as_u64(), frames[5]["SceneFrameIndex"].as_u64()), (Some(0), Some(1), Some(0)));
+        assert_eq!(frames[0]["BezierCurveData"]["KneePointX"], 1024);
+        assert_eq!(frames[0]["LuminanceParameters"]["LuminanceDistributions"]["DistributionValues"][1], 2000);
+        assert_eq!(json["SceneInfoSummary"]["SceneFrameNumbers"], serde_json::json!([5, 5]));
+        assert!(hdr10plus_json(&Info::default(), (0.0, 1.0), 30.0).is_none(), "nothing to write without HDR10+");
+    }
+
+    #[test]
+    fn hdr_taken_to_sdr_says_nothing_of_hdr() {
+        let settings = VideoSettings::default();
+        let probe = Probe { seconds: 10.0, deep: true, has_audio: false, hdr: true, fps: 30.0 };
+        let sdr = arguments(&Target::new(Codec::H264, Container::Mp4), &settings, &Knobs::default(), &probe, None, None).unwrap().join(" ");
+        assert!(sdr.contains("-color_trc bt709"), "H.264 is always taken to SDR: {sdr}");
+        if has_filter("sidedata") {
+            assert!(sdr.contains("type=MASTERING_DISPLAY_METADATA") && sdr.contains("type=DYNAMIC_HDR_PLUS"), "{sdr}");
+        }
+        let hevc = arguments(&Target::new(Codec::Hevc, Container::Mkv), &settings, &Knobs::default(), &probe, None, Some(Path::new("/tmp/x.json"))).unwrap().join(" ");
+        assert!(hevc.contains("dhdr10-info=/tmp/x.json") && !hevc.contains("sidedata"), "{hevc}");
     }
 
     #[test]

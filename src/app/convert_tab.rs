@@ -330,6 +330,19 @@ impl App {
         if !time.is_empty() {
             row(sub, text, &mut y, "Time", &time, TEXT_COLOR);
         }
+        // Which of the video's HDR metadata the result keeps: a row of what
+        // is kept, and one for each kind that is not, and why.
+        if let Some(info) = found.hdr.as_ref().filter(|info| info.is_hdr()) {
+            let said = crate::transcode::hdr_kept(info, &target, &knobs);
+            let kept: Vec<&str> = said.iter().filter(|(_, kept)| kept.is_ok()).map(|(name, _)| *name).collect();
+            if !kept.is_empty() {
+                row(sub, text, &mut y, "HDR", &format!("Keeps {}", kept.join(" · ")), TEXT_COLOR);
+            }
+            for (name, why) in said.iter().filter_map(|(name, kept)| kept.err().map(|why| (name, why))) {
+                let first = kept.is_empty() && said.iter().find(|(_, kept)| kept.is_err()).is_some_and(|(first, _)| first == name);
+                row(sub, text, &mut y, if first { "HDR" } else { "" }, &format!("Not {name} · {why}"), 0xE0A040);
+            }
+        }
         y += pad / 2;
         // The buttons: try, and begin; or call off what is under way.
         let h = line + pad * 2 / 3;
