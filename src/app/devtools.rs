@@ -588,3 +588,134 @@ impl App {
         y + card_h + pad
     }
 }
+
+/// A video's packets, as ffprobe lists them: when each is shown, how big
+/// it is, and which are keyframes. For the Timeline's bitrate and seeking.
+#[derive(Debug, Default)]
+pub struct Packets {
+    pub times: Vec<f64>,
+    pub sizes: Vec<u32>,
+    pub keys: Vec<f64>,
+}
+
+impl Packets {
+    /// Reads them, on whatever thread calls.
+    pub fn read(path: &Path) -> Result<Packets, String> {
+        let output = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,dts_time,size,flags", "-of", "csv=p=0"])
+            .arg(path)
+            .output()
+            .map_err(|error| format!("ffprobe: {error}"))?;
+        let mut packets = Packets::default();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let fields: Vec<&str> = line.split(',').collect();
+            let [pts, dts, size, flags] = fields[..] else { continue };
+            let Some(time) = pts.parse::<f64>().ok().or_else(|| dts.parse().ok()) else { continue };
+            packets.times.push(time);
+            packets.sizes.push(size.parse().unwrap_or(0));
+            if flags.starts_with('K') {
+                packets.keys.push(time);
+            }
+        }
+        if packets.times.is_empty() {
+            return Err("no video packets".into());
+        }
+        packets.keys.sort_by(f64::total_cmp);
+        Ok(packets)
+    }
+
+    pub fn length(&self) -> f64 {
+        self.times.iter().copied().fold(0.0, f64::max)
+    }
+
+    /// Bits a second in each of `bins` equal stretches of the video.
+    pub fn bitrate(&self, bins: usize) -> Vec<f64> {
+        let length = self.length().max(1e-3);
+        let mut bytes = vec![0u64; bins.max(1)];
+        for (time, size) in self.times.iter().zip(&self.sizes) {
+            let bin = ((time / length) * bins as f64).floor().clamp(0.0, (bins - 1) as f64) as usize;
+            bytes[bin] += u64::from(*size);
+        }
+        let span = length / bins as f64;
+        bytes.into_iter().map(|bytes| bytes as f64 * 8.0 / span).collect()
+    }
+}
+
+/// Bits a second as people read them.
+fn rate(bits: f64) -> String {
+    if bits >= 1e6 { format!("{:.1} Mb/s", bits / 1e6) } else { format!("{:.0} kb/s", bits / 1e3) }
+}
+
+impl App {
+    /// The Timeline's bitrate over the video, its keyframes under it, and
+    /// what that means for seeking from where the video is.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_bitrate(&self, sub: &mut Canvas, text: &mut Text, px: u32, packets: Option<&Result<Packets, String>>, id: usize, inner_w: i32, y: i32, offset: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
+        let pad = px as i32;
+        let small = (px * 5 / 6).max(11);
+        let small_line = Text::line_height(small);
+        let x = pad * 3 / 2;
+        let (cx, cw) = (x + pad, inner_w - 2 * pad);
+        let chart_h = px as i32 * 8;
+        let row = small_line + pad / 4;
+        let card_h = pad + small_line + pad / 2 + chart_h + pad / 3 + pad / 2 + 3 * row + pad;
+        sub.round_fill(x, y, inner_w, card_h, pad / 2, 0x26262B, 256);
+        text.draw(sub, cx, y + pad, small, DIM_TEXT_COLOR, "BITRATE AND KEYFRAMES");
+        let top = y + pad + small_line + pad / 2;
+        let packets = match packets {
+            None => {
+                text.draw(sub, cx, top, px, DIM_TEXT_COLOR, "Reading the packets…");
+                return y + card_h + pad;
+            }
+            Some(Err(error)) => {
+                text.draw(sub, cx, top, px, DIM_TEXT_COLOR, &format!("Not readable · {error}"));
+                return y + card_h + pad;
+            }
+            Some(Ok(packets)) => packets,
+        };
+        let bins = (cw / 3).max(1) as usize;
+        let rates = packets.bitrate(bins);
+        let peak = rates.iter().copied().fold(1.0, f64::max);
+        let mean = packets.sizes.iter().map(|size| f64::from(*size)).sum::<f64>() * 8.0 / packets.length().max(1e-3);
+        let length = packets.length().max(1e-3);
+        sub.fill(cx, top, cw, chart_h, 0x0B0B0B);
+        for (bin, value) in rates.iter().enumerate() {
+            let (bx, next) = (cx + bin as i32 * cw / bins as i32, cx + (bin as i32 + 1) * cw / bins as i32);
+            let h = ((value / peak) * f64::from(chart_h)).max(1.0) as i32;
+            sub.fill(bx, top + chart_h - h, (next - bx).max(1), h, 0x3E7BD6);
+            drawn.push((Hit::Seek(length * bin as f64 / bins as f64), [bx + offset.0, top + offset.1, (next - bx).max(1), chart_h]));
+        }
+        // The keyframes, a tick each along the foot.
+        let ticks = top + chart_h + 2;
+        for key in &packets.keys {
+            let kx = cx + ((key / length) * f64::from(cw)) as i32;
+            sub.fill(kx.min(cx + cw - 1), ticks, 1, pad / 3, TEXT_COLOR);
+        }
+        // Where the video is.
+        let at = self.video.as_ref().filter(|video| video.id == id).and(self.video_time()).map(|(at, _)| at);
+        if let Some(at) = at {
+            let ax = cx + ((at / length) * f64::from(cw)) as i32;
+            sub.fill(ax.min(cx + cw - 1), top, 2, chart_h, accent());
+        }
+        let mut ty = ticks + pad / 3 + pad / 2;
+        let gaps: Vec<f64> = packets.keys.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        let (gap_mean, gap_most) = (gaps.iter().sum::<f64>() / gaps.len().max(1) as f64, gaps.iter().copied().fold(0.0, f64::max));
+        let lines = [
+            format!("Mean {}  ·  busiest stretch {}", rate(mean), rate(peak)),
+            format!("{} keyframes  ·  one every {:.1} s, at most {:.1} s apart", packets.keys.len(), gap_mean, gap_most),
+            match at {
+                Some(at) => {
+                    let back = packets.keys.iter().rev().find(|key| **key <= at + 1e-6).map_or(at, |key| at - key);
+                    format!("A seek here decodes from {:.1} s back  ·  click the chart to go there", back)
+                }
+                None => "Click the chart to go there".to_string(),
+            },
+        ];
+        for words in lines {
+            let words = clipped(text, &words, cw, small);
+            text.draw(sub, cx, ty, small, TEXT_COLOR, &words);
+            ty += row;
+        }
+        y + card_h + pad
+    }
+}

@@ -272,6 +272,8 @@ pub enum Event {
     TracksWritten(Result<PathBuf, String>, bool),
     /// Files moved, copied or trashed on another thread.
     FilesDone(filework::FilesDone),
+    /// A video's packets, read for Inspect's Timeline.
+    Packets(usize, Result<devtools::Packets, String>),
     /// File details read on another thread, for the info and EXIF overlays.
     Meta(usize, Meta),
     /// The font, loaded on another thread while the first image decodes.
@@ -4009,6 +4011,7 @@ impl App {
             Event::Inspected(id, found) => self.inspected(id, found),
             Event::TracksWritten(result, replaced) => self.tracks_written(result, replaced),
             Event::FilesDone(done) => self.files_done(done, event_loop),
+            Event::Packets(id, packets) => self.packets_read(id, packets),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {
                 self.spare = spare.ok().map(|player| Spare { player, id: None, from: 0.0 });

@@ -214,6 +214,9 @@ pub struct Inspector {
     /// The tab up, and the transport bar's buttons as drawn this frame.
     pane: Pane,
     transport: Vec<(Hit, [i32; 4])>,
+    /// The video's packets, for the Timeline, once read; and whether asked for.
+    packets: Option<Result<super::devtools::Packets, String>>,
+    packets_asked: bool,
 }
 
 fn text_of(value: &Value) -> Option<String> {
@@ -277,7 +280,7 @@ impl App {
         std::thread::spawn(move || {
             let _ = proxy.send_event(Event::Inspected(id, Inspection::read(&path)));
         });
-        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false, pane: Pane::Overview, transport: Vec::new() });
+        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false, pane: Pane::Overview, transport: Vec::new(), packets: None, packets_asked: false });
         // On the tab used last.
         let pane = self.inspect_pane;
         if let Some(inspector) = &mut self.inspector {
@@ -732,6 +735,8 @@ impl App {
         // Performance's figures change all the time: drawn again twice a second.
         let tick = match inspector.pane {
             Pane::Performance => Some(self.perf.arrived.elapsed().as_millis() / 500),
+            // The packets come, and the video moves along: twice a second.
+            Pane::Timeline => Some(u128::from(inspector.packets.is_some()) + self.perf.arrived.elapsed().as_millis() / 500 * 2),
             Pane::Console => Some(self.messages.len() as u128 * 1000 + self.perf.arrived.elapsed().as_secs() as u128 / 30),
             Pane::Color => Some(self.scopes.iter().enumerate().map(|(at, on)| u128::from(*on) << at).sum()),
             // What is playing, as the info line says it.
@@ -876,7 +881,16 @@ impl App {
                     content_h = match inspector.pane {
                         Pane::Convert => self.draw_actions(&mut sub, text, px, &self.convert_actions(inspector.picture), inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
                         Pane::Compare => self.draw_actions(&mut sub, text, px, &self.compare_actions(), inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
-                        Pane::Timeline => self.draw_timeline(&mut sub, text, px, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
+                        Pane::Timeline => {
+                            // The packets, read once, on another thread.
+                            if !inspector.packets_asked {
+                                inspector.packets_asked = true;
+                                let (id, path, proxy) = (inspector.id, self.files[inspector.id].clone(), self.proxy.clone());
+                                std::thread::spawn(move || drop(proxy.send_event(Event::Packets(id, super::devtools::Packets::read(&path)))));
+                            }
+                            let y = self.draw_bitrate(&mut sub, text, px, inspector.packets.as_ref(), inspector.id, inner_w, content_h - inspector.scroll, offset, &mut drawn);
+                            self.draw_timeline(&mut sub, text, px, inner_w, y, offset, mouse, &mut drawn) + inspector.scroll
+                        }
                         Pane::Tracks => self.draw_track_choices(&mut sub, text, px, inspector.id, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
                         Pane::Console => self.draw_console(&mut sub, text, px, inner_w, content_h - inspector.scroll, offset, mouse, &mut drawn) + inspector.scroll,
                         Pane::Overview => self.draw_anatomy(&mut sub, text, px, found, inner_w, content_h - inspector.scroll) + inspector.scroll,
@@ -1508,4 +1522,15 @@ pub struct PanelKey {
     pinned: bool,
     /// The HDR tab's charts: the headroom, the metadata at the time on view.
     hdr: Option<super::inspect_hdr::HdrKey>,
+}
+
+impl App {
+    /// A video's packets read, for the Timeline, if it is still the one
+    /// inspected.
+    pub(super) fn packets_read(&mut self, id: usize, packets: Result<super::devtools::Packets, String>) {
+        if let Some(inspector) = self.inspector.as_mut().filter(|inspector| inspector.id == id) {
+            inspector.packets = Some(packets);
+            self.redraw();
+        }
+    }
 }
