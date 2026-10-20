@@ -64,6 +64,17 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Lays pixels `was_w` wide, copied from a rectangle of another size,
+    /// at the top left of this one: as much as fits, the rest left as it is.
+    pub fn paste_from(&mut self, x: i32, y: i32, w: i32, h: i32, was: &[u32], was_w: i32) {
+        let n = w.min(was_w).max(0) as usize;
+        let was_w = was_w.max(1) as usize;
+        for (row, from) in self.rows(x, y, n as i32, h).zip(was.chunks_exact(was_w)) {
+            let n = row.len().min(n);
+            row[..n].copy_from_slice(&from[..n]);
+        }
+    }
+
     /// Draws `frame` scaled to a rectangle, on every core: made larger, by
     /// blending the pixels either side, which blurs where the nearest alone
     /// would show as blocks; made smaller, by the nearest. Rougher than

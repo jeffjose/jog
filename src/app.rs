@@ -4129,8 +4129,10 @@ impl App {
                 self.update_monitor();
                 self.menu = None;
                 self.request();
-                self.apply_video_view();
-                // A video is drawn at its old size until this one holds.
+                // A video is drawn at its old size, and with its old zoom and
+                // pan, until this one holds: with a panel docked those change
+                // at every step of a drag, and each change has the player set
+                // its renderer up again. The new ones go once it settles.
                 if self.video.is_some() {
                     self.resized_at = Some(Instant::now());
                     self.settle_at = Some(Instant::now() + RESIZE_SETTLE);
@@ -4192,6 +4194,8 @@ impl App {
         self.hitches.flush(Some(now));
         if self.settle_at.is_some_and(|at| at <= now) {
             self.settle_at = None;
+            // The view for the size the window has settled at.
+            self.apply_video_view();
             self.redraw();
         }
         if self.toast.as_ref().is_some_and(|(_, until)| *until <= now) {

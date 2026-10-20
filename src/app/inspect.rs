@@ -219,6 +219,8 @@ pub struct Inspector {
     /// only when that changes, and otherwise copied in, so that a 4K video
     /// beside it is not held up by it on every frame.
     kept: Option<(PanelKey, Vec<u32>)>,
+    /// How wide that panel was.
+    kept_w: i32,
     /// The panel as last drawn for the file before, held up until this
     /// one's facts are read, so that going on to the next file does not
     /// blank it for a moment.
@@ -304,7 +306,7 @@ impl App {
         });
         // What was up stays up until there is something to replace it.
         let previous = self.inspector.take().and_then(|old| old.kept.map(|(_, pixels)| (Instant::now(), pixels)).or(old.previous));
-        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, previous, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false, pane: Pane::Overview, transport: Vec::new(), packets: None, packets_asked: false });
+        self.inspector = Some(Inspector { id, tab: 0, scroll: 0, content_h: 0, view_h: 0, found: None, place: [0; 4], kept: None, kept_w: 0, previous, picture: !files::is_video(&self.files[id]), open: HashSet::new(), selected: vec![0], follow: false, drawn: Vec::new(), gain: false, pane: Pane::Overview, transport: Vec::new(), packets: None, packets_asked: false });
         // On the tab used last.
         let pane = self.inspect_pane;
         if let Some(inspector) = &mut self.inspector {
@@ -784,6 +786,21 @@ impl App {
             self.inspector = Some(inspector);
             return;
         }
+        // The window being resized: the panel as last laid out, at its top
+        // left, until the size settles, rather than laid out again for
+        // each step of the drag; with the room it has gained left plain.
+        let resizing = self.resized_at.is_some_and(|at| at.elapsed() < super::RESIZE_SETTLE);
+        if resizing {
+            if let Some((_, pixels)) = inspector.kept.as_ref().filter(|_| inspector.kept_w > 0) {
+                canvas.fill(left, top, width, height, GRID_COLOR);
+                // Not the transport bar: it is drawn where it now goes.
+                let kept_h = (pixels.len() as i32 / inspector.kept_w - transport_h).min(height - transport_h);
+                canvas.paste_from(left, top, width, kept_h, pixels, inspector.kept_w);
+                inspector.transport = self.draw_transport(canvas, text, px, [left, top + height - transport_h, width, transport_h], inspector.picture);
+                self.inspector = Some(inspector);
+                return;
+            }
+        }
         // The next file not read yet: the last one's panel, for a second at
         // most, rather than a blank one for a moment and then this.
         if inspector.found.is_none() {
@@ -1046,6 +1063,7 @@ impl App {
             canvas.fill(inner, view_bottom - 1, inner_w, 1, MENU_EDGE_COLOR);
         }
         inspector.kept = Some((key, canvas.copy(left, top, width, height)));
+        inspector.kept_w = width;
         if let Some(behind) = behind.filter(|behind| behind.len() == (width * height) as usize) {
             canvas.dissolve(left, top, width, height, &behind, through);
         }
