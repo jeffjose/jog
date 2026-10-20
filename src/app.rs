@@ -50,6 +50,8 @@ use section::{Edge, EntryFrames, Section, StripTab};
 mod back;
 mod hitch;
 mod filework;
+mod panels;
+use panels::StripButton;
 use filework::Work;
 mod compare;
 mod draw;
@@ -1044,7 +1046,7 @@ pub struct App {
     /// How many files along from the one on view the filmstrip has been
     /// moved with the wheel. Going to a file puts it back.
     strip_scroll: i64,
-    strip_close_over: bool,
+    strip_button_over: Option<StripButton>,
     /// Which of the grid's buttons the pointer is over, counting those
     /// under it and then those at its sides.
     grid_over: Option<usize>,
@@ -1245,6 +1247,10 @@ pub struct App {
     /// where an unpinned list lies over the picture.
     list_right: bool,
     list_pinned: bool,
+    /// Whether the inspector stands beside the picture rather than over it,
+    /// and likewise the strip along the bottom below it.
+    inspector_pinned: bool,
+    strip_docked: bool,
     /// Whether files are being decided about one after another; what has
     /// been decided, read when first asked about; and what has been found
     /// out about the files here so far.
@@ -1262,7 +1268,7 @@ pub struct App {
     inspector: Option<inspect::Inspector>,
     /// The share of the window the video was last told to keep clear on
     /// each side, left and right, for the inspector beside it.
-    video_margins: Cell<(f64, f64)>,
+    video_margins: Cell<(f64, f64, f64)>,
     /// The shortcuts panel as drawn for what was typed in it and the
     /// window's size: where, and its inside.
     help_kept: Option<((String, i32, i32), [i32; 4], Vec<u32>)>,
@@ -1578,6 +1584,7 @@ fn ui_px(window_height: u32) -> u32 {
 
 impl App {
     pub fn new(options: Options, files: Vec<PathBuf>, start: usize, loader: Loader, proxy: EventLoopProxy<Event>, cwd: PathBuf) -> Self {
+        let pins = panels::load();
         let slide_delay = Duration::from_secs_f64(options.slideshow_delay.unwrap_or(DEFAULT_SLIDE_DELAY));
         ACCENT.store(options.accent, atomic::Ordering::Relaxed);
         crate::mpv::DEBUG.store(options.debug, atomic::Ordering::Relaxed);
@@ -1701,7 +1708,7 @@ impl App {
             list_button_over: None,
             strip_over: None,
             strip_scroll: 0,
-            strip_close_over: false,
+            strip_button_over: None,
             grid_over: None,
             debug_buttons: Vec::new(),
             debug_last: Vec::new(),
@@ -1809,7 +1816,11 @@ impl App {
             recent_shown: Vec::new(),
             shell_typed: None,
             list_right: options.list_right,
-            list_pinned: options.list_pinned,
+            // Pinned or not as last time, unless the config or the command
+            // line pins the list.
+            list_pinned: options.list_pinned || pins.0.unwrap_or(false),
+            inspector_pinned: pins.1.unwrap_or(false),
+            strip_docked: pins.2.unwrap_or(false),
             triage_on: false,
             triage: RefCell::new(None),
             verdicts: RefCell::new(HashMap::new()),
@@ -1817,7 +1828,7 @@ impl App {
             convert_panel: None,
             track_picker: None,
             inspector: None,
-            video_margins: Cell::new((0.0, 0.0)),
+            video_margins: Cell::new((0.0, 0.0, 0.0)),
             help_kept: None,
             track_editor: None,
             track_memory: None,
@@ -1934,9 +1945,9 @@ impl App {
         self.hitches.summary();
         filework::finish();
         self.finish_frames();
+        self.players().for_each(Player::settle);
         crate::transcode::abandon();
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-        std::process::exit(0);
+        crate::quit_now();
     }
 
     fn window_size(&self) -> (u32, u32) {
@@ -2594,6 +2605,7 @@ impl App {
             // which a video has to be told of.
             ListPin => {
                 self.list_pinned = !self.list_pinned;
+                self.save_panels();
                 self.apply_video_view();
             }
             ListFlip => {
@@ -3016,6 +3028,8 @@ impl App {
                 left += room;
             }
         }
+        // The strip along the bottom, pinned below it.
+        let height = if self.band_docked() { (height as i32 - Strip::for_height(height).height).max(1) as u32 } else { height };
         (left, (width.max(1) as u32, height))
     }
 
@@ -3858,6 +3872,8 @@ impl ApplicationHandler<Event> for App {
         self.hitches.summary();
         filework::finish();
         self.finish_frames();
+        // Nor a frame being drawn ahead of the next video.
+        self.players().for_each(Player::settle);
     }
 }
 

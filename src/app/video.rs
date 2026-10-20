@@ -357,7 +357,7 @@ impl App {
         // Whether the time along is written anywhere: on the seek bar, in
         // the info line, under the grid, or along the scenes. Elsewhere
         // its moving on with every frame changes nothing in the window.
-        let time_shown = self.hover.is_some() || self.time_until.is_some() || self.show_info || self.show_debug || self.grid.is_some() || self.scenes_shown() || self.slide_at.is_some();
+        let time_shown = self.hover.is_some() || self.time_until.is_some() || self.show_info || self.show_debug || self.grid.is_some() || self.scenes_shown() || self.slide_at.is_some() || self.show_list;
         let Some(video) = &mut self.video else { return };
         // One held ready by the spare player announced its frame before it
         // was this player, so that has to be looked for.
@@ -678,6 +678,10 @@ impl App {
     /// Has a video play again whenever it ends, or no longer, whatever the
     /// list's loop: from the loop on its row in the file list.
     pub(super) fn toggle_file_loop(&mut self, id: usize) {
+        // Every video loops already: that is the list's loop to change.
+        if self.looping == Looping::File {
+            return self.toast(format!("{}  Every video loops · l to change", commands::icons::REPEAT_1));
+        }
         let looped = !self.looped.remove(&id);
         if looped {
             self.looped.insert(id);

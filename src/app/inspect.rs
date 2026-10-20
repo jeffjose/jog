@@ -140,6 +140,8 @@ enum Hit {
     Tab(usize),
     Copy(String),
     CopyAll,
+    /// Docks the panel beside the picture, or lets it float over it.
+    Pin,
     Close,
     /// A scene of the HDR chart, or a chapter: that time in the video.
     Seek(f64),
@@ -384,6 +386,7 @@ impl App {
                 }
             }
             Hit::Close => self.inspector = None,
+            Hit::Pin => self.toggle_inspector_pin(),
             Hit::Copy(value) => {
                 let said = if value.chars().count() > 40 { format!("{}…", value.chars().take(38).collect::<String>()) } else { value.clone() };
                 copy(self, value, said);
@@ -603,58 +606,68 @@ impl App {
         let line = Text::line_height(px);
         let small = (px * 5 / 6).max(11);
         let small_line = Text::line_height(small);
-        // A panel down the right, or the left when the file list stands
-        // on the right: the video stays in view beside it.
-        let width = (canvas.width * 2 / 5).clamp((px as i32 * 30).min(canvas.width - pad * 2), px as i32 * 46);
-        let (top, height) = (pad, canvas.height - pad * 2);
-        let left = if self.list_right { pad } else { canvas.width - width - pad };
+        // A column down the side the file list is not on, as wide as the
+        // list and laid out as it is: over the picture, or pinned beside it.
+        let (width, height) = (panel_width(canvas.width, px), canvas.height);
+        let (left, top) = (if self.list_right { 0 } else { canvas.width - width }, 0);
         inspector.place = [left, top, width, height];
         // Nothing in it has changed: the panel as it was.
         let over = self.over_inspector(self.mouse.0, self.mouse.1).then_some(mouse);
-        let key = PanelKey { tab: inspector.tab, scroll: inspector.scroll, found: inspector.found.is_some(), selected: inspector.selected.clone(), open: inspector.open.len(), follow: inspector.follow, pointer: over, place: inspector.place, window: (canvas.width, canvas.height) };
+        let key = PanelKey { tab: inspector.tab, scroll: inspector.scroll, found: inspector.found.is_some(), selected: inspector.selected.clone(), open: inspector.open.len(), follow: inspector.follow, pointer: over, place: inspector.place, window: (canvas.width, canvas.height), pinned: self.inspector_pinned };
+        // Over the picture it lets it show through faintly, as the file
+        // list does there: the panel, kept whole, laid on with a little of
+        // what is under it.
+        let through = if self.inspector_pinned { 0 } else { 24 };
         if let Some((_, pixels)) = inspector.kept.as_ref().filter(|(was, pixels)| *was == key && pixels.len() == (width * height) as usize) {
-            canvas.dissolve(left, top, width, height, pixels, 256);
+            canvas.dissolve(left, top, width, height, pixels, 256 - through);
             self.inspector = Some(inspector);
             return;
         }
+        let behind = (through > 0).then(|| canvas.copy(left, top, width, height));
 
-        panel(canvas, left, top, width, height, pad * 2 / 3);
+        canvas.fill(left, top, width, height, GRID_COLOR);
+        canvas.fill(if self.list_right { left + width - 1 } else { left }, top, 1, height, MENU_EDGE_COLOR);
         inspector.drawn.clear();
-        let inner = left + pad * 3 / 2;
-        let inner_w = width - pad * 3;
-        let mut y = top + pad;
+        let inner = left + pad;
+        let inner_w = width - pad * 2;
 
-        // The heading: what, the file, Copy as JSON and close.
-        text.draw(canvas, inner, y, px, TEXT_COLOR, &format!("{}  Inspect", commands::icons::EYE));
-        let name = self.name_of(inspector.id);
-        let name_x = inner + text.width(&format!("{}  Inspect", commands::icons::EYE), px) + pad;
-        let close_w = line;
-        let copy_words = "Copy as JSON";
-        let copy_w = text.width(copy_words, small) + pad;
-        let copy_x = inner + inner_w - close_w - pad / 2 - copy_w;
-        let name = clipped(text, &name, copy_x - name_x - pad, small);
-        text.draw(canvas, name_x, y + (line - small_line) / 2, small, DIM_TEXT_COLOR, &name);
-        let button_h = small_line + pad / 2;
-        canvas.round_fill(copy_x, y + (line - button_h) / 2, copy_w, button_h, pad / 3, PLACEHOLDER_COLOR, 256);
-        text.draw(canvas, copy_x + pad / 2, y + (line - small_line) / 2, small, TEXT_COLOR, copy_words);
-        inspector.drawn.push((Hit::CopyAll, [copy_x, y, copy_w, line]));
-        let close_x = inner + inner_w - close_w;
-        let x_w = text.width(commands::icons::X, px);
-        text.draw(canvas, close_x + (close_w - x_w) / 2, y, px, DIM_TEXT_COLOR, commands::icons::X);
-        inspector.drawn.push((Hit::Close, [close_x, y, close_w, line]));
-        y += line + pad * 2 / 3;
+        // The heading, as the file list's: what and the file, then the
+        // round buttons from the right: close, pin, copy as JSON.
+        let side = pad * 3 / 2;
+        let heading = format!("{}  Inspect", commands::icons::EYE);
+        text.draw(canvas, inner, top + pad * 3 / 4, px, TEXT_COLOR, &heading);
+        let buttons = [(Hit::Close, commands::icons::X, false), (Hit::Pin, commands::icons::PIN, self.inspector_pinned), (Hit::CopyAll, commands::icons::BRACES, false)];
+        let mut button_left = left + width;
+        for (at, (hit, icon, on)) in buttons.into_iter().enumerate() {
+            button_left = left + width - (at as i32 + 1) * side - pad / 2 - at as i32 * pad / 3;
+            let place = Button { x: button_left, y: top + pad / 2, width: side, height: side, command: Command::Inspect };
+            let hovered = (place.x..place.x + side).contains(&mouse.0) && (place.y..place.y + side).contains(&mouse.1);
+            draw::round_button(canvas, text, &place, icon, px, hovered, on, false);
+            inspector.drawn.push((hit, [place.x, place.y, side, side]));
+        }
+        let name_x = inner + text.width(&heading, px) + pad / 2;
+        let name = clipped(text, &self.name_of(inspector.id), button_left - name_x - pad / 2, small);
+        text.draw(canvas, name_x, top + pad * 3 / 4 + (line - small_line) / 2, small, DIM_TEXT_COLOR, &name);
+        let mut y = top + pad / 2 + side + pad / 2;
+        canvas.fill(pad / 2 + left, y, width - pad, 1, MENU_EDGE_COLOR);
+        y += pad / 2;
 
-        // The tabs.
-        let mut x = inner;
-        let tab_h = small_line + pad * 2 / 3;
-        for (at, name) in inspector.tabs().iter().enumerate() {
-            let w = text.width(name, small) + pad * 3 / 2;
+        // The tabs, as the list's order buttons: pills sharing the row.
+        let tabs = inspector.tabs();
+        let gap = pad / 3;
+        let tab_h = small_line + pad / 4;
+        let tab_w = (width - pad - gap * (tabs.len() as i32 - 1)) / tabs.len() as i32;
+        for (at, name) in tabs.iter().enumerate() {
+            let x = left + pad / 2 + at as i32 * (tab_w + gap);
             let on = at == inspector.tab;
-            let hovered = (x..x + w).contains(&mouse.0) && (y..y + tab_h).contains(&mouse.1);
-            canvas.round_fill(x, y, w, tab_h, pad / 3, if on { accent() } else if hovered { 0x3A3A40 } else { PLACEHOLDER_COLOR }, 256);
-            text.draw(canvas, x + pad * 3 / 4, y + pad / 3, small, if on { on_accent() } else { TEXT_COLOR }, name);
-            inspector.drawn.push((Hit::Tab(at), [x, y, w, tab_h]));
-            x += w + pad / 3;
+            let hovered = (x..x + tab_w).contains(&mouse.0) && (y..y + tab_h).contains(&mouse.1);
+            let lit = on || hovered;
+            canvas.round_fill(x, y, tab_w, tab_h, tab_h / 2, if lit { accent() } else { PLACEHOLDER_COLOR }, if hovered && !on { 200 } else { 256 });
+            canvas.round_outline(x, y, tab_w, tab_h, tab_h / 2, 1, if lit { accent() } else { MENU_EDGE_COLOR });
+            let name = clipped(text, name, tab_w - pad / 2, small);
+            let name_w = text.width(&name, small);
+            text.draw(canvas, x + (tab_w - name_w) / 2, y + (tab_h - small_line) / 2, small, if lit { on_accent() } else { TEXT_COLOR }, &name);
+            inspector.drawn.push((Hit::Tab(at), [x, y, tab_w, tab_h]));
         }
         y += tab_h + pad;
 
@@ -702,6 +715,9 @@ impl App {
         let keys = clipped(text, keys, inner_w, small);
         text.draw(canvas, inner, top + height - pad - small_line, small, DIM_TEXT_COLOR, &keys);
         inspector.kept = Some((key, canvas.copy(left, top, width, height)));
+        if let Some(behind) = behind.filter(|behind| behind.len() == (width * height) as usize) {
+            canvas.dissolve(left, top, width, height, &behind, through);
+        }
         self.inspector = Some(inspector);
     }
 
@@ -1134,24 +1150,32 @@ impl App {
     /// The inspector's width, and whether it stands on the left, for the
     /// picture or video to keep clear of it: the same sums it is drawn by.
     pub(super) fn inspector_room(&self) -> Option<(i32, bool)> {
-        self.inspector.as_ref()?;
+        self.inspector.as_ref().filter(|_| self.inspector_pinned)?;
         let (width, height) = self.window_size();
-        let (width, px) = (width as i32, ui_px(height) as i32);
-        let panel = (width * 2 / 5).clamp((px * 30).min(width - px * 2), px * 46);
-        Some((panel + px, self.list_right))
+        Some((panel_width(width as i32, ui_px(height)), self.list_right))
+    }
+
+    /// Pins the inspector beside the picture, which makes room for it, or
+    /// lets it lie over it; remembered for next time.
+    pub(super) fn toggle_inspector_pin(&mut self) {
+        self.inspector_pinned = !self.inspector_pinned;
+        self.save_panels();
+        self.apply_video_view();
+        self.redraw();
     }
 }
 
 impl App {
     /// Tells the player to draw the video in the part of the window the
-    /// picture has, clear of the pinned list and the inspector alike; and
-    /// back across the whole window once neither is there.
+    /// picture has, clear of the panels pinned beside and below it; and
+    /// back across the whole window once none is.
     pub(super) fn keep_video_clear(&self) {
-        let (width, _) = self.window_size();
-        let (left, (stage, _)) = self.stage();
-        let whole = f64::from(width.max(1));
-        let right = (width as i32 - left - stage as i32).max(0);
-        let want = if stage >= width { (0.0, 0.0) } else { (f64::from(left.max(0)) / whole, f64::from(right) / whole) };
+        let (width, height) = self.window_size();
+        let (left, (stage_w, stage_h)) = self.stage();
+        let across = f64::from(width.max(1));
+        let right = (width as i32 - left - stage_w as i32).max(0);
+        let below = height.saturating_sub(stage_h);
+        let want = (f64::from(left.max(0)) / across, f64::from(right) / across, f64::from(below) / f64::from(height.max(1)));
         if self.video_margins.get() == want {
             return;
         }
@@ -1159,8 +1183,9 @@ impl App {
         for player in self.players() {
             player.set("video-margin-ratio-left", &format!("{:.4}", want.0));
             player.set("video-margin-ratio-right", &format!("{:.4}", want.1));
+            player.set("video-margin-ratio-bottom", &format!("{:.4}", want.2));
             // Subtitles in the video, not under the panel beside it.
-            player.set("sub-use-margins", if want == (0.0, 0.0) { "yes" } else { "no" });
+            player.set("sub-use-margins", if want == (0.0, 0.0, 0.0) { "yes" } else { "no" });
         }
         // The zoom and pan are of that part, which has changed.
         self.apply_video_view();
@@ -1182,4 +1207,6 @@ pub struct PanelKey {
     pointer: Option<(i32, i32)>,
     place: [i32; 4],
     window: (i32, i32),
+    /// Pinned beside the picture, or over it.
+    pinned: bool,
 }

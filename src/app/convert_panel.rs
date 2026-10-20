@@ -571,15 +571,12 @@ impl App {
         let about = format!("{name} · {}", meta::human_size(file_size));
         let heading_w = text.width(&format!("{}  Convert", commands::icons::REPLACE), px);
         text.draw(canvas, inner + heading_w + pad, y + (line - small_line) / 2, small, DIM_TEXT_COLOR, &about);
-        let close = line;
-        let close_x = inner + inner_w - close;
-        let over_close = in_rect(mouse, [close_x, y, close, close]);
-        if over_close {
-            canvas.round_fill(close_x, y, close, close, close / 2, PLACEHOLDER_COLOR, 256);
-        }
-        let x_w = text.width(commands::icons::X, px);
-        text.draw(canvas, close_x + (close - x_w) / 2, y, px, TEXT_COLOR, commands::icons::X);
-        drawn.push((Hit::Close, [close_x, y, close, close]));
+        // The round close every panel has.
+        let close = pad * 3 / 2;
+        let (close_x, close_y) = (inner + inner_w - close, y + (line - close) / 2);
+        let place = Button { x: close_x, y: close_y, width: close, height: close, command: Command::ConvertPanel };
+        draw::round_button(canvas, text, &place, commands::icons::X, px, in_rect(mouse, [close_x, close_y, close, close]), false, false);
+        drawn.push((Hit::Close, [close_x, close_y, close, close]));
         y += line + pad;
 
         // The formats, as a row of buttons: the one chosen filled in.

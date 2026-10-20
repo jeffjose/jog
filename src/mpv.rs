@@ -635,6 +635,12 @@ impl Player {
         unsafe { renderer.draw(pixels, width, height) }
     }
 
+    /// Waits for a draw ahead to finish: quitting with one still going
+    /// pulls the player out from under it.
+    pub fn settle(&self) {
+        drop(self.drawing.lock());
+    }
+
     /// Whether a draw ahead is going on: a frame taken only to keep the
     /// player moving can be left until it is done.
     pub fn warming(&self) -> bool {

@@ -695,8 +695,10 @@ impl App {
         }
         if let Some(strip) = &strip {
             self.draw_strip_lengths(canvas, &mut text, strip, px);
-            self.draw_strip_close(canvas, &mut text, px);
             self.draw_strip_tip(canvas, &mut text, strip, px);
+        }
+        if strip.is_some() || scene_strip.is_some() {
+            self.draw_strip_buttons(canvas, &mut text, px);
         }
         if let Some(panel) = &panel {
             for pos in panel.first..panel.first + panel.rows {
@@ -822,7 +824,9 @@ impl App {
             }
             if let Some(strip) = &strip {
                 self.draw_strip_lengths(canvas, &mut text, strip, px);
-                self.draw_strip_close(canvas, &mut text, px);
+            }
+            if strip.is_some() || scene_strip.is_some() {
+                self.draw_strip_buttons(canvas, &mut text, px);
             }
         }
         text_block(canvas, &mut text, &error, px, |w, h| ((width - w) / 2, (height - h) / 2));
@@ -1495,17 +1499,29 @@ impl App {
         (self.pos as i64 + self.strip_scroll).clamp(0, self.list.len() as i64 - 1)
     }
 
-    /// The small round button above the filmstrip's right end that
-    /// closes it.
-    pub(super) fn strip_close(&self) -> Option<Button> {
+    /// The round buttons in the top right corner of the strip along the
+    /// bottom, the filmstrip or the scenes, as the panels have them: its
+    /// close, and before it its pin, which has the picture make room for
+    /// it rather than lie under it.
+    pub(super) fn strip_buttons(&self) -> Vec<(StripButton, Button)> {
         let (width, height) = self.window_size();
         let strip = Strip::for_height(height);
         let size = ui_px(height) as i32 * 3 / 2;
         // Not while a triage has it up: it is part of that.
-        let shown = self.grid.is_none() && self.strip_visible() && !self.triage_on;
+        let shown = self.grid.is_none() && (self.strip_visible() || self.scenes_shown()) && !self.triage_on;
+        if !shown {
+            return Vec::new();
+        }
         // In the corner of the strip itself: over a video the seek bar and
         // its buttons stand just above it.
-        shown.then_some(Button { x: width as i32 - size - size / 2, y: strip.top + size / 3, width: size, height: size, command: Command::ToggleFilmstrip })
+        let place = |at: i32| Button { x: width as i32 - (at + 1) * size - size / 2 - at * size / 3, y: strip.top + size / 3, width: size, height: size, command: Command::ToggleFilmstrip };
+        vec![(StripButton::Close, place(0)), (StripButton::Pin, place(1))]
+    }
+
+    /// Which of the strip's buttons is at a window position.
+    pub(super) fn strip_button_at(&self, x: f64, y: f64) -> Option<StripButton> {
+        let (x, y) = (x as i32, y as i32);
+        self.strip_buttons().into_iter().find(|(_, b)| (b.x..b.x + b.width).contains(&x) && (b.y..b.y + b.height).contains(&y)).map(|(which, _)| which)
     }
 
     pub(super) fn strip_left(&self, strip: &Strip, pos: usize, window_width: i32) -> i32 {
@@ -1592,13 +1608,16 @@ impl App {
     }
 
     /// The cross in the corner of the filmstrip, which closes it.
-    pub(super) fn draw_strip_close(&self, canvas: &mut Canvas, text: &mut Text, px: u32) {
-        let Some(place) = self.strip_close() else { return };
-        let over = (place.x..place.x + place.width).contains(&(self.mouse.0 as i32)) && (place.y..place.y + place.height).contains(&(self.mouse.1 as i32));
-        canvas.round_fill(place.x, place.y, place.width, place.height, place.width / 2, if over { accent() } else { 0x000000 }, if over { 256 } else { 170 });
-        let (cross, small) = (commands::icons::X, (px * 5 / 6).max(11));
-        let inset = ((place.width - text.width(cross, small)) / 2, (place.height - Text::line_height(small)) / 2);
-        text.draw(canvas, place.x + inset.0, place.y + inset.1, small, if over { on_accent() } else { TEXT_COLOR }, cross);
+    pub(super) fn draw_strip_buttons(&self, canvas: &mut Canvas, text: &mut Text, px: u32) {
+        let over = self.strip_button_at(self.mouse.0, self.mouse.1);
+        for (which, place) in self.strip_buttons() {
+            let (icon, on) = match which {
+                StripButton::Close => (commands::icons::X, false),
+                StripButton::Pin => (commands::icons::PIN, self.strip_docked),
+            };
+            // Over the picture, unless pinned below it.
+            round_button(canvas, text, &place, icon, px, over == Some(which), on, !self.band_docked());
+        }
     }
 
     /// In the corner of each video in the filmstrip, how long it is, as the
@@ -1683,7 +1702,7 @@ impl App {
         let rows = (((bottom - top) / row_height).max(1) as usize).min(self.list.len());
         let scrolled = self.list_scroll.filter(|(pos, len, _)| (*pos, *len) == (self.pos, self.list.len()));
         let first = scrolled.map_or(self.pos.saturating_sub(rows / 2), |(_, _, first)| first).min(self.list.len() - rows);
-        let panel_width = (px as i32 * 30).min(width as i32 / 2);
+        let panel_width = panel_width(width as i32, px);
         let left = if self.list_right { width as i32 - panel_width } else { 0 };
         Some(ListPanel { left, width: panel_width, bottom, top, row_height, first, rows, px })
     }
@@ -1932,9 +1951,8 @@ impl App {
             let over = (button.x..button.x + button.width).contains(&mouse.0) && (button.y..button.y + button.height).contains(&mouse.1);
             let on = self.is_checked(button.command);
             if matches!(button.command, Command::ToggleList | Command::ListSearch | Command::ShowAllHere | Command::ListPin | Command::ListFlip | Command::CycleLoop) {
-                // The cross is a round button, as the grid's is.
-                canvas.round_fill(button.x, button.y, button.width, button.height, button.width / 2, if over || on { accent() } else { PLACEHOLDER_COLOR }, 256);
-                let cross = match button.command {
+                // The round buttons at the head of every panel.
+                let icon = match button.command {
                     Command::ListSearch => commands::icons::SEARCH,
                     Command::ShowAllHere => commands::icons::LIST_X,
                     Command::ListPin => commands::icons::PIN,
@@ -1943,8 +1961,7 @@ impl App {
                     Command::CycleLoop => commands::icons::REPEAT,
                     _ => commands::icons::X,
                 };
-                let inset = ((button.width - text.width(cross, small)) / 2, (button.height - Text::line_height(small)) / 2);
-                text.draw(canvas, button.x + inset.0, button.y + inset.1, small, if over { on_accent() } else { TEXT_COLOR }, cross);
+                round_button(canvas, text, button, icon, px, over, on, false);
                 continue;
             }
             let lit = over || on;
@@ -2009,7 +2026,8 @@ impl App {
             // again when it ends, and offered on the row under the pointer.
             let video = files::is_video(&self.files[id]);
             let loop_room = if video { star_room } else { 0 };
-            let looped = self.looped.contains(&id);
+            // With every video looping, each says so.
+            let looped = self.looped.contains(&id) || self.looping == Looping::File;
             if video && (looped || hovered) {
                 let icon = commands::icons::REPEAT_1;
                 let color = if looped && !current { accent_soft() } else if looped { main } else { dim };
@@ -2017,8 +2035,22 @@ impl App {
                 text.draw(canvas, icon_left, line, px, color, icon);
             }
             let star_room = star_room + loop_room;
+            // The video playing shows how far along it is: the time gone
+            // by with its length, and a thin bar along the foot of its row.
+            let along = self.video_time().filter(|_| current && self.video.as_ref().is_some_and(|video| video.id == id));
+            if let Some((position, total)) = along {
+                let (x, w) = (pad * 3 / 2, panel.width - pad * 3);
+                let (bar_y, bar_h) = (top + panel.row_height - (px as i32 / 6).max(3) - 2, (px as i32 / 8).max(2));
+                canvas.round_fill(x, bar_y, w, bar_h, bar_h / 2, main, 70);
+                let done = (f64::from(w) * (position / total).clamp(0.0, 1.0)) as i32;
+                canvas.round_fill(x, bar_y, done.max(bar_h), bar_h, bar_h / 2, main, 256);
+            }
             // A video's length sits before it, once it is known.
             let length = self.durations.get(&id).copied().flatten().map(clock).unwrap_or_default();
+            let length = match along {
+                Some((position, total)) => format!("{} / {}", clock(position), clock(total)),
+                None => length,
+            };
             let length_width = if length.is_empty() { 0 } else { text.width(&length, px) + pad };
             text.draw(canvas, panel.width - star_room - length_width, line, px, dim, &length);
             // Before that, what a triage has decided about it: a tick for
@@ -2099,6 +2131,30 @@ pub(super) fn clipped(text: &mut Text, line: &str, width: i32, px: u32) -> Strin
 
 /// The background of a menu or box: a dark panel with rounded corners and
 /// a thin edge.
+/// How wide a panel down the side is: the file list and the inspector
+/// alike, thirty lines of text, at most half the window.
+pub(super) fn panel_width(window_width: i32, px: u32) -> i32 {
+    (px as i32 * 30).min(window_width / 2)
+}
+
+/// The round button at the head of a panel or strip: pin, close and the
+/// like, alike everywhere. Filled with the accent under the pointer or
+/// while what it stands for is on; `glass` for one over a picture, dark
+/// and see-through.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn round_button(canvas: &mut Canvas, text: &mut Text, place: &Button, icon: &str, px: u32, over: bool, on: bool, glass: bool) {
+    let lit = over || on;
+    let (ground, alpha) = match (lit, glass) {
+        (true, _) => (accent(), 256),
+        (false, true) => (0x000000, 170),
+        (false, false) => (PLACEHOLDER_COLOR, 256),
+    };
+    canvas.round_fill(place.x, place.y, place.width, place.height, place.width / 2, ground, alpha);
+    let small = (px * 5 / 6).max(11);
+    let inset = ((place.width - text.width(icon, small)) / 2, (place.height - Text::line_height(small)) / 2);
+    text.draw(canvas, place.x + inset.0, place.y + inset.1, small, if lit { on_accent() } else { TEXT_COLOR }, icon);
+}
+
 pub(super) fn panel(canvas: &mut Canvas, x: i32, y: i32, width: i32, height: i32, radius: i32) {
     canvas.round_fill(x, y, width, height, radius, MENU_COLOR, 256);
     canvas.round_outline(x, y, width, height, radius, 1, MENU_EDGE_COLOR);

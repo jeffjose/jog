@@ -230,8 +230,17 @@ fn main() -> ExitCode {
     // at once, where closing a player that is in the middle of opening a
     // file takes it half a second, with the window standing meanwhile.
     transcode::abandon();
+    quit_now()
+}
+
+/// Ends the process at once, the output written. Not by `exit`, whose
+/// handlers take down the libraries loaded: the GPU decoder's, with mpv's
+/// threads still in it, crashed one quit in four or so.
+pub fn quit_now() -> ! {
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    std::process::exit(0)
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    // SAFETY: ends the process; nothing after it runs.
+    unsafe { libc::_exit(0) }
 }
 
 #[cfg(test)]

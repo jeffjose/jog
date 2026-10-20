@@ -236,10 +236,10 @@ impl App {
             self.triage_over = on_triage;
             self.redraw();
         }
-        // The cross above the strip lights up under the pointer too.
-        let on_close = self.strip_close().is_some_and(|place| (place.x..place.x + place.width).contains(&(x as i32)) && (place.y..place.y + place.height).contains(&(y as i32)));
-        if over != self.strip_over || on_close != self.strip_close_over {
-            (self.strip_over, self.strip_close_over) = (over, on_close);
+        // The buttons on the strip light up under the pointer too.
+        let on_button = self.strip_button_at(x, y);
+        if over != self.strip_over || on_button != self.strip_button_over {
+            (self.strip_over, self.strip_button_over) = (over, on_button);
             self.redraw();
         }
         match &mut self.drag {
@@ -555,9 +555,8 @@ impl App {
                         self.list_scroll = first.map(|first| (self.pos, self.list.len(), first));
                         self.strip_scroll = center - self.pos as i64;
                     }
-                } else if self.strip_close().is_some_and(|place| (place.x..place.x + place.width).contains(&(x as i32)) && (place.y..place.y + place.height).contains(&(y as i32))) {
-                    (self.strip_pinned, self.strip_hover, self.strip_over) = (false, false, None);
-                    self.redraw();
+                } else if let Some(which) = self.strip_button_at(x, y) {
+                    self.strip_button(which);
                 } else if self.scenes_shown() && y >= f64::from(strip.top) && self.strip_click(x, y, ui_px(height)) {
                     // A tab, or a section marked from the Sections tab.
                 } else if self.scenes_shown() && y >= f64::from(strip.top) {

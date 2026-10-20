@@ -522,9 +522,13 @@ impl App {
         let about = format!("{name}  ·  {}", clock(editor.seconds));
         let hx = inner + text.width(&heading, px) + pad;
         text.draw(canvas, hx, y + (line - small_line) / 2, small, DIM_TEXT_COLOR, &about);
-        let x_w = text.width(commands::icons::X, px);
-        text.draw(canvas, inner + inner_w - x_w, y, px, DIM_TEXT_COLOR, commands::icons::X);
-        editor.drawn.push((Hit::Close, [inner + inner_w - line, y, line, line]));
+        // The round close every panel has.
+        let close = px as i32 * 3 / 2;
+        let (close_x, close_y) = (inner + inner_w - close, y + (line - close) / 2);
+        let over = (close_x..close_x + close).contains(&mouse.0) && (close_y..close_y + close).contains(&mouse.1);
+        let place = Button { x: close_x, y: close_y, width: close, height: close, command: Command::EditTracks };
+        draw::round_button(canvas, text, &place, commands::icons::X, px, over, false, false);
+        editor.drawn.push((Hit::Close, [close_x, close_y, close, close]));
         y += line + pad;
         if let Some(error) = &editor.failed {
             text.draw(canvas, inner, y, px, DIM_TEXT_COLOR, &format!("Not readable · {error}"));
