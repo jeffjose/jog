@@ -971,7 +971,7 @@ impl App {
                                 Block::Hero => self.draw_overview_hero(&mut sub, text, px, found, column_w, top),
                                 Block::HdrHero => self.draw_hdr_hero(&mut sub, text, px, info.as_ref(), column_w, top),
                                 Block::Issues => self.draw_issues(&mut sub, text, px, found, column_w, top),
-                                Block::Card(card) => self.draw_card(&mut sub, text, px, card, column_w, top, offset, mouse, &mut drawn),
+                                Block::Card(card) => self.draw_card(&mut sub, text, px, card, column_w, top, offset, mouse, &mut drawn, &mut tips),
                                 Block::Anatomy => self.draw_anatomy(&mut sub, text, px, found, column_w, top, &mut tips),
                                 Block::Tracks => self.draw_track_choices(&mut sub, text, px, inspector.id, column_w, top, offset, mouse, &mut drawn),
                                 Block::PictureCharts => match found.picture.as_ref() {

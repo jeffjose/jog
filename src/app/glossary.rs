@@ -187,17 +187,71 @@ fn pixels(format: &str) -> Option<String> {
 pub(super) struct Tip {
     pub place: [i32; 4],
     pub title: String,
-    pub lines: Vec<(Role, String)>,
+    /// Each a heading and what it means.
+    pub lines: Vec<(String, String)>,
 }
 
 impl Tip {
-    pub fn new(place: [i32; 4], title: &str, lines: Vec<(Role, String)>) -> Tip {
+    /// A tooltip of terms, each in its role: the role's name and the term
+    /// as the heading, and what the term means, or the role does.
+    pub fn new(place: [i32; 4], title: &str, terms: Vec<(Role, String)>) -> Tip {
+        let lines = terms.into_iter().map(|(role, term)| (format!("{} · {term}", role.name()), explain(role, &term).unwrap_or_else(|| role.about().to_string()))).collect();
         Tip { place, title: title.to_string(), lines }
     }
 }
 
+/// A tooltip for a fact as Inspect lists it, a label and its value: what
+/// the label is, and what this value of it means where jog knows.
+pub(super) fn fact_tip(place: [i32; 4], label: &str, value: &str) -> Option<Tip> {
+    let lower = value.to_ascii_lowercase();
+    let has = |words: &[&str]| words.iter().any(|word| lower.contains(word));
+    // A role and the term the value is, as the glossary names it.
+    let term = |role: Role, term: Option<&str>| -> Option<(Role, String)> { Some((role, term?.to_string())) };
+    let (about, said): (&str, Option<(Role, String)>) = match label {
+        "Codec" => {
+            let named = [("av1", "av1"), ("hevc", "hevc"), ("h.265", "hevc"), ("h.264", "h264"), ("avc", "h264"), ("vp9", "vp9"), ("vp8", "vp8"), ("prores", "prores"), ("aac", "aac"), ("opus", "opus"), ("e-ac-3", "eac3"), ("eac3", "eac3"), ("ac-3", "ac3"), ("truehd", "truehd"), ("dts", "dts"), ("flac", "flac"), ("mp3", "mp3"), ("subrip", "subrip"), ("pgs", "hdmv_pgs_subtitle")];
+            ("How the stream is compressed.", term(Role::Codec, named.iter().find(|(word, _)| lower.contains(word)).map(|(_, name)| *name)))
+        }
+        "Profile" => ("Which of the codec's tools the stream may use.", term(Role::Profile, Some(&lower))),
+        "Level" => ("The most a decoder must keep up with: the size, the frame rate and the bitrate. Roughly 4 is 1080p, 5 is 4K at 30, 5.1 4K at 60.", None),
+        "Transfer" => {
+            let named = if has(&["2084", "pq"]) { Some("smpte2084") } else if has(&["hlg", "b67"]) { Some("arib-std-b67") } else if has(&["srgb", "61966"]) { Some("iec61966-2-1") } else if has(&["709", "1886"]) { Some("bt709") } else { None };
+            (Role::Transfer.about(), term(Role::Transfer, named))
+        }
+        "Primaries" => {
+            let named = if has(&["2020"]) { Some("bt2020") } else if has(&["display p3", "432"]) { Some("smpte432") } else if has(&["dci", "431"]) { Some("smpte431") } else if has(&["709"]) { Some("bt709") } else { None };
+            (Role::Primaries.about(), term(Role::Primaries, named))
+        }
+        "Matrix" => {
+            let named = if has(&["2020"]) && has(&["non"]) { Some("bt2020nc") } else if has(&["2020"]) { Some("bt2020c") } else if has(&["709"]) { Some("bt709") } else if has(&["rgb", "gbr"]) { Some("rgb") } else { None };
+            (Role::Matrix.about(), term(Role::Matrix, named))
+        }
+        "Pixels" => (Role::Pixels.about(), term(Role::Pixels, Some(&lower))),
+        "Range" => ("Limited: black at 16 and white at 235 of 255, as video is stored; full: 0 to 255, as pictures are. One taken for the other looks washed out, or loses its shadows.", None),
+        "Bit depth" => ("Bits for each channel. 8 bits band in smooth gradients like skies; HDR needs 10.", None),
+        "Chroma siting" => ("Where each color sample sits among the brightness samples it is shared by. Guessed wrong, color is off by half a pixel at edges.", None),
+        "Scan" => ("Progressive: whole frames. Interlaced: alternate lines from moments apart, as old TV was, combed on a modern screen unless deinterlaced.", None),
+        "Aspect" => ("The shape it is shown at. Where it differs from the pixels', they are not square and are stretched to it.", None),
+        "Codec tag" => ("The four letters the container names the codec by. For HEVC in MP4, Apple's players want hvc1, not hev1.", None),
+        "Bitrate" => ("How much data a second, on average: more is larger and, for the same codec and settings, closer to the original.", None),
+        "Frame rate" => ("Frames a second. 23.976 is film on video, 29.97 and 59.94 are NTSC video's, 25 and 50 PAL's.", None),
+        "Sample rate" => ("Sound samples a second: 48 kHz is video's, 44.1 kHz CD's.", None),
+        "Channels" => ("How many sound channels: 2 is stereo, 5.1 is six, the .1 being the bass.", None),
+        "Sample format" => ("How each sound sample is stored: fltp is floating point, a channel at a time; s16 is 16-bit integers.", None),
+        "Language" => ("The language the file says the track is in, as a player picks tracks by.", None),
+        _ => return None,
+    };
+    let mut lines = vec![(label.to_string(), about.to_string())];
+    if let Some((role, term)) = said {
+        if let Some(meaning) = explain(role, &term) {
+            lines.push((value.to_string(), meaning));
+        }
+    }
+    Some(Tip { place, title: format!("{label} · {value}"), lines })
+}
+
 /// Words broken into lines no wider than `width`.
-fn wrap(text: &mut Text, words: &str, width: i32, px: u32) -> Vec<String> {
+pub(super) fn wrap(text: &mut Text, words: &str, width: i32, px: u32) -> Vec<String> {
     let mut lines = vec![String::new()];
     for word in words.split_whitespace() {
         let line = lines.last_mut().expect("one line at least");
@@ -225,10 +279,9 @@ pub(super) fn draw_tip(sub: &mut Canvas, text: &mut Text, px: u32, tips: &[Tip],
     // in a short dock along the bottom.
     let lay = |text: &mut Text, width: i32| {
         let mut rows: Vec<(String, u32, u32)> = vec![(tip.title.clone(), px, TEXT_COLOR)];
-        for (role, term) in &tip.lines {
-            let said = explain(*role, term).unwrap_or_else(|| role.about().to_string());
-            rows.push((format!("{} · {term}", role.name()), small, accent_soft()));
-            for piece in wrap(text, &said, width - pad * 2, small) {
+        for (heading, said) in &tip.lines {
+            rows.push((heading.clone(), small, accent_soft()));
+            for piece in wrap(text, said, width - pad * 2, small) {
                 rows.push((piece, small, DIM_TEXT_COLOR));
             }
         }

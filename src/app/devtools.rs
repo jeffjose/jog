@@ -146,27 +146,28 @@ pub enum Severity {
 
 impl App {
     /// What is off about a file, as a careful look at it would find.
-    pub(super) fn issues(&self, found: &super::inspect::Inspection) -> Vec<(Severity, String)> {
+    /// Each with how to put it right.
+    pub(super) fn issues(&self, found: &super::inspect::Inspection) -> Vec<(Severity, String, &'static str)> {
         let mut issues = Vec::new();
         if let Some(video) = found.video() {
             let missing = |key: &str| video[key].as_str().is_none_or(|value| value == "unknown");
             if missing("color_primaries") || missing("color_transfer") || missing("color_space") {
-                issues.push((Severity::Warning, "Color not tagged: players guess its primaries, curve or matrix, and may guess wrong".to_string()));
+                issues.push((Severity::Warning, "Color not tagged: players guess its primaries, curve or matrix, and may guess wrong".to_string(), "Tag it as it was made: ffmpeg -c copy with -color_primaries, -color_trc and -colorspace"));
             }
             let (rate, average) = (video["r_frame_rate"].as_str().unwrap_or_default(), video["avg_frame_rate"].as_str().unwrap_or_default());
             if !rate.is_empty() && !average.is_empty() && rate != average && average != "0/0" {
-                issues.push((Severity::Note, format!("Variable frame rate: {rate} at most, {average} on average")));
+                issues.push((Severity::Note, format!("Variable frame rate: {rate} at most, {average} on average"), "Fine to watch; for an editor that wants one rate, convert with ffmpeg -fps_mode cfr"));
             }
             let transfer = video["color_transfer"].as_str().unwrap_or_default();
             let hdr = found.hdr.as_ref();
             if transfer == "smpte2084" && hdr.is_some_and(|hdr| hdr.mastering.is_none()) && found.side("Mastering display metadata").is_none() {
-                issues.push((Severity::Note, "PQ without mastering display metadata: tone mapping has to guess the peak".to_string()));
+                issues.push((Severity::Note, "PQ without mastering display metadata: tone mapping has to guess the peak".to_string(), "Set when encoding: x265 master-display, SVT-AV1 mastering-display"));
             }
             if transfer == "smpte2084" && hdr.is_some_and(|hdr| hdr.light.is_none()) && found.side("Content light level metadata").is_none() {
-                issues.push((Severity::Note, "PQ without MaxCLL and MaxFALL".to_string()));
+                issues.push((Severity::Note, "PQ without MaxCLL and MaxFALL: a screen cannot tell how bright the brightest frame is".to_string(), "Set when encoding: x265 max-cll, SVT-AV1 content-light"));
             }
             if transfer != "smpte2084" && transfer != "arib-std-b67" && hdr.is_some_and(|hdr| !hdr.hdr10plus.is_empty() || !hdr.agtm.is_empty()) {
-                issues.push((Severity::Warning, "HDR metadata in a video not coded as HDR".to_string()));
+                issues.push((Severity::Warning, "HDR metadata in a video not coded as HDR: players ignore it, or show it wrong".to_string(), "Its transfer tag is wrong: set it to PQ (ffmpeg -color_trc smpte2084 -c copy)"));
             }
         }
         // An MP4 whose index is at its end has to be read through before
@@ -175,13 +176,13 @@ impl App {
             let order: Vec<&str> = nodes.iter().map(|node| node.name.as_str()).collect();
             if let (Some(moov), Some(mdat)) = (order.iter().position(|name| *name == "moov"), order.iter().position(|name| *name == "mdat")) {
                 if moov > mdat {
-                    issues.push((Severity::Note, "Index (moov) after the media: not quick to start over a network".to_string()));
+                    issues.push((Severity::Note, "Index (moov) after the media: not quick to start over a network".to_string(), "Move it first, losing nothing: ffmpeg -c copy -movflags +faststart; jog's Convert writes it first"));
                 }
             }
         }
         if let Some(picture) = found.picture.as_ref() {
             if picture.icc.is_none() && picture.color.cicp.is_none() && picture.color.png_gamma.is_none() {
-                issues.push((Severity::Note, "No color profile: shown as sRGB".to_string()));
+                issues.push((Severity::Note, "No color profile: shown as sRGB".to_string(), "Nothing to do for sRGB; a wide-gamut picture needs its profile embedded"));
             }
         }
         issues
@@ -1008,7 +1009,7 @@ impl App {
     /// it and a hairline under, then each fact, its name dim against one
     /// edge and its value after, a click copying it. No box around it.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn draw_card(&self, sub: &mut Canvas, text: &mut Text, px: u32, card: &Card, width: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>) -> i32 {
+    pub(super) fn draw_card(&self, sub: &mut Canvas, text: &mut Text, px: u32, card: &Card, width: i32, y: i32, offset: (i32, i32), mouse: (i32, i32), drawn: &mut Vec<(Hit, [i32; 4])>, tips: &mut Vec<Tip>) -> i32 {
         let pad = px as i32;
         let line = Text::line_height(px);
         let small = (px * 5 / 6).max(11);
@@ -1028,6 +1029,10 @@ impl App {
         let row_h = line + pad / 5;
         let label_w = card.rows.iter().map(|(label, _)| text.width(label, small)).max().unwrap_or(0).min(width * 2 / 5);
         for (label, value) in &card.rows {
+            // Over its name: what the fact is, and what this value means.
+            if let Some(tip) = super::glossary::fact_tip([x, ry, label_w + pad / 2, row_h], label, value) {
+                tips.push(tip);
+            }
             let label = clipped(text, label, label_w, small);
             text.draw(sub, x, ry + (line - small_line) / 2, small, DIM_TEXT_COLOR, &label);
             let vx = x + label_w + pad;
@@ -1157,15 +1162,22 @@ impl App {
         };
         text.draw(sub, x, y, big, if issues.is_empty() { 0x3DD68C } else { TEXT_COLOR }, &headline);
         let mut ty = y + Text::line_height(big) + pad;
-        for (severity, words) in issues {
-            // The first clause is what is off, the rest what it means.
+        let small_line = Text::line_height(small);
+        for (severity, words, fix) in issues {
+            // The first clause is what is off, the rest what it means; then
+            // how to put it right. Wrapped, not cut: a narrow dock keeps all.
             let (what, means) = words.split_once(':').map_or((words.as_str(), ""), |(a, b)| (a, b.trim()));
             let color = if severity == Severity::Warning { 0xE5A50A } else { 0x9DB1F5 };
-            let h = Text::line_height(px) + if means.is_empty() { 0 } else { Text::line_height(small) + pad / 6 };
+            let inner = width - pad;
+            let mut lines: Vec<(String, u32, u32)> = vec![(clipped(text, what, inner, px), px, TEXT_COLOR)];
+            lines.extend(super::glossary::wrap(text, means, inner, small).into_iter().filter(|line| !line.is_empty()).map(|line| (line, small, DIM_TEXT_COLOR)));
+            lines.extend(super::glossary::wrap(text, &format!("Fix · {fix}"), inner, small).into_iter().map(|line| (line, small, accent_soft())));
+            let h: i32 = lines.iter().map(|(_, size, _)| if *size == px { Text::line_height(px) } else { small_line + pad / 8 }).sum();
             sub.round_fill(x, ty, 3, h, 1, color, 256);
-            { let shown = clipped(text, what, width - pad, px); text.draw(sub, x + pad * 2 / 3, ty, px, TEXT_COLOR, &shown); }
-            if !means.is_empty() {
-                { let shown = clipped(text, means, width - pad, small); text.draw(sub, x + pad * 2 / 3, ty + Text::line_height(px) + pad / 6, small, DIM_TEXT_COLOR, &shown); }
+            let mut ly = ty;
+            for (line, size, ink) in lines {
+                text.draw(sub, x + pad * 2 / 3, ly, size, ink, &line);
+                ly += if size == px { Text::line_height(px) } else { small_line + pad / 8 };
             }
             ty += h + pad * 2 / 3;
         }
