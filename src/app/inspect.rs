@@ -624,7 +624,9 @@ impl App {
         let (left, top) = (if self.list_right { 0 } else { canvas.width - width }, 0);
         inspector.place = [left, top, width, height];
         // Nothing in it has changed: the panel as it was.
-        let over = self.over_inspector(self.mouse.0, self.mouse.1).then_some(mouse);
+        // The pointer over the panel, as the panel is to be drawn: not by
+        // `over_inspector`, the panel being out of its place just now.
+        let over = ((left..left + width).contains(&mouse.0) && (top..top + height).contains(&mouse.1)).then_some(mouse);
         let hdr_info = inspector.found.as_ref().and_then(|found| found.as_ref().ok()).and_then(|found| found.hdr.as_ref());
         let hdr = (inspector.tab == 2 && !inspector.picture).then(|| self.hdr_key(inspector.id, hdr_info, inspector.gain));
         let key = PanelKey { tab: inspector.tab, scroll: inspector.scroll, found: inspector.found.is_some(), selected: inspector.selected.clone(), open: inspector.open.len(), follow: inspector.follow, pointer: over, place: inspector.place, window: (canvas.width, canvas.height), pinned: self.inspector_pinned, hdr };
