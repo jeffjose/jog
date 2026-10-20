@@ -412,11 +412,15 @@ impl App {
 
     /// Converts the target videos by ffmpeg, one after another on another
     /// thread, saying how far along each is as it goes.
-    pub(super) fn convert_videos(&mut self, target: crate::transcode::Target) {
+    pub(super) fn convert_videos(&mut self, target: crate::transcode::Target, knobs: crate::transcode::Knobs) {
+        self.convert_these_videos(self.targets(), target, knobs);
+    }
+
+    /// Converts the videos of `ids`, as `convert_videos` does the targets.
+    pub(super) fn convert_these_videos(&mut self, ids: Vec<usize>, target: crate::transcode::Target, knobs: crate::transcode::Knobs) {
         let settings = self.options.convert.video;
         // Each turned and mirrored as it is shown.
-        let paths: Vec<(PathBuf, Transform)> = self
-            .targets()
+        let paths: Vec<(PathBuf, Transform)> = ids
             .into_iter()
             .filter(|id| files::is_video(&self.files[*id]))
             .map(|id| (self.files[id].clone(), self.transforms.get(&id).copied().unwrap_or_default()))
@@ -446,7 +450,7 @@ impl App {
                 let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 let mut said = None;
                 let started = Instant::now();
-                let result = crate::transcode::transcode(path, &target, &settings, *transform, |share| {
+                let result = crate::transcode::transcode(path, &target, &settings, &knobs, *transform, |share| {
                     // A word only when the whole percentage moves on.
                     let percent = (share * 100.0) as u32;
                     if said != Some(percent) {

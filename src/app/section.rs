@@ -283,7 +283,7 @@ impl App {
 
     /// Saves the section as `clip`, by ffmpeg on another thread, saying in
     /// the toast how far along it is.
-    pub(super) fn save_section(&mut self, clip: crate::transcode::Clip) {
+    pub(super) fn save_section(&mut self, clip: crate::transcode::Clip, knobs: crate::transcode::Knobs) {
         let Some(video) = &self.video else { return self.toast("Sections are for videos") };
         let Some((a, b)) = self.section().and_then(|section| section.span()) else {
             return self.toast("No section · Shift+A, Shift+B");
@@ -304,7 +304,7 @@ impl App {
         std::thread::spawn(move || {
             let name = output.file_name().unwrap_or_default().to_string_lossy().into_owned();
             let (mut said, started) = (None, Instant::now());
-            let result = crate::transcode::cut(&path, a, b, &clip, &settings, transform, |share| {
+            let result = crate::transcode::cut(&path, a, b, &clip, &settings, &knobs, transform, |share| {
                 let percent = (share * 100.0) as u32;
                 if said != Some(percent) {
                     said = Some(percent);

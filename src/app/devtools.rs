@@ -822,10 +822,26 @@ impl App {
             .find(|(at, ..)| *at == Some(current))
             .map_or(0, |(_, _, x, w)| (x + w + gap * 2 - room).max(0))
             .min((total - room).max(0));
+        // Shifted, it starts at a whole name, after a « for those before.
+        let back = if shift > 0 { text.width("«", small) + gap / 2 } else { 0 };
+        let shift = match shift {
+            0 => 0,
+            _ => items.iter().map(|(_, _, x, _)| *x).find(|x| *x >= shift + back).map_or(shift, |x| x - back),
+        };
         let base = left + pad;
+        if shift > 0 {
+            // A click on it goes a tab back.
+            text.draw(canvas, base, top + (row_h - line) / 2, small, DIM_TEXT_COLOR, "«");
+            drawn.push((Hit::Tab(current.saturating_sub(1)), [base - pad / 2, top, back + pad / 2, row_h]));
+        }
         for (at, name, x, w) in &items {
+            if shift > 0 && *x < shift + back {
+                continue;
+            }
             let x = base + x - shift;
-            if x + w <= left || x >= left + width - pad {
+            // Whole names only, the » keeping the room after the last.
+            let end = if total - shift > room { left + width - pad * 2 } else { left + width };
+            if x + w > end {
                 continue;
             }
             match at {
@@ -897,6 +913,9 @@ pub(super) enum Block<'a> {
     Bitrate,
     Chapters,
     Convert,
+    ConvertSource,
+    ConvertOutput,
+    ConvertResult,
     Compare,
 }
 

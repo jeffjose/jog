@@ -44,6 +44,7 @@ use crate::trailer::{Note, Trailers};
 use crate::ui::{self, Canvas, Text};
 
 mod convert_panel;
+mod convert_tab;
 use convert_panel::{ConvertPanel, PanelSource};
 mod section;
 use section::{Edge, EntryFrames, Section, StripTab};
@@ -246,6 +247,9 @@ pub enum Event {
     ConvertFit(usize, Format, Option<(f32, u64)>, u64),
     /// How far along converting videos is, in words.
     VideoProgress(String),
+    /// What a few seconds of a video encoded say of the whole, for
+    /// Inspect's Convert tab.
+    VideoTrial(convert_tab::Trial, Result<crate::transcode::Estimate, String>),
     /// A frame for a cell of the Sections tab.
     EntryFrame(scenes::Found),
     /// A signal from one of the two players that take turns playing: the
@@ -1288,6 +1292,8 @@ pub struct App {
     inspect_drawer: bool,
     drawer_pane: DrawerPane,
     inspector_rows: f64,
+    /// Inspect's Convert tab's choices for a video.
+    video_convert: convert_tab::VideoConvert,
     pending_command: Option<Command>,
     /// Where Inspect's Files tab has the list, as left, top, width,
     /// bottom; and whether it is being drawn there just now.
@@ -1881,6 +1887,7 @@ impl App {
             inspector_bottom: pins.bottom,
             inspect_drawer: pins.drawer,
             drawer_pane: pins.drawer_pane.unwrap_or_default(),
+            video_convert: Default::default(),
             inspector_rows: pins.rows.unwrap_or(24.0),
             pending_command: None,
             inspector_list: Cell::new(None),
@@ -2589,7 +2596,7 @@ impl App {
             SectionClear => {
                 self.clear_section();
             }
-            SaveSection(clip) => self.save_section(clip),
+            SaveSection(clip) => self.save_section(clip, crate::transcode::Knobs::default()),
             KeepSection => self.keep_section(),
             RenameSection => self.ask_section_name(),
             ForgetSection => self.forget_section(),
@@ -2878,7 +2885,7 @@ impl App {
             Delete => self.ask_delete(),
             Convert(format) => self.convert(format),
             ConvertPanel => self.open_convert_panel(),
-            ConvertVideo(target) => self.convert_videos(target),
+            ConvertVideo(target) => self.convert_videos(target, crate::transcode::Knobs::default()),
             Compare => self.open_compare(),
             SpeedUp => self.change_speed(Some(true)),
             SpeedDown => self.change_speed(Some(false)),
@@ -4001,6 +4008,7 @@ impl App {
             Event::ConvertFit(id, format, found, target) => self.convert_fit(id, format, found, target),
             // With a Cancel to click, for as long as it goes on.
             Event::VideoProgress(words) => self.toast_with(words, vec![("Cancel".into(), ToastLink::Cancel)]),
+            Event::VideoTrial(trial, result) => self.convert_tried(trial, result),
             Event::EntryFrame(found) => self.entry_frame(found),
             Event::Video(which, signal) if which == self.active => {
                 self.video_signal(signal);

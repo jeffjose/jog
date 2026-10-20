@@ -113,6 +113,11 @@ impl Inspector {
     }
 
     /// The tabs it shows, and where the one up is among them.
+    /// The file it is about.
+    pub(super) fn id(&self) -> usize {
+        self.id
+    }
+
     pub(super) fn panes(&self) -> (Vec<Pane>, usize) {
         let panes = Pane::shown(self.picture);
         let at = panes.iter().position(|pane| *pane == self.pane).unwrap_or(0);
@@ -184,6 +189,8 @@ pub(super) enum Hit {
     Seek(f64),
     /// A box or element of the Structure tab, by where it is in the tree.
     Node(Vec<usize>),
+    /// A choice on the Convert tab.
+    Convert(super::convert_tab::Knob),
 }
 
 pub struct Inspector {
@@ -448,6 +455,8 @@ impl App {
                 let fraction = ((x - f64::from(bar_x)) / f64::from(bar_w.max(1))).clamp(0.0, 1.0);
                 self.seek_to(fraction, true);
             }
+            // The Convert tab's choices, its slider by where along.
+            Some((Hit::Convert(knob), _)) => self.convert_knob(knob, x),
             Some((hit, _)) => self.inspector_hit(hit),
             None => {}
         }
@@ -474,7 +483,7 @@ impl App {
                 }
             }
             Hit::Run(command) => self.pending_command = Some(command),
-            Hit::Scrub(..) => {}
+            Hit::Scrub(..) | Hit::Convert(_) => {}
             Hit::Track(audio, id) => self.choose_track(audio, id),
             Hit::Close => self.inspector = None,
             Hit::Pin => self.toggle_inspector_pin(),
@@ -732,6 +741,7 @@ impl App {
             // The packets come, and the video moves along: twice a second.
             Pane::Timeline => Some(u128::from(inspector.packets.is_some()) + self.perf.arrived.elapsed().as_millis() / 500 * 2),
             Pane::Console => Some(self.messages.len() as u128 * 1000 + self.perf.arrived.elapsed().as_secs() as u128 / 30),
+            Pane::Convert => Some(self.convert_tab_key()),
             Pane::Color => Some(self.scopes.iter().enumerate().map(|(at, on)| u128::from(*on) << at).sum()),
             // What is playing, as the info line says it, and whether it
             // has started.
@@ -873,7 +883,8 @@ impl App {
                             Pane::Color if inspector.picture => blocks.extend([Block::PictureCharts, Block::Scopes]),
                             Pane::Color => blocks.extend([Block::SceneChart, Block::Agtm, Block::Plus, Block::Ladder, Block::Scopes]),
                             Pane::Timeline => blocks.extend([Block::Bitrate, Block::Chapters]),
-                            Pane::Convert => blocks.push(Block::Convert),
+                            Pane::Convert if inspector.picture => blocks.push(Block::Convert),
+                            Pane::Convert => blocks.extend([Block::ConvertSource, Block::ConvertOutput, Block::ConvertResult]),
                             Pane::Compare => blocks.push(Block::Compare),
                             _ => {}
                         }
@@ -916,6 +927,9 @@ impl App {
                                 Block::Bitrate => self.draw_bitrate(&mut sub, text, px, inspector.packets.as_ref(), inspector.id, column_w, top, offset, &mut drawn),
                                 Block::Chapters => self.draw_timeline(&mut sub, text, px, column_w, top, offset, mouse, &mut drawn),
                                 Block::Convert => self.draw_actions(&mut sub, text, px, &self.convert_actions(inspector.picture), column_w, top, offset, mouse, &mut drawn),
+                                Block::ConvertSource => self.draw_convert_source(&mut sub, text, px, found, inspector.id, column_w, top, offset, mouse, &mut drawn),
+                                Block::ConvertOutput => self.draw_convert_output(&mut sub, text, px, found, column_w, top, offset, mouse, &mut drawn),
+                                Block::ConvertResult => self.draw_convert_result(&mut sub, text, px, found, inspector.id, column_w, top, offset, mouse, &mut drawn),
                                 Block::Compare => self.draw_actions(&mut sub, text, px, &self.compare_actions(), column_w, top, offset, mouse, &mut drawn),
                             };
                             if end > top {

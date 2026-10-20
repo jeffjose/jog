@@ -225,6 +225,64 @@ impl VideoSettings {
     }
 }
 
+/// How much time an encoder spends to make a file smaller.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Speed {
+    Fast,
+    #[default]
+    Medium,
+    Slow,
+}
+
+impl Speed {
+    pub const ALL: [Speed; 3] = [Speed::Fast, Speed::Medium, Speed::Slow];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Speed::Fast => "Fast",
+            Speed::Medium => "Medium",
+            Speed::Slow => "Slow",
+        }
+    }
+}
+
+/// What Inspect's Convert tab turns, past the codec and container: each
+/// at its default the same as converting from the menu.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct Knobs {
+    /// The constant rate factor, instead of the codec's from the settings.
+    pub crf: Option<u8>,
+    pub speed: Speed,
+    /// No taller than this, the width in proportion; never made larger.
+    pub height: Option<u32>,
+    /// HDR taken down to SDR, for screens and sites that show HDR gray.
+    pub to_sdr: bool,
+}
+
+impl Knobs {
+    /// The rate factor `codec` gets.
+    pub fn crf(&self, codec: Codec, settings: &VideoSettings) -> u8 {
+        self.crf.unwrap_or(match codec {
+            Codec::H264 => settings.h264_crf,
+            Codec::Hevc => settings.hevc_crf,
+            Codec::Av1 => settings.av1_crf,
+        })
+    }
+}
+
+impl Codec {
+    /// The rate factors worth offering, best first: about where each
+    /// encoder's pictures are near the original to where they visibly
+    /// are not.
+    pub fn crf_range(self) -> (u8, u8) {
+        match self {
+            Codec::H264 => (14, 32),
+            Codec::Hevc => (16, 34),
+            Codec::Av1 => (18, 48),
+        }
+    }
+}
+
 /// The encoders the ffmpeg on the PATH has, asked once.
 fn encoders() -> &'static str {
     static FOUND: OnceLock<String> = OnceLock::new();
@@ -265,8 +323,9 @@ fn probe(path: &Path) -> Probe {
     }
 }
 
-/// The arguments for ffmpeg, from after `-i input` to before the output.
-fn arguments(target: &Target, settings: &VideoSettings, probe: &Probe) -> Result<Vec<String>, String> {
+/// The arguments for ffmpeg, from after `-i input` to before the output;
+/// `turn` the filters that turn the picture as it is shown, if any.
+fn arguments(target: &Target, settings: &VideoSettings, knobs: &Knobs, probe: &Probe, turn: Option<String>) -> Result<Vec<String>, String> {
     let mut args: Vec<String> = Vec::new();
     let mut push = |items: &[&str]| args.extend(items.iter().map(|item| item.to_string()));
     // The first video, all the sound, and in MKV the subtitles too; the
@@ -275,40 +334,56 @@ fn arguments(target: &Target, settings: &VideoSettings, probe: &Probe) -> Result
     if target.container == Container::Mkv {
         push(&["-map", "0:s?", "-c:s", "copy"]);
     }
+    let crf = knobs.crf(target.codec, settings).to_string();
+    let sdr = knobs.to_sdr && probe.hdr;
     match target.codec {
         Codec::H264 => {
             if !has("libx264") {
                 return Err("this ffmpeg has no H.264 encoder (libx264)".into());
             }
             // 8-bit 4:2:0: what every player plays.
-            let crf = settings.h264_crf.to_string();
-            push(&["-c:v", "libx264", "-preset", "slow", "-crf", &crf, "-pix_fmt", "yuv420p"]);
+            let preset = ["veryfast", "slow", "slower"][knobs.speed as usize];
+            push(&["-c:v", "libx264", "-preset", preset, "-crf", &crf, "-pix_fmt", "yuv420p"]);
         }
         Codec::Hevc => {
             if !has("libx265") {
                 return Err("this ffmpeg has no HEVC encoder (libx265)".into());
             }
-            let crf = settings.hevc_crf.to_string();
             let depth = if probe.deep { "yuv420p10le" } else { "yuv420p" };
-            push(&["-c:v", "libx265", "-preset", "medium", "-crf", &crf, "-pix_fmt", depth]);
+            let preset = ["fast", "medium", "slow"][knobs.speed as usize];
+            push(&["-c:v", "libx265", "-preset", preset, "-crf", &crf, "-pix_fmt", depth]);
             // Apple's players want HEVC in MP4 tagged so.
             if target.container == Container::Mp4 {
                 push(&["-tag:v", "hvc1"]);
             }
         }
         Codec::Av1 => {
-            let crf = settings.av1_crf.to_string();
             // SVT-AV1 is many times quicker than libaom at the same size;
             // newer ffmpegs have it.
             if has("libsvtav1") {
-                push(&["-c:v", "libsvtav1", "-preset", "6", "-crf", &crf]);
+                let preset = ["9", "6", "4"][knobs.speed as usize];
+                push(&["-c:v", "libsvtav1", "-preset", preset, "-crf", &crf]);
             } else if has("libaom-av1") {
-                push(&["-c:v", "libaom-av1", "-crf", &crf, "-b:v", "0", "-cpu-used", "6", "-row-mt", "1", "-tiles", "2x2"]);
+                let used = ["8", "6", "4"][knobs.speed as usize];
+                push(&["-c:v", "libaom-av1", "-crf", &crf, "-b:v", "0", "-cpu-used", used, "-row-mt", "1", "-tiles", "2x2"]);
             } else {
                 return Err("this ffmpeg has no AV1 encoder (libsvtav1 or libaom-av1)".into());
             }
             push(&["-pix_fmt", "yuv420p10le"]);
         }
+    }
+    // Turned, made smaller, taken down to SDR: one chain of filters.
+    let mut filters: Vec<String> = turn.into_iter().collect();
+    if let Some(height) = knobs.height {
+        filters.push(format!("scale=-2:'min(ih,{height})':flags=lanczos"));
+    }
+    if sdr {
+        filters.push(tone_map(probe).trim_end_matches(',').to_string());
+        push(&["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709"]);
+    }
+    filters.retain(|filter| !filter.is_empty());
+    if !filters.is_empty() {
+        push(&["-vf", &filters.join(",")]);
     }
     if probe.has_audio {
         match target.audio(settings) {
@@ -364,7 +439,7 @@ fn display_turn(transform: Transform) -> Vec<String> {
     args
 }
 
-pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, transform: Transform, progress: impl FnMut(f64)) -> Result<PathBuf, String> {
+pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, knobs: &Knobs, transform: Transform, progress: impl FnMut(f64)) -> Result<PathBuf, String> {
     if let Some(problem) = target.problem(settings) {
         return Err(problem);
     }
@@ -373,11 +448,40 @@ pub fn transcode(path: &Path, target: &Target, settings: &VideoSettings, transfo
         return Err(format!("{} is there already", output.display()));
     }
     let probe = probe(path);
-    let mut args = arguments(target, settings, &probe)?;
-    if let Some(turn) = turn_filter(transform) {
-        args.extend(["-vf".to_string(), turn]);
-    }
+    let args = arguments(target, settings, knobs, &probe, turn_filter(transform))?;
     run(path, &[], &args, target.container.muxer(), &output, probe.seconds, progress)
+}
+
+/// What a trial of a few seconds says of a whole encode.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Estimate {
+    /// Bytes for each second of video.
+    pub bytes_per_second: f64,
+    /// Seconds of encoding for each second of video.
+    pub pace: f64,
+}
+
+/// Encodes `seconds` (or fewer) from the middle of `from`..`to` of the
+/// video at `path` as the whole would be, to a file thrown away after,
+/// to say how large the whole will be and how long it will take.
+pub fn trial(path: &Path, (from, to): (f64, f64), target: &Target, settings: &VideoSettings, knobs: &Knobs, transform: Transform, seconds: f64) -> Result<Estimate, String> {
+    if let Some(problem) = target.problem(settings) {
+        return Err(problem);
+    }
+    let probe = probe(path);
+    let to = if to > from { to } else { probe.seconds };
+    let length = seconds.min(to - from).max(0.1);
+    let start = from + ((to - from) - length).max(0.0) / 2.0;
+    let mut args = vec!["-t".to_string(), format!("{length:.3}")];
+    args.extend(arguments(target, settings, knobs, &probe, turn_filter(transform))?);
+    static TRIALS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let count = TRIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let output = std::env::temp_dir().join(format!("jog-trial-{}-{count}.{}", std::process::id(), target.container.extension()));
+    let began = std::time::Instant::now();
+    run(path, &["-ss".to_string(), format!("{start:.3}")], &args, target.container.muxer(), &output, length, |_| {})?;
+    let bytes = size(&output) as f64;
+    let _ = std::fs::remove_file(&output);
+    Ok(Estimate { bytes_per_second: bytes / length, pace: began.elapsed().as_secs_f64() / length })
 }
 
 /// The files ffmpeg is writing now, and the process group of the ffmpeg
@@ -606,7 +710,7 @@ fn tone_map(probe: &Probe) -> &'static str {
 
 /// Saves the section from `a` to `b` of the video at `path`, turned and
 /// mirrored as `transform` says, telling `progress` how far along it is.
-pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, transform: Transform, progress: impl FnMut(f64)) -> Result<PathBuf, String> {
+pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, knobs: &Knobs, transform: Transform, progress: impl FnMut(f64)) -> Result<PathBuf, String> {
     let output = clip_output(path, a, b, clip);
     if output.exists() {
         return Err(format!("{} is there already", output.display()));
@@ -638,10 +742,7 @@ pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, t
             if let Some(problem) = target.problem(settings) {
                 return Err(problem);
             }
-            args.extend(arguments(target, settings, &probe)?);
-            if let Some(steps) = turn_filter(transform) {
-                args.extend(["-vf".to_string(), steps]);
-            }
+            args.extend(arguments(target, settings, knobs, &probe, turn_filter(transform))?);
             target.container.muxer()
         }
         Clip::Gif => {
@@ -693,7 +794,7 @@ pub fn transcode_all(paths: &[PathBuf], target: &Target, settings: &VideoSetting
         let count = format!("[{}/{}]", index + 1, todo.len());
         let started = std::time::Instant::now();
         let shown = path.display().to_string();
-        let result = transcode(path, target, settings, Transform::default(), |share| eprint!("\r{count} {shown}  {:.0}%\x1b[K", share * 100.0));
+        let result = transcode(path, target, settings, &Knobs::default(), Transform::default(), |share| eprint!("\r{count} {shown}  {:.0}%\x1b[K", share * 100.0));
         match result {
             Ok(output) => {
                 let (from, to) = (size(path), size(&output));
@@ -768,6 +869,22 @@ mod tests {
         assert_eq!(clip_output(path, 0.0, 3.5, &av1), PathBuf::from("/v/clip.0m00.0s-0m03.5s.av1.mkv"));
         assert_eq!(clip_output(Path::new("a.avi"), 1.0, 2.0, &Clip::Quick), PathBuf::from("a.0m01.0s-0m02.0s.mkv"), "copied into MKV");
         assert_eq!(clip_output(path, 1.0, 2.0, &Clip::Gif), PathBuf::from("/v/clip.0m01.0s-0m02.0s.gif"));
+    }
+
+    #[test]
+    fn knobs_at_rest_change_nothing() {
+        let settings = VideoSettings::default();
+        let probe = Probe { seconds: 10.0, deep: true, has_audio: false, hdr: true };
+        let joined = |target: Target, knobs: &Knobs| arguments(&target, &settings, knobs, &probe, None).map(|args| args.join(" "));
+        let Ok(plain) = joined(Target::new(Codec::Hevc, Container::Mkv), &Knobs::default()) else { return };
+        assert!(plain.contains("-preset medium -crf 22"), "{plain}");
+        assert!(!plain.contains("-vf"), "{plain}");
+        let knobs = Knobs { crf: Some(30), speed: Speed::Slow, height: Some(720), to_sdr: true };
+        let turned = joined(Target::new(Codec::Hevc, Container::Mkv), &knobs).unwrap();
+        assert!(turned.contains("-preset slow -crf 30"), "{turned}");
+        assert!(turned.contains("scale=-2:'min(ih,720)'"), "{turned}");
+        assert!(turned.contains("-color_trc bt709"), "{turned}");
+        assert_eq!(turned.matches("-vf").count(), 1, "one chain of filters: {turned}");
     }
 
     #[test]
