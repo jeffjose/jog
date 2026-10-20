@@ -173,6 +173,9 @@ pub struct Player {
     /// was chosen for it: audio, subtitles ("no" for none), then the
     /// subtitle and audio delays in seconds.
     next_tracks: RefCell<Option<(String, String, f64, f64)>>,
+    /// Held while a frame is drawn: by `warm` on its own thread, and
+    /// by `render`, so that one draws at a time.
+    drawing: std::sync::Arc<Mutex<()>>,
     /// Handed to mpv as callback context, so it must not move.
     _wake: Box<Wake>,
     /// Keeps the function pointers in `api` valid. Dropped last.
@@ -357,7 +360,7 @@ impl Player {
             }
             let known = Mutex::new(vec![None; WATCHED.len()]);
             let watching = matches!(role, Role::Playback { .. });
-            Ok(Player { api, handle, render, known, watching, hlg: Cell::new(false), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), _wake: wake, _library: library })
+            Ok(Player { api, handle, render, known, watching, hlg: Cell::new(false), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), drawing: std::sync::Arc::new(Mutex::new(())), _wake: wake, _library: library })
         }
     }
 
@@ -614,7 +617,9 @@ impl Player {
     /// Whether a frame not yet drawn is waiting: the player also asks to
     /// be drawn again for other reasons, with the frame it had before.
     pub fn frame_waiting(&self) -> bool {
-        // SAFETY: the render context lives as long as the player.
+        let _drawing = self.drawing.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: the render context lives as long as the player, and the
+        // lock keeps it to one thread at a time.
         unsafe { (self.api.render_context_update)(self.render) & 1 != 0 }
     }
 
@@ -622,6 +627,64 @@ impl Player {
     /// `width` x `height` buffer of `0RGB` pixels. Waits for the frame's
     /// display time if it is not due yet.
     pub fn render(&self, pixels: &mut [u32], width: u32, height: u32) -> bool {
+        // Not while it is being drawn ahead on another thread: see `warm`.
+        let _drawing = self.drawing.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let renderer = Renderer { update: self.api.render_context_update, render: self.api.render_context_render, context: self.render };
+        // SAFETY: the context lives as long as the player, and the lock
+        // keeps it to one thread at a time.
+        unsafe { renderer.draw(pixels, width, height) }
+    }
+
+    /// Whether a draw ahead is going on: a frame taken only to keep the
+    /// player moving can be left until it is done.
+    pub fn warming(&self) -> bool {
+        self.drawing.try_lock().is_err()
+    }
+
+    /// Draws the frame the player holds at `width` x `height`, into
+    /// nothing, on another thread: the first draw at a size sets the
+    /// conversion up, 40-100 ms for an HDR video on four cores, which
+    /// would otherwise be the first frame's on the main thread when this
+    /// player takes over. Drawing on this player waits meanwhile, as does
+    /// letting it go.
+    pub fn warm(&self, width: u32, height: u32) {
+        let renderer = Renderer { update: self.api.render_context_update, render: self.api.render_context_render, context: self.render };
+        let drawing = self.drawing.clone();
+        let (ready_tx, ready) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _drawing = drawing.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = ready_tx.send(());
+            let mut pixels = vec![0u32; width as usize * height as usize];
+            // SAFETY: the player waits for this lock before it frees the
+            // context, and draws on it only under the lock.
+            unsafe { renderer.draw(&mut pixels, width, height) };
+        });
+        // The lock is the thread's before this returns, so that a draw
+        // asked for at once waits for it rather than going first.
+        let _ = ready.recv();
+    }
+}
+
+/// What drawing a frame takes: two of mpv's functions and the render
+/// context, to be handed to another thread.
+#[derive(Clone, Copy)]
+struct Renderer {
+    update: unsafe extern "C" fn(RenderContext) -> u64,
+    render: unsafe extern "C" fn(RenderContext, *mut RenderParam) -> c_int,
+    context: RenderContext,
+}
+
+// SAFETY: mpv's render functions may be called from any thread, one at a
+// time, which the player's drawing lock sees to.
+unsafe impl Send for Renderer {}
+
+impl Renderer {
+    /// Draws the current frame, scaled and letterboxed to fill a
+    /// `width` x `height` buffer of `0RGB` pixels.
+    ///
+    /// # Safety
+    /// The context must be alive, and drawn on by no other thread.
+    unsafe fn draw(&self, pixels: &mut [u32], width: u32, height: u32) -> bool {
         if pixels.len() < width as usize * height as usize {
             return false;
         }
@@ -646,8 +709,8 @@ impl Player {
         // SAFETY: the buffer holds `height` rows of `stride` bytes, checked
         // above, and every parameter points at live storage of its type.
         unsafe {
-            (self.api.render_context_update)(self.render);
-            (self.api.render_context_render)(self.render, params.as_mut_ptr()) >= 0
+            (self.update)(self.context);
+            (self.render)(self.context, params.as_mut_ptr()) >= 0
         }
     }
 }
@@ -655,6 +718,8 @@ impl Player {
 impl Drop for Player {
     fn drop(&mut self) {
         let started = Instant::now();
+        // A draw ahead on another thread finishes first.
+        let _drawing = self.drawing.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: both were created in `new` and are freed exactly once, the
         // render context first as mpv requires.
         unsafe {

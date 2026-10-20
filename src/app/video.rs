@@ -311,9 +311,16 @@ impl App {
     /// once its queue is empty, and stalls if a frame it has announced is
     /// not taken.
     pub(super) fn spare_signal(&mut self, signal: Signal) {
+        let window = self.window_size();
         let Some(spare) = &self.spare else { return };
         match signal {
             Signal::Events => drop(spare.player.events()),
+            // Its frame is taken, which keeps it going, at the size it will
+            // be drawn at when it takes over and on another thread: the
+            // first draw at a size sets up the conversion, which for an HDR
+            // video took 40-100 ms, a stall on every change of file.
+            Signal::Frame if spare.player.warming() => {}
+            Signal::Frame if window.0 > 0 && window.1 > 0 => spare.player.warm(window.0, window.1),
             Signal::Frame => drop(spare.player.render(&mut [0; 64], 8, 8)),
         }
     }
