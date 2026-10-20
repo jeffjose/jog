@@ -1702,7 +1702,7 @@ impl App {
         let rows = (((bottom - top) / row_height).max(1) as usize).min(self.list.len());
         let scrolled = self.list_scroll.filter(|(pos, len, _)| (*pos, *len) == (self.pos, self.list.len()));
         let first = scrolled.map_or(self.pos.saturating_sub(rows / 2), |(_, _, first)| first).min(self.list.len() - rows);
-        let panel_width = panel_width(width as i32, px);
+        let panel_width = panel_width(width as i32, px, self.list_units);
         let left = if self.list_right { width as i32 - panel_width } else { 0 };
         Some(ListPanel { left, width: panel_width, bottom, top, row_height, first, rows, px })
     }
@@ -2132,9 +2132,10 @@ pub(super) fn clipped(text: &mut Text, line: &str, width: i32, px: u32) -> Strin
 /// The background of a menu or box: a dark panel with rounded corners and
 /// a thin edge.
 /// How wide a panel down the side is: the file list and the inspector
-/// alike, thirty lines of text, at most half the window.
-pub(super) fn panel_width(window_width: i32, px: u32) -> i32 {
-    (px as i32 * 30).min(window_width / 2)
+/// alike, `units` lines of text (thirty unless dragged), at most half the
+/// window.
+pub(super) fn panel_width(window_width: i32, px: u32, units: f64) -> i32 {
+    ((f64::from(px) * units) as i32).min(window_width / 2)
 }
 
 /// The round button at the head of a panel or strip: pin, close and the

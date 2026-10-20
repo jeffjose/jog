@@ -104,6 +104,11 @@ const PICTURE_TABS: [&str; 4] = ["Summary", "EXIF", "Color · HDR", "XMP"];
 const STRUCTURE: usize = 3;
 
 impl Inspector {
+    /// Where the panel was last drawn.
+    pub(super) fn place(&self) -> [i32; 4] {
+        self.place
+    }
+
     fn tabs(&self) -> &'static [&'static str] {
         if self.picture { &PICTURE_TABS } else { &TABS }
     }
@@ -620,7 +625,7 @@ impl App {
         let small_line = Text::line_height(small);
         // A column down the side the file list is not on, as wide as the
         // list and laid out as it is: over the picture, or pinned beside it.
-        let (width, height) = (panel_width(canvas.width, px), canvas.height);
+        let (width, height) = (panel_width(canvas.width, px, self.inspector_units), canvas.height);
         let (left, top) = (if self.list_right { 0 } else { canvas.width - width }, 0);
         inspector.place = [left, top, width, height];
         // Nothing in it has changed: the panel as it was.
@@ -1210,7 +1215,7 @@ impl App {
     pub(super) fn inspector_room(&self) -> Option<(i32, bool)> {
         self.inspector.as_ref().filter(|_| self.inspector_pinned)?;
         let (width, height) = self.window_size();
-        Some((panel_width(width as i32, ui_px(height)), self.list_right))
+        Some((panel_width(width as i32, ui_px(height), self.inspector_units), self.list_right))
     }
 
     /// Pins the inspector beside the picture, which makes room for it, or

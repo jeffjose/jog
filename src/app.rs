@@ -51,6 +51,8 @@ mod back;
 mod hitch;
 mod filework;
 mod panels;
+mod resize;
+use resize::PanelEdge;
 use panels::StripButton;
 use filework::Work;
 mod compare;
@@ -1251,6 +1253,11 @@ pub struct App {
     /// Whether the inspector stands beside the picture rather than over it,
     /// and likewise the strip along the bottom below it.
     inspector_pinned: bool,
+    /// How wide the file list and the inspector are, in lines of text,
+    /// and the edge under the pointer, which it shows as an arrow.
+    list_units: f64,
+    inspector_units: f64,
+    edge_under: Option<PanelEdge>,
     strip_docked: bool,
     /// Whether files are being decided about one after another; what has
     /// been decided, read when first asked about; and what has been found
@@ -1373,6 +1380,8 @@ enum Drag {
     Zoom { start_x: f64, start_scale: f64, anchor: (f64, f64), moved: bool },
     /// Dragging along the bar under the grid, through its pages.
     Pages,
+    /// Dragging a panel's edge, to make it wider or the strip taller.
+    Resize(PanelEdge),
 }
 
 struct Menu {
@@ -1415,8 +1424,13 @@ struct Strip {
 }
 
 impl Strip {
+    /// How tall the strip is before it is made taller or shorter.
+    fn usual_height(window_height: u32) -> i32 {
+        (window_height as i32 / 12).clamp(110, 220)
+    }
+
     fn for_height(window_height: u32) -> Strip {
-        let height = (window_height as i32 / 12).clamp(110, 220).min(window_height as i32);
+        let height = ((f64::from(Self::usual_height(window_height)) * resize::strip_scale()) as i32).min(window_height as i32 * 2 / 5);
         let pad = height / 10;
         let cell_h = height - 2 * pad;
         Strip { top: window_height as i32 - height, height, pad, cell_w: cell_h * 3 / 2, cell_h }
@@ -1821,6 +1835,9 @@ impl App {
             // line pins the list.
             list_pinned: options.list_pinned || pins.0.unwrap_or(false),
             inspector_pinned: pins.1.unwrap_or(false),
+            list_units: pins.3.unwrap_or(resize::PANEL_UNITS),
+            inspector_units: pins.4.unwrap_or(resize::PANEL_UNITS),
+            edge_under: None,
             strip_docked: pins.2.unwrap_or(false),
             triage_on: false,
             triage: RefCell::new(None),

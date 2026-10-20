@@ -16,11 +16,17 @@ pub enum StripButton {
 const FILE: &str = "panels";
 
 /// The pins kept from the last run, as (file list, inspector, strip),
-/// each where it was said.
-pub(super) fn load() -> (Option<bool>, Option<bool>, Option<bool>) {
+/// each where it was said; then the widths of the list and the inspector,
+/// in lines of text. The strip's height scale is set as it is read.
+pub(super) fn load() -> (Option<bool>, Option<bool>, Option<bool>, Option<f64>, Option<f64>) {
     let text = crate::positions::state_dir().and_then(|dir| std::fs::read_to_string(dir.join(FILE)).ok()).unwrap_or_default();
-    let get = |name: &str| text.lines().find_map(|line| line.strip_prefix(name)?.strip_prefix('=')).map(|value| value.trim() == "pinned");
-    (get("list"), get("inspector"), get("strip"))
+    let value = |name: &str| text.lines().find_map(|line| line.strip_prefix(name)?.strip_prefix('=')).map(str::trim);
+    let get = |name: &str| value(name).map(|value| value == "pinned");
+    let number = |name: &str| value(name).and_then(|value| value.parse::<f64>().ok()).filter(|n| n.is_finite() && *n > 0.0);
+    if let Some(scale) = number("strip-height") {
+        super::resize::STRIP_SCALE.store((scale.clamp(0.6, 2.5) * 1000.0) as u32, atomic::Ordering::Relaxed);
+    }
+    (get("list"), get("inspector"), get("strip"), number("list-width"), number("inspector-width"))
 }
 
 impl App {
@@ -55,7 +61,15 @@ impl App {
             return;
         }
         let word = |pinned: bool| if pinned { "pinned" } else { "over" };
-        let text = format!("list={}\ninspector={}\nstrip={}\n", word(self.list_pinned), word(self.inspector_pinned), word(self.strip_docked));
+        let text = format!(
+            "list={}\ninspector={}\nstrip={}\nlist-width={:.1}\ninspector-width={:.1}\nstrip-height={:.2}\n",
+            word(self.list_pinned),
+            word(self.inspector_pinned),
+            word(self.strip_docked),
+            self.list_units,
+            self.inspector_units,
+            super::resize::strip_scale()
+        );
         std::thread::spawn(move || {
             if let Some(dir) = crate::positions::state_dir() {
                 let _ = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(FILE), text));

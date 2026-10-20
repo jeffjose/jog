@@ -120,6 +120,12 @@ impl App {
     pub(super) fn mouse_moved(&mut self, x: f64, y: f64) {
         let (dx, dy) = (x - self.mouse.0, y - self.mouse.1);
         self.mouse = (x, y);
+        // An edge held follows the pointer, and nothing else sees it move.
+        if let Some(Drag::Resize(edge)) = self.drag {
+            self.drag_edge_to(edge, x, y);
+            return;
+        }
+        self.edge_cursor(x, y);
         // The button held down and then moved is a drag, not a hold; and
         // the loupe goes where the pointer does.
         if self.hold.as_ref().is_some_and(|hold| !hold.by_key && !hold.fast && (x - hold.at.0).hypot(y - hold.at.1) > 6.0) {
@@ -245,7 +251,7 @@ impl App {
         match &mut self.drag {
             Some(Drag::Pan) => self.pan(dx, dy),
             // Only in the grid, which is dealt with above.
-            Some(Drag::Pages) => {}
+            Some(Drag::Pages | Drag::Resize(_)) => {}
             Some(Drag::Zoom { start_x, start_scale, anchor, moved }) => {
                 *moved = true;
                 let (scale, anchor) = (*start_scale * ((x - *start_x) / 300.0).exp(), *anchor);
@@ -299,6 +305,15 @@ impl App {
 
     pub(super) fn mouse_button(&mut self, button: MouseButton, pressed: bool, event_loop: &ActiveEventLoop) {
         let (x, y) = self.mouse;
+        // A panel's edge taken hold of, or let go of.
+        if button == MouseButton::Left {
+            if !pressed && matches!(self.drag, Some(Drag::Resize(_))) {
+                return self.let_go_of_edge();
+            }
+            if pressed && self.grab_edge(x, y) {
+                return;
+            }
+        }
         // The row a menu was brought up on is done with once the menu and
         // whatever it asked are.
         if pressed && self.menu.is_none() && self.prompt.is_none() && self.confirm.is_none() {
