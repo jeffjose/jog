@@ -16,6 +16,7 @@
 //! - `crashes`: files a player has crashed on, kept from run to run.
 
 mod crashes;
+mod checks;
 mod engine;
 mod helper;
 mod host;
@@ -24,6 +25,7 @@ mod wire;
 
 use std::sync::atomic::AtomicBool;
 
+pub use checks::Checks;
 pub use crashes::{all_crashes, crashed_on, forget_crash, Crash};
 pub use helper::main as player_main;
 pub use host::Player;

@@ -790,7 +790,7 @@ impl App {
             Pane::Convert => Some(self.convert_tab_key()),
             // Which file it is compared with, and whether that is read.
             Pane::Compare => Some(self.marks.iter().map(|id| *id as u128 + 1).sum::<u128>() * 4 + self.compare_found.as_ref().map_or(0, |(id, answer)| (*id as u128) * 2 + u128::from(answer.is_some()))),
-            Pane::Color => Some(self.scopes.iter().enumerate().map(|(at, on)| u128::from(*on) << at).sum()),
+            Pane::Color => Some(self.scopes.iter().chain(&self.checks).enumerate().map(|(at, on)| u128::from(*on) << at).sum()),
             // What is playing, as the info line says it, and whether it
             // has started.
             Pane::Tracks => Some({
@@ -1006,7 +1006,14 @@ impl App {
                                     Some(info) => super::inspect_hdr::draw_ladder(&mut sub, text, px, info, seconds, self.hdr_headroom, column_w, top),
                                     None => top,
                                 },
-                                Block::Scopes => self.draw_actions(&mut sub, text, px, &self.scope_actions(), column_w, top, offset, mouse, &mut drawn),
+                                Block::Scopes => {
+                                    // The graphs of the frame, and for a video the checks drawn on it.
+                                    let mut groups = self.scope_actions();
+                                    if !inspector.picture {
+                                        groups.extend(self.check_actions());
+                                    }
+                                    self.draw_actions(&mut sub, text, px, &groups, column_w, top, offset, mouse, &mut drawn)
+                                }
                                 Block::Bitrate => {
                                     // Where its scenes cut: those found, and how far along
                                     // the pass is while it goes.

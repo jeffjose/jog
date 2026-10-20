@@ -296,6 +296,12 @@ impl Player {
         self.tell(&Request::Stop);
     }
 
+    /// What is drawn over each frame, as a monitor does: zebra stripes,
+    /// false color. The frame on view is drawn again with them.
+    pub fn set_checks(&self, checks: super::Checks) {
+        self.tell(&Request::Checks(checks));
+    }
+
     /// Sets the filters the viewer wants, as mpv's `vf` would take them.
     /// They go after the one the player puts in by itself for HDR.
     pub fn set_filter(&self, filter: &str) {

@@ -107,6 +107,8 @@ pub fn main(args: &[String]) -> ExitCode {
     let mut slots: [Option<Mapped>; wire::SLOTS] = Default::default();
     let mut ahead: Option<(u32, u32)> = None;
     let mut count: u32 = 0;
+    // What is drawn over each frame, as a monitor does.
+    let mut checks = super::checks::Checks::default();
     for input in inbox {
         match input {
             Input::Wake(Signal::Events) => {
@@ -122,24 +124,13 @@ pub fn main(args: &[String]) -> ExitCode {
             // Drawing ahead: the frame drawn now, into a slot, and only
             // then told of, so that jog's main thread has only to copy it.
             Input::Wake(Signal::Frame) if ahead.is_some() && states.is_some() => {
-                let (Some((width, height)), Some(states)) = (ahead, states.as_ref()) else { continue };
+                let (Some(size), Some(states)) = (ahead, states.as_ref()) else { continue };
                 // Woken again for a frame already drawn: nothing new.
                 if !engine.frame_waiting() {
                     continue;
                 }
-                let wanted = width as usize * height as usize;
-                match wire::claim_to_draw(states) {
-                    Some(slot) => {
-                        let drawn = slots[slot].as_mut().filter(|buffer| buffer.pixels() >= wanted).is_some_and(|buffer| engine.render(&mut buffer.as_mut_slice()[..wanted], width, height));
-                        count = count.wrapping_add(1);
-                        wire::drawn(states, slot, drawn.then_some((width, height)), count);
-                        if drawn {
-                            say(Notice::Frame);
-                        }
-                    }
-                    // Every slot in use: the frame is still taken, which
-                    // the player waits for, and not kept.
-                    None => drop(engine.render(&mut [0; 64], 8, 8)),
+                if draw_ahead(&engine, states, &mut slots, size, checks, &mut count) {
+                    say(Notice::Frame);
                 }
             }
             Input::Wake(Signal::Frame) => say(Notice::Frame),
@@ -210,8 +201,25 @@ pub fn main(args: &[String]) -> ExitCode {
                 Request::Ahead { width, height } => ahead = (width > 0 && height > 0).then_some((width, height)),
                 Request::Render { id, width, height } => {
                     let wanted = width as usize * height as usize;
-                    let drawn = buffer.as_mut().filter(|buffer| buffer.pixels() >= wanted).is_some_and(|buffer| engine.render(&mut buffer.as_mut_slice()[..wanted], width, height));
+                    let drawn = buffer.as_mut().filter(|buffer| buffer.pixels() >= wanted).is_some_and(|buffer| {
+                        let pixels = &mut buffer.as_mut_slice()[..wanted];
+                        let drawn = engine.render(pixels, width, height);
+                        if drawn {
+                            super::checks::apply(pixels, width, checks);
+                        }
+                        drawn
+                    });
                     say(Notice::Reply { id, reply: Reply::Yes(drawn) });
+                }
+                // The frame on view drawn again with them, paused as it may
+                // be, rather than waiting for the next.
+                Request::Checks(now) => {
+                    checks = now;
+                    if let (Some(size), Some(states)) = (ahead, states.as_ref()) {
+                        if draw_ahead(&engine, states, &mut slots, size, checks, &mut count) {
+                            say(Notice::Frame);
+                        }
+                    }
                 }
                 Request::Warm { id, width, height } => {
                     engine.warm(width, height);
@@ -227,6 +235,29 @@ pub fn main(args: &[String]) -> ExitCode {
         }
     }
     leave(0)
+}
+
+/// Draws the frame the player has into a slot at `size`, with `checks`
+/// over it, counted; whether it was drawn, to be told of.
+fn draw_ahead(engine: &Engine, states: &Mapped, slots: &mut [Option<Mapped>; wire::SLOTS], (width, height): (u32, u32), checks: super::checks::Checks, count: &mut u32) -> bool {
+    let wanted = width as usize * height as usize;
+    let Some(slot) = wire::claim_to_draw(states) else {
+        // Every slot in use: the frame is still taken, which the player
+        // waits for, and not kept.
+        engine.render(&mut [0; 64], 8, 8);
+        return false;
+    };
+    let drawn = slots[slot].as_mut().filter(|buffer| buffer.pixels() >= wanted).is_some_and(|buffer| {
+        let pixels = &mut buffer.as_mut_slice()[..wanted];
+        let drawn = engine.render(pixels, width, height);
+        if drawn {
+            super::checks::apply(pixels, width, checks);
+        }
+        drawn
+    });
+    *count = count.wrapping_add(1);
+    wire::drawn(states, slot, drawn.then_some((width, height)), *count);
+    drawn
 }
 
 /// The crashes a test asks for: on files whose paths have these in them,

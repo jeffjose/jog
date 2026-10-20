@@ -276,6 +276,7 @@ impl App {
                 self.player = Some(player);
                 self.apply_subtitles();
                 self.apply_track_prefs();
+                self.apply_checks();
                 *self.video_view_sent.borrow_mut() = None;
                 // A video may already be waiting for it.
                 self.sync_video();

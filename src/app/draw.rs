@@ -265,6 +265,8 @@ impl App {
                 }
                 self.scene_live = false;
                 let overlays = Instant::now();
+                // What of the frame paused on is outside BT.709, if asked.
+                self.draw_gamut(pixels, window);
                 self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
                 if self.options.debug {
                     eprintln!("jog: {:>7.1?} draw  video  overlays {:>7.1?}", self.perf.render, overlays.elapsed());

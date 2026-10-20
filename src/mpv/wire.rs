@@ -339,6 +339,8 @@ pub enum Request {
     /// Each frame drawn into a slot as soon as it is ready, at this size;
     /// 0 by 0 for none, each drawn only when asked for.
     Ahead { width: u32, height: u32 },
+    /// What is drawn over each frame from now on.
+    Checks(super::checks::Checks),
     Quit,
 }
 
@@ -580,6 +582,9 @@ impl Request {
             Request::Ahead { width, height } => {
                 out.u8(18).u32(*width).u32(*height);
             }
+            Request::Checks(checks) => {
+                out.u8(19).bool(checks.zebra).bool(checks.false_color);
+            }
         }
         out.0
     }
@@ -610,6 +615,7 @@ impl Request {
             16 => Request::Slots,
             17 => Request::Slot { index: input.u8()?, pixels: input.u64()? },
             18 => Request::Ahead { width: input.u32()?, height: input.u32()? },
+            19 => Request::Checks(super::checks::Checks { zebra: input.bool()?, false_color: input.bool()? }),
             _ => return None,
         };
         input.end(request)
@@ -706,6 +712,7 @@ mod tests {
             Request::Slots,
             Request::Slot { index: 2, pixels: 1920 * 1080 },
             Request::Ahead { width: 0, height: 0 },
+            Request::Checks(crate::mpv::Checks { zebra: true, false_color: false }),
             Request::Quit,
         ];
         for request in requests {

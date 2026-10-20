@@ -89,6 +89,10 @@ pub enum Command {
     /// Show one of the graphs of the picture'"'"'s colors under the debug
     /// overlay, or stop; and draw their counts by logarithm or plainly.
     Scope(usize),
+    /// One of the checks drawn on the video as it plays, on or off: zebra
+    /// stripes over what is clipped, false color for exposure, or what is
+    /// out of BT.709 in a wide-gamut video, on the frame paused on.
+    Check(usize),
     ScopeLog,
     /// Step an Ultra HDR photo through its renditions: the ordinary
     /// picture, the HDR one, and the gain map that makes it.
@@ -847,6 +851,9 @@ const DEBUG: &[Option<MenuItem>] = &[
     item("Graph: RGB parade", "", Command::Scope(3)),
     item("Graph: vectorscope", "", Command::Scope(4)),
     item("Graphs by logarithm", "", Command::ScopeLog),
+    item("Check: zebra, clipped highlights", "", Command::Check(0)),
+    item("Check: false color, exposure", "", Command::Check(1)),
+    item("Check: out of BT.709, paused", "", Command::Check(2)),
     item("HDR curves: more headroom", "", Command::HdrHeadroom(true)),
     item("HDR curves: less headroom", "", Command::HdrHeadroom(false)),
 ];

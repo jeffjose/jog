@@ -75,6 +75,7 @@ mod inspect;
 mod inspect_hdr;
 mod devtools;
 mod timeline;
+mod checks;
 use devtools::{Block, DrawerPane, Pane};
 mod track_editor;
 mod tracks;
@@ -288,6 +289,8 @@ pub enum Event {
     TimelineFrames(usize, Result<timeline::Frames, String>),
     TimelineCuts(usize, Result<Vec<f64>, String>),
     TimelineSound(usize, Result<timeline::Sound, String>),
+    /// What of the frame paused on is outside BT.709.
+    Gamut(Result<checks::GamutMask, String>),
     /// File details read on another thread, for the info and EXIF overlays.
     Meta(usize, Meta),
     /// The font, loaded on another thread while the first image decodes.
@@ -1156,6 +1159,11 @@ pub struct App {
     /// overlay, by `scopes::KINDS`; whether they count by logarithm; what
     /// they last counted, and how long counting and drawing them took.
     scopes: [bool; 5],
+    /// The checks drawn on the video: zebra, false color, out of gamut.
+    checks: [bool; 3],
+    /// What is outside BT.709 on the frame paused on, and the frame asked for.
+    gamut: Option<checks::GamutMask>,
+    gamut_asked: Option<(usize, f64)>,
     scope_log: bool,
     /// Which rendition of Ultra HDR photos is shown, and which files have
     /// been found to be such photos.
@@ -1847,6 +1855,9 @@ impl App {
             grid_titles: options.grid_titles,
             show_debug: false,
             scopes: [false, true, false, true, false],
+            checks: [false; 3],
+            gamut: None,
+            gamut_asked: None,
             scope_log: true,
             hdr: options.hdr,
             ultra_hdr: RefCell::new(HashMap::new()),
@@ -2769,6 +2780,7 @@ impl App {
                 }
             }
             ScopeLog => self.scope_log = !self.scope_log,
+            Check(kind) => self.toggle_check(kind),
             SetHdr(mode) => {
                 self.hdr = mode;
                 self.request();
@@ -3054,6 +3066,7 @@ impl App {
             ToggleDebug => self.show_debug,
             Scope(kind) => self.scopes[kind],
             ScopeLog => self.scope_log,
+            Check(kind) => self.checks[kind],
             ToggleWatch => self.watch.is_some(),
             Workspace(which) => which == self.space,
             ToggleList => self.show_list,
@@ -4054,6 +4067,7 @@ impl App {
             Event::Video(which, signal) if which == self.active => {
                 self.video_signal(signal);
                 self.tend_back();
+                self.tend_gamut();
             }
             Event::BackFrames(ticket, frames, took) => self.back_frames(ticket, frames, took),
             Event::CompareLoaded(ticket, images) => self.compare_loaded(ticket, images),
@@ -4067,11 +4081,13 @@ impl App {
             Event::TimelineFrames(id, frames) => self.timeline_frames(id, frames),
             Event::TimelineCuts(id, cuts) => self.timeline_cuts(id, cuts),
             Event::TimelineSound(id, sound) => self.timeline_sound(id, sound),
+            Event::Gamut(mask) => self.gamut_read(mask),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {
                 self.spare = spare.ok().map(|player| Spare { player, id: None, from: 0.0 });
                 self.apply_subtitles();
                 self.apply_track_prefs();
+                self.apply_checks();
                 // As for the first: it may have queued events unheard.
                 self.spare_signal(Signal::Events);
                 self.preload_video();
