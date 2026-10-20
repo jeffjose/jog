@@ -136,7 +136,15 @@ fn worker(jobs: mpsc::Receiver<Job>, proxy: EventLoopProxy<Event>) {
                 break;
             }
             match wake.recv_timeout(PATIENCE) {
-                Ok(Signal::Events) => drop(player.events()),
+                // Crashed: no frames this time. The next pause starts
+                // another, which decodes on the CPU as this one did, and
+                // the file is noted; a file that crashes the CPU's decoder
+                // is not played to be paused on.
+                Ok(Signal::Events) if player.events().contains(&PlayerEvent::Crashed) => {
+                    DECODING.store(false, AtomicOrdering::Relaxed);
+                    return;
+                }
+                Ok(Signal::Events) => {}
                 Ok(_) if player.frame_waiting() => {
                     let Some(at) = player.number_now("time-pos") else { continue };
                     if at >= job.anchor - job.half_frame {

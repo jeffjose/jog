@@ -1,6 +1,20 @@
 //! Videos: the player started and stopped, its keys, sound, subtitles, speed and looping.
 
 use super::*;
+use crate::mpv::Crash;
+
+/// Which of the players: the one playing or the spare holding the next
+/// video ready, by the number their signals carry, or the seek preview's.
+#[derive(Clone, Copy, Debug)]
+enum Which {
+    Main(u8),
+    Spare(u8),
+    Preview,
+}
+
+/// More players crashed than this in this long, and none are started again.
+const CRASH_SPELL: Duration = Duration::from_secs(30);
+const CRASHES_IN_SPELL: usize = 3;
 
 impl App {
 
@@ -10,7 +24,14 @@ impl App {
         let id = self.id();
         let playing = self.video.as_ref().map(|video| video.id);
         // With the grid up, the video that was on view plays on in a corner.
-        let wanted = (self.grid.is_none() || self.pip) && self.overview.is_none() && files::is_video(&self.files[id]);
+        let wanted = (self.grid.is_none() || self.pip) && self.overview.is_none() && self.playable(id);
+        // A video that crashes the player is shown as a still, and said so
+        // of once each time it comes up.
+        let unplayable = files::is_video(&self.files[id]) && !self.playable(id);
+        if unplayable && self.unplayable_said != Some(id) {
+            self.toast("Not playable · it crashes the player");
+        }
+        self.unplayable_said = unplayable.then_some(id);
         if wanted && playing != Some(id) {
             self.start_video(id);
         } else if !wanted && playing.is_some() {
@@ -30,24 +51,100 @@ impl App {
         if std::mem::replace(&mut self.player_asked, true) {
             return;
         }
+        let make = self.player_maker();
+        let active = self.active;
+        std::thread::spawn(move || {
+            if make(Which::Main(active)) {
+                make(Which::Preview);
+                make(Which::Spare(active ^ 1));
+            }
+        });
+    }
+
+    /// What starts one of the players, on whatever thread calls it, and
+    /// sends it to the event loop; whether it started.
+    fn player_maker(&self) -> impl Fn(Which) -> bool + Send + 'static {
         let proxy = self.proxy.clone();
         // A scripted test run must not make any sound.
         let silent = self.snapshot.is_some() || self.bench.is_some();
-        std::thread::spawn(move || {
+        move |which| {
             let wake = proxy.clone();
             let role = Role::Playback { silent, gpu: true };
-            let player = Player::new(role, move |signal| drop(wake.send_event(Event::Video(0, signal))));
-            let playable = player.is_ok();
-            let _ = proxy.send_event(Event::Player(player));
-            if playable {
-                let wake = proxy.clone();
-                let preview = Player::new(Role::Preview, move |signal| drop(wake.send_event(Event::Preview(signal))));
-                let _ = proxy.send_event(Event::PreviewPlayer(preview));
-                let wake = proxy.clone();
-                let spare = Player::new(role, move |signal| drop(wake.send_event(Event::Video(1, signal))));
-                let _ = proxy.send_event(Event::Spare(spare));
+            match which {
+                Which::Main(index) => {
+                    let player = Player::new(role, move |signal| drop(wake.send_event(Event::Video(index, signal))));
+                    let started = player.is_ok();
+                    let _ = proxy.send_event(Event::Player(player));
+                    started
+                }
+                Which::Spare(index) => {
+                    let spare = Player::new(role, move |signal| drop(wake.send_event(Event::Video(index, signal))));
+                    let started = spare.is_ok();
+                    let _ = proxy.send_event(Event::Spare(spare));
+                    started
+                }
+                Which::Preview => {
+                    let preview = Player::new(Role::Preview, move |signal| drop(wake.send_event(Event::Preview(signal))));
+                    let started = preview.is_ok();
+                    let _ = proxy.send_event(Event::PreviewPlayer(preview));
+                    started
+                }
             }
+        }
+    }
+
+    /// A player crashed: another in its place, on another thread, unless
+    /// players have been crashing one after another, which starting more
+    /// would only go on with. Whether one is being started.
+    fn replace_player(&mut self, which: Which) -> bool {
+        let now = Instant::now();
+        self.player_crashes.retain(|at| now.duration_since(*at) < CRASH_SPELL);
+        self.player_crashes.push(now);
+        if self.player_crashes.len() > CRASHES_IN_SPELL {
+            eprintln!("jog: the player crashed {} times in {CRASH_SPELL:?}; not starting it again", self.player_crashes.len());
+            return false;
+        }
+        let make = self.player_maker();
+        std::thread::spawn(move || {
+            make(which);
         });
+        true
+    }
+
+    /// The main player crashed. The file it had open is noted as one that
+    /// crashed it, and decoded on the CPU from now on; another player is
+    /// started, and the video goes on from where it was, as it was.
+    fn main_player_crashed(&mut self) {
+        let Some(player) = self.player.take() else { return };
+        let lost = player.lost();
+        // Where it was: told of before it went, and kept.
+        let at = player.number("time-pos");
+        let paused = player.flag("pause") == Some(true);
+        drop(player);
+        self.hover = None;
+        self.drop_back();
+        let video = self.video.take();
+        let name = lost.as_ref().and_then(|lost| lost.path.as_ref()).and_then(|path| path.file_name()).map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let crash = lost.as_ref().and_then(|lost| lost.crash);
+        let replaced = self.replace_player(Which::Main(self.active));
+        // The video starts again where it was, once there is a player for it.
+        if replaced && video.is_some() && crash != Some(Crash::Software) {
+            self.enter_at = at;
+            self.resume_paused = paused;
+        }
+        self.toast(match (crash, replaced) {
+            (_, false) => "Not playing videos · the player keeps crashing".to_string(),
+            (Some(Crash::Gpu), true) => format!("{name} crashed the GPU decoder · on the CPU now"),
+            (Some(Crash::Software), true) => format!("Not playable · {name} crashes the player"),
+            (None, true) => "The player crashed · started again".to_string(),
+        });
+        self.redraw();
+    }
+
+    /// Whether the file can be played: not if it has crashed the player
+    /// with its CPU decoder too.
+    pub(super) fn playable(&self, id: usize) -> bool {
+        files::is_video(&self.files[id]) && crate::mpv::crashed_on(&self.files[id]) != Some(Crash::Software)
     }
 
     /// Asks the preview player for the frame at a point along the video.
@@ -98,8 +195,12 @@ impl App {
     pub(super) fn preview_signal(&mut self, signal: Signal) {
         let Some(preview) = &self.preview else { return };
         if let Signal::Events = signal {
-            // Only to empty the queue, so that mpv keeps signaling.
-            preview.events();
+            // Only to empty the queue, so that mpv keeps signaling; and to
+            // put another in its place if it crashed.
+            if preview.events().contains(&PlayerEvent::Crashed) {
+                (self.preview, self.preview_id, self.preview_busy) = (None, None, None);
+                self.replace_player(Which::Preview);
+            }
             return;
         }
         // Size the picture to the video so that no bars are drawn into it.
@@ -213,8 +314,9 @@ impl App {
         // Paused on the video being left, the next is opened paused too, so
         // going back and forth across files to look does not set them
         // playing. Stopped at its end is no pause asked for: the next plays.
-        let paused = self.video.is_some()
-            && self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true) && player.flag("eof-reached") != Some(true));
+        // One put back after the player crashed is as it was.
+        let paused = std::mem::take(&mut self.resume_paused)
+            || self.video.is_some() && self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true) && player.flag("eof-reached") != Some(true));
         // A seek carried over from the file beside this one says where to
         // begin; otherwise it is where the video was left.
         let carried = self.enter_at.take();
@@ -293,7 +395,7 @@ impl App {
             return;
         }
         let next = self.list[if self.forward { (self.pos + 1) % len } else { (self.pos + len - 1) % len }];
-        if !files::is_video(&self.files[next]) || next == self.id() {
+        if !self.playable(next) || next == self.id() {
             return;
         }
         let from = self.resume_from(next);
@@ -314,7 +416,13 @@ impl App {
         let window = self.window_size();
         let Some(spare) = &self.spare else { return };
         match signal {
-            Signal::Events => drop(spare.player.events()),
+            // Crashed holding the next file ready: that file is noted, and
+            // another spare holds it, decoded on the CPU.
+            Signal::Events if spare.player.events().contains(&PlayerEvent::Crashed) => {
+                self.spare = None;
+                self.replace_player(Which::Spare(self.active ^ 1));
+            }
+            Signal::Events => {}
             // Its frame is taken, which keeps it going, at the size it will
             // be drawn at when it takes over and on another thread: the
             // first draw at a size sets up the conversion, which for an HDR
@@ -345,6 +453,9 @@ impl App {
         // Read the events even when no video is wanted: mpv only signals
         // again once its queue has been emptied.
         let mut events = if let Signal::Events = signal { player.events() } else { Vec::new() };
+        if events.contains(&PlayerEvent::Crashed) {
+            return self.main_player_crashed();
+        }
         // Frames being saved, done.
         let replies: Vec<(u64, bool)> = events.iter().filter_map(|event| if let PlayerEvent::Replied(tag, ok) = event { Some((*tag, *ok)) } else { None }).collect();
         events.retain(|event| !matches!(event, PlayerEvent::Replied(..)));

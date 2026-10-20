@@ -45,17 +45,28 @@ impl Finder {
             // times faster than starting ffmpeg for each frame does. Where
             // there is none, ffmpeg it is.
             let (signals, inbox) = mpsc::channel();
-            let signals = Mutex::new(signals);
-            let wake = move |signal| {
-                let _ = signals.lock().unwrap_or_else(std::sync::PoisonError::into_inner).send(signal);
+            let signals = Arc::new(Mutex::new(signals));
+            let start = || {
+                let signals = signals.clone();
+                Player::new(Role::Preview, move |signal| {
+                    let _ = signals.lock().unwrap_or_else(std::sync::PoisonError::into_inner).send(signal);
+                })
+                .ok()
             };
-            let player = Player::new(Role::Preview, wake).ok();
+            let mut player = start();
             for (id, path, starts) in queue {
                 let current = || latest.load(Ordering::Relaxed) == id;
                 if !current() {
                     continue;
                 }
-                let opened = player.as_ref().filter(|player| {
+                // One that crashed on the video before is replaced; a video
+                // that crashes the player's decoder has its frames from
+                // ffmpeg instead, in a process of its own as well.
+                if player.as_ref().is_some_and(Player::gone) {
+                    player = start();
+                }
+                let crashes = crate::mpv::crashed_on(&path) == Some(crate::mpv::Crash::Software);
+                let opened = player.as_ref().filter(|_| !crashes).filter(|player| {
                     player.open(&path);
                     arrive(player, &inbox).is_some()
                 });
@@ -63,7 +74,8 @@ impl Finder {
                     if !current() {
                         break;
                     }
-                    let frame = match opened {
+                    // Crashed partway: ffmpeg for the rest.
+                    let frame = match opened.filter(|player| !player.gone()) {
                         Some(player) => frame_at(player, &inbox, start),
                         None => segment_at(&path, start + 0.1).pop(),
                     };
@@ -110,7 +122,14 @@ fn arrive(player: &Player, inbox: &Receiver<Signal>) -> Option<Frame> {
     let (mut there, mut frame) = (false, None);
     while !(there && frame.is_some()) {
         match inbox.recv_timeout(until.saturating_duration_since(Instant::now())).ok()? {
-            Signal::Events => there |= player.events().contains(&PlayerEvent::Showing),
+            Signal::Events => {
+                let events = player.events();
+                // Crashed: it will not get there.
+                if events.contains(&PlayerEvent::Crashed) {
+                    return None;
+                }
+                there |= events.contains(&PlayerEvent::Showing);
+            }
             // Asked to draw again without a new frame, it has nothing to
             // show of where it is going.
             Signal::Frame if !player.frame_waiting() => {}

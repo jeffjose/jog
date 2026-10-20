@@ -1,5 +1,6 @@
-//! Video playback through libmpv, loaded at run time so that jog still
-//! builds and runs, for images, on machines without it.
+//! libmpv itself, loaded at run time so that jog still builds and runs,
+//! for images, on machines without it. Only the player process runs
+//! this: see `helper`. jog's own process talks to it through `Player`.
 //!
 //! mpv decodes, keeps time and plays the audio; its software renderer draws
 //! each frame into the same kind of buffer the image path fills, so the
@@ -9,12 +10,14 @@ use std::ffi::{c_char, c_double, c_int, c_void, CStr, CString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::cell::{Cell, RefCell};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use libloading::Library;
+
+use super::{watched, Known, PlayerEvent, Role, Signal, DEBUG, WATCHED};
 
 const LIBRARY_NAMES: &[&str] = &["libmpv.so.2", "libmpv.so.1", "libmpv.so"];
 
@@ -115,46 +118,9 @@ impl Api {
     }
 }
 
-/// What a player is for.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Role {
-    /// Playing a video. `silent` discards the audio; `gpu` has it decoded
-    /// by the GPU, unless `--no-hwdec`.
-    Playback { silent: bool, gpu: bool },
-    /// Fetching frames to show while the pointer is over the seek bar.
-    Preview,
-}
-
-/// Why mpv wants attention. Sent from mpv's own threads.
-#[derive(Clone, Copy, Debug)]
-pub enum Signal {
-    /// Player events are waiting to be read.
-    Events,
-    /// A new video frame is due on screen.
-    Frame,
-}
-
-/// What happened in the player since it was last asked.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum PlayerEvent {
-    Started,
-    /// Frames of the current file can now be rendered.
-    Showing,
-    Ended,
-    /// Playback ran into the end of the file, where it holds the last frame.
-    AtEnd,
-    /// A watched property has a new value.
-    Changed,
-    /// The time along has moved on, which it does with every frame.
-    Moved,
-    /// A command sent with `command_tagged` is done, by its tag: whether
-    /// it worked.
-    Replied(u64, bool),
-}
-
 type Wake = Box<dyn Fn(Signal) + Send + Sync>;
 
-pub struct Player {
+pub struct Engine {
     api: Api,
     handle: Handle,
     render: RenderContext,
@@ -183,32 +149,13 @@ pub struct Player {
     _library: Library,
 }
 
-/// The properties watched, with the format each is wanted in. Their
-/// places here, from 1, are what mpv tags the change events with.
-const WATCHED: &[(&str, c_int)] = &[
-    ("eof-reached", FORMAT_FLAG),
-    ("time-pos", FORMAT_DOUBLE),
-    ("duration", FORMAT_DOUBLE),
-    ("pause", FORMAT_FLAG),
-    ("seeking", FORMAT_FLAG),
-    ("vo-configured", FORMAT_FLAG),
-    ("path", FORMAT_STRING),
-    ("volume", FORMAT_DOUBLE),
-    ("track-list/count", FORMAT_DOUBLE),
-    ("video-format", FORMAT_STRING),
-    ("video-params/gamma", FORMAT_STRING),
-    ("video-params/primaries", FORMAT_STRING),
-    ("container-fps", FORMAT_DOUBLE),
-    ("frame-drop-count", FORMAT_DOUBLE),
-    ("vo-drop-frame-count", FORMAT_DOUBLE),
-];
-
-/// A property's value as last told of.
-#[derive(Clone, PartialEq, Debug)]
-enum Known {
-    Flag(bool),
-    Number(f64),
-    Text(String),
+/// The format mpv is asked to tell each watched property in.
+fn format_of(known: super::Kind) -> c_int {
+    match known {
+        super::Kind::Flag => FORMAT_FLAG,
+        super::Kind::Number => FORMAT_DOUBLE,
+        super::Kind::Text => FORMAT_STRING,
+    }
 }
 
 /// A PQ video brought down to SDR: to linear light, where 100 nits is
@@ -217,13 +164,9 @@ enum Known {
 /// one core, on the player's filter thread, not the window's.
 const PQ_TO_SDR: &str = "lavfi=[zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p]";
 
-fn watched(property: &str) -> Option<usize> {
-    WATCHED.iter().position(|(name, _)| *name == property)
-}
-
 // SAFETY: mpv's client and render APIs may be called from any thread, as
 // long as it is one at a time, which `&self` on a non-`Sync` type ensures.
-unsafe impl Send for Player {}
+unsafe impl Send for Engine {}
 
 unsafe extern "C" fn on_events(context: *mut c_void) {
     // SAFETY: the context is the `Wake` that `Player` keeps boxed for as
@@ -235,15 +178,6 @@ unsafe extern "C" fn on_frame(context: *mut c_void) {
     // SAFETY: as in `on_events`.
     unsafe { (*(context as *const Wake))(Signal::Frame) }
 }
-
-/// Whether reading a property that takes a while is reported on the
-/// terminal: every read waits for the player's core, which is busy for a
-/// good while when it opens a file.
-pub static DEBUG: AtomicBool = AtomicBool::new(false);
-
-/// Whether videos played are decoded by the GPU, where it can: see
-/// `Player::new`.
-pub static HWDEC: AtomicBool = AtomicBool::new(true);
 
 fn report_slow(property: &str, asked: Instant) {
     let took = asked.elapsed();
@@ -264,10 +198,11 @@ fn open_library() -> Option<Library> {
     names.filter_map(|name| unsafe { Library::new(name) }.ok()).next()
 }
 
-impl Player {
+impl Engine {
     /// Starts an idle player. `wake` is called from mpv's threads and must
-    /// only pass the signal on.
-    pub fn new(role: Role, wake: impl Fn(Signal) + Send + Sync + 'static) -> Result<Player, String> {
+    /// only pass the signal on. `hwdec`: a player for playback has its
+    /// videos decoded by the GPU where it can.
+    pub fn new(role: Role, hwdec: bool, wake: impl Fn(Signal) + Send + Sync + 'static) -> Result<Engine, String> {
         let library = open_library().ok_or("libmpv is not installed")?;
         let api = Api::load(&library).map_err(|error| format!("unusable libmpv: {error}"))?;
 
@@ -321,7 +256,7 @@ impl Player {
             let mut extra: Vec<(&str, &str)> = Vec::new();
             match role {
                 Role::Playback { silent, gpu } => {
-                    if gpu && HWDEC.load(Ordering::Relaxed) {
+                    if gpu && hwdec {
                         extra.push(("hwdec", "auto-copy"));
                     }
                     if silent {
@@ -360,14 +295,14 @@ impl Player {
             // event for each straight away, and only signals when its
             // queue was empty.
             // A preview watches only the curve its file is coded on.
-            for (index, (name, format)) in WATCHED.iter().enumerate() {
+            for (index, (name, kind)) in WATCHED.iter().enumerate() {
                 if matches!(role, Role::Playback { .. }) || *name == "video-params/gamma" {
-                    (api.observe_property)(handle, index as u64 + 1, c_string(name).as_ptr(), *format);
+                    (api.observe_property)(handle, index as u64 + 1, c_string(name).as_ptr(), format_of(*kind));
                 }
             }
             let known = Mutex::new(vec![None; WATCHED.len()]);
             let watching = matches!(role, Role::Playback { .. });
-            Ok(Player { api, handle, render, known, watching, hdr: Cell::new(None), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), drawing: std::sync::Arc::new(Mutex::new(())), _wake: wake, _library: library })
+            Ok(Engine { api, handle, render, known, watching, hdr: Cell::new(None), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), drawing: std::sync::Arc::new(Mutex::new(())), _wake: wake, _library: library })
         }
     }
 
@@ -381,6 +316,12 @@ impl Player {
     fn known(&self, property: &str) -> Option<Option<Known>> {
         let index = watched(property).filter(|_| self.watching)?;
         Some(self.known.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[index].clone())
+    }
+
+    /// Every watched property's last value told of, in `WATCHED`'s order:
+    /// for the player process to pass on to jog's.
+    pub fn known_values(&self) -> Vec<Option<Known>> {
+        self.known.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     pub fn command(&self, arguments: &[&[u8]]) {
@@ -462,12 +403,6 @@ impl Player {
         self.set("audio-delay", &format!("{audio_delay:.3}"));
     }
 
-    /// Whether the file has been opened and its frame is there to be shown.
-    pub fn holds(&self, path: &Path) -> bool {
-        let open = self.text("path").is_some_and(|open| open.as_bytes() == path.as_os_str().as_bytes());
-        open && self.flag("seeking") == Some(false) && self.flag("vo-configured") == Some(true)
-    }
-
     pub fn stop(&self) {
         // Queued: waited for, it would take as long as whatever the core
         // has in hand, a seek or the opening of a file.
@@ -513,16 +448,6 @@ impl Player {
         unsafe {
             (self.api.set_property_async)(self.handle, 0, c_string(property).as_ptr(), FORMAT_STRING, (&mut text as *mut *const c_char).cast())
         };
-    }
-
-    pub fn number(&self, property: &str) -> Option<f64> {
-        if let Some(known) = self.known(property) {
-            return match known {
-                Some(Known::Number(value)) => Some(value),
-                _ => None,
-            };
-        }
-        self.number_now(property)
     }
 
     /// A number asked of the player now, not as it was last told of: for
@@ -738,7 +663,7 @@ impl Renderer {
     }
 }
 
-impl Drop for Player {
+impl Drop for Engine {
     fn drop(&mut self) {
         let started = Instant::now();
         // A draw ahead on another thread finishes first.

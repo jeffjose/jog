@@ -2,6 +2,19 @@
 
 use super::*;
 
+/// The pointer since it came into the window: about to be told where it
+/// is, found somewhere and not moved from there, or moved.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum Arrival {
+    Coming,
+    At(f64, f64),
+    Moved,
+}
+
+/// How far the pointer has to go from where it came into the window to
+/// count as moved, in pixels.
+const POINTER_MOVED: f64 = 3.0;
+
 impl App {
 
     pub(super) fn key_pressed(&mut self, key: Key<&str>, repeat: bool, numpad: bool, event_loop: &ActiveEventLoop) {
@@ -252,6 +265,22 @@ impl App {
             self.redraw();
         }
         let on_video = self.video.is_some() || self.list.get(self.focus()).is_some_and(|id| files::is_video(&self.files[*id]));
+        // Where the pointer was when it came into the window is no move of
+        // it: a window opening under a pointer at its foot would otherwise
+        // bring the filmstrip, or the seek bar's preview, up for a moment.
+        // What is along the bottom waits for the pointer to move.
+        let moved = match self.pointer_found {
+            Arrival::Coming => {
+                self.pointer_found = Arrival::At(x, y);
+                false
+            }
+            Arrival::At(fx, fy) if (x - fx).hypot(y - fy) < POINTER_MOVED => false,
+            Arrival::At(..) => {
+                self.pointer_found = Arrival::Moved;
+                true
+            }
+            Arrival::Moved => true,
+        };
         match &mut self.drag {
             Some(Drag::Pan) => self.pan(dx, dy),
             // Only in the grid, which is dealt with above.
@@ -285,10 +314,11 @@ impl App {
             // moment and go.
             None if on_video => {
                 self.set_strip_hover(false);
-                if self.video.is_some() {
+                if self.video.is_some() && moved {
                     self.video_pointer(x, y);
                 }
             }
+            None if !moved => {}
             None => {
                 let height = self.window_size().1;
                 // A thin strip at the bottom edge opens the filmstrip; once

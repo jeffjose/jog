@@ -54,6 +54,8 @@ impl App {
                     self.modifiers = held;
                     // `{Move:X,Y}` moves the pointer and `{Click}` clicks.
                     if let Some((x, y)) = name.strip_prefix("Move:").and_then(|to| to.split_once(',')) {
+                        // A move asked for is a move, wherever the pointer was.
+                        self.pointer_found = super::input::Arrival::Moved;
                         self.mouse_moved(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
                         continue;
                     }

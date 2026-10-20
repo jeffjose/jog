@@ -1228,6 +1228,17 @@ pub struct App {
     /// Where the next video started is to begin, when a seek carried over
     /// from the file beside it: seconds in, or negative, from its end.
     enter_at: Option<f64>,
+    /// The next video started opens paused: one the player crashed on, put
+    /// back as it was.
+    resume_paused: bool,
+    /// When players crashed lately: one that keeps crashing is not started
+    /// again and again.
+    player_crashes: Vec<Instant>,
+    /// The video on view that crashes the player, once that has been said.
+    unplayable_said: Option<usize>,
+    /// Whether the pointer has moved since it came into the window: see
+    /// `mouse_moved`.
+    pointer_found: input::Arrival,
     /// Playback speed, kept from one video to the next.
     speed: f64,
     muted: bool,
@@ -1488,8 +1499,17 @@ impl Strip {
         Strip { top: window_height as i32 - height, height, pad, cell_w: cell_h * 3 / 2, cell_h }
     }
 
+    /// From one cell to the next. Never 0, which is divided by: a window a
+    /// pixel or two high, as one is while it is being made, has no room
+    /// for cells at all.
     fn pitch(&self) -> i32 {
-        self.cell_w + self.pad
+        (self.cell_w + self.pad).max(1)
+    }
+
+    /// Whether the window has room for its cells: less than a few pixels
+    /// high, there is nothing to see in them, and it is not drawn.
+    fn has_room(&self) -> bool {
+        self.cell_h >= 8
     }
 }
 
@@ -1868,6 +1888,10 @@ impl App {
             preview_sent: None,
             preview_busy: None,
             enter_at: options.begin_at,
+            resume_paused: false,
+            player_crashes: Vec::new(),
+            unplayable_said: None,
+            pointer_found: input::Arrival::Coming,
             speed: 1.0,
             muted: false,
             looping: Looping::Off,
@@ -3362,7 +3386,7 @@ impl App {
         pixels.resize((w * h) as usize, 0);
         // The frame kept for the window is not the one the player has now.
         self.video_kept.set(None);
-        if player.render(&mut pixels, w as u32, h as u32) {
+        if player.render_latest(&mut pixels, w as u32, h as u32) {
             // Its full size is the video's, for when it grows out of the cell.
             let native = self.shown.as_ref().filter(|(id, _)| *id == self.id()).map_or((w as u32, h as u32), |(_, frame)| frame.native);
             self.pip_live = Some(Frame::still(w as u32, h as u32, native, pixels));
@@ -4045,6 +4069,9 @@ impl App {
             // Without it the seek bar still works, just without pictures.
             Event::PreviewPlayer(preview) => {
                 self.preview = preview.ok();
+                // Whatever it had open went with the one before.
+                self.preview_id = None;
+                self.preview_busy = None;
                 // As for the player: empty the queue so that mpv signals.
                 self.preview_signal(Signal::Events);
             }
@@ -4153,6 +4180,10 @@ impl App {
                 self.presented.clear();
                 // Any of these says the window manager has put the window up.
                 self.focused_once = true;
+                // The pointer coming in is told where it is next: no move.
+                if let WindowEvent::CursorEntered { .. } = event {
+                    self.pointer_found = input::Arrival::Coming;
+                }
                 self.redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
@@ -4170,6 +4201,7 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => self.mouse_moved(position.x, position.y),
             WindowEvent::CursorLeft { .. } => {
+                self.pointer_found = input::Arrival::Coming;
                 self.set_strip_hover(false);
                 if self.hover.take().is_some() {
                     self.redraw();

@@ -44,6 +44,12 @@ use loader::Loader;
 use options::{ConvertTo, Parsed};
 
 fn main() -> ExitCode {
+    // Started by jog itself to run a video player in a process of its own:
+    // that, and nothing else.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == mpv::PLAYER_ARG) {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        return mpv::player_main(&args);
+    }
     let mut options = match options::parse(std::env::args_os().skip(1)) {
         Ok(Parsed::Run(options)) => *options,
         Ok(Parsed::Help(topic)) => match options::help(topic.as_deref()) {

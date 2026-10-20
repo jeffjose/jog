@@ -229,7 +229,7 @@ impl App {
                 self.video_kept.set(None);
                 self.repainted.set(true);
                 ui::size_for(&mut self.video_scratch, size.0 as usize * size.1 as usize);
-                let drawn = player.render(&mut self.video_scratch, size.0, size.1);
+                let drawn = player.render_latest(&mut self.video_scratch, size.0, size.1);
                 if drawn {
                     let (x, y, scale) = Self::video_place(size, window);
                     let at = [x as i32, y as i32, (f64::from(size.0) * scale) as i32, (f64::from(size.1) * scale) as i32];
@@ -242,11 +242,11 @@ impl App {
                 self.video_render = Some(window);
                 self.video_kept.set(None);
                 self.repainted.set(true);
-                player.render(pixels, window.0, window.1)
+                player.render_latest(pixels, window.0, window.1)
             } else if !kept {
                 self.video_render = Some(window);
                 ui::size_for(&mut self.video_copy, len);
-                let drawn = player.render(&mut self.video_copy, window.0, window.1);
+                let drawn = player.render_latest(&mut self.video_copy, window.0, window.1);
                 self.video_kept.set(drawn.then_some((window, showing)));
                 if drawn {
                     ui::copy_into(pixels, &self.video_copy);
@@ -394,7 +394,7 @@ impl App {
             self.scope_counts.count(canvas.all(), width as usize, rect, self.scopes);
             graph_cost = counting.elapsed();
         }
-        let strip = (viewing && self.strip_visible()).then(|| Strip::for_height(height as u32));
+        let strip = (viewing && self.strip_visible()).then(|| Strip::for_height(height as u32)).filter(Strip::has_room);
         if let Some(strip) = strip {
             self.draw_strip(canvas, strip);
         }
@@ -404,7 +404,8 @@ impl App {
             // It rises from the bottom edge and sinks back into it.
             let strip = Strip::for_height(height as u32);
             Strip { top: strip.top + ((1.0 - scenes_level) * f64::from(strip.height)) as i32, ..strip }
-        });
+        })
+        .filter(Strip::has_room);
         if let Some(strip) = scene_strip {
             match self.strip_tab {
                 StripTab::Scenes => {

@@ -62,6 +62,8 @@ fn heed(player: &Player, opening: &mut usize, playing: &mut Option<Playing>) {
                     playing.restarts += 1;
                 }
             }
+            // Gone with the video it had: replaced when the next is asked for.
+            PlayerEvent::Crashed => *playing = None,
             _ => {}
         }
     }
@@ -80,12 +82,16 @@ impl Trailers {
     pub fn new(notify: impl Fn(Note) -> bool + Send + 'static) -> Trailers {
         let (messages, inbox) = mpsc::channel();
         let latest = Arc::new(Mutex::new(None));
-        let (signals, slot) = (Mutex::new(messages.clone()), latest.clone());
+        let (signals, slot) = (Arc::new(Mutex::new(messages.clone())), latest.clone());
         std::thread::spawn(move || {
-            let wake = move |signal| drop(signals.lock().unwrap_or_else(std::sync::PoisonError::into_inner).send(Message::Player(signal)));
+            let start = || {
+                let signals = signals.clone();
+                let player = Player::new(Role::Preview, move |signal| drop(signals.lock().unwrap_or_else(std::sync::PoisonError::into_inner).send(Message::Player(signal)))).ok()?;
+                player.set("loop-file", "inf");
+                Some(player)
+            };
             // Without a player there are no trailers; the grid does without.
-            let Ok(player) = Player::new(Role::Preview, wake) else { return };
-            player.set("loop-file", "inf");
+            let Some(mut player) = start() else { return };
             let mut playing: Option<Playing> = None;
             let mut opening = 0;
             // Frames are rendered into this when nobody wants them.
@@ -112,6 +118,15 @@ impl Trailers {
                         // Whatever the player said meanwhile was about the
                         // video before.
                         heed(&player, &mut opening, &mut playing);
+                        // One that crashed on the video before is replaced.
+                        if player.gone() {
+                            match start() {
+                                Some(started) => (player, opening) = (started, 0),
+                                None => return,
+                            }
+                        }
+                        // A video that crashes the decoder has no trailer.
+                        let newest = newest.filter(|message| !matches!(message, Message::Play(_, path, ..) if crate::mpv::crashed_on(path) == Some(crate::mpv::Crash::Software)));
                         playing = match newest {
                             Some(Message::Play(id, path, bounds, from)) => {
                                 opening += 1;
