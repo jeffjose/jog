@@ -251,6 +251,7 @@ impl App {
             (self.strip_over, self.strip_button_over) = (over, on_button);
             self.redraw();
         }
+        let on_video = self.video.is_some() || self.list.get(self.focus()).is_some_and(|id| files::is_video(&self.files[*id]));
         match &mut self.drag {
             Some(Drag::Pan) => self.pan(dx, dy),
             // Only in the grid, which is dealt with above.
@@ -278,9 +279,15 @@ impl App {
             }
             // Over a video the bottom of the window belongs to the seek bar,
             // so the filmstrip does not also open there; `t` still pins it.
-            None if self.video.is_some() => {
+            // A video by what the file is, not by its player having begun:
+            // as the window opens the pointer may be at its foot before the
+            // first video is playing, and the filmstrip would come up for a
+            // moment and go.
+            None if on_video => {
                 self.set_strip_hover(false);
-                self.video_pointer(x, y);
+                if self.video.is_some() {
+                    self.video_pointer(x, y);
+                }
             }
             None => {
                 let height = self.window_size().1;
