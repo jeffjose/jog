@@ -42,6 +42,9 @@ impl App {
         if self.prompt.is_some() {
             return self.prompt_key(key, event_loop);
         }
+        if self.editor.is_some() {
+            return self.editor_key(key);
+        }
         // The track picker takes the keys it knows; the rest work as ever.
         if self.track_picker.is_some() && self.picker_key(&key) {
             return;
@@ -138,6 +141,9 @@ impl App {
     pub(super) fn mouse_moved(&mut self, x: f64, y: f64) {
         let (dx, dy) = (x - self.mouse.0, y - self.mouse.1);
         self.mouse = (x, y);
+        if self.editor.is_some() {
+            return self.editor_motion();
+        }
         // An edge held follows the pointer, and nothing else sees it move.
         if let Some(Drag::Resize(edge)) = self.drag {
             self.drag_edge_to(edge, x, y);
@@ -380,6 +386,14 @@ impl App {
     }
 
     pub(super) fn mouse_button(&mut self, button: MouseButton, pressed: bool, event_loop: &ActiveEventLoop) {
+        // Edit has the whole window; while its copy is being named, the
+        // box has the keys and the mouse waits.
+        if self.editor.is_some() {
+            if button == MouseButton::Left && self.prompt.is_none() {
+                self.editor_mouse(pressed);
+            }
+            return;
+        }
         let (x, y) = self.mouse;
         // The arrow keys go where the last click was: to the file list after
         // a click on it, to the picture after a click anywhere else.
@@ -691,6 +705,9 @@ impl App {
     }
 
     pub(super) fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        if self.editor.is_some() {
+            return;
+        }
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => f64::from(y),
             MouseScrollDelta::PixelDelta(position) => position.y / 50.0,

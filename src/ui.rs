@@ -423,7 +423,7 @@ fn rounded_cover(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32, radius: i32, 
     (0.5 - outside).clamp(0.0, 1.0)
 }
 
-fn mix(a: u32, b: u32, amount: u32) -> u32 {
+pub fn mix(a: u32, b: u32, amount: u32) -> u32 {
     let lerp = |mask: u32| (((a & mask) * (256 - amount) + (b & mask) * amount) >> 8) & mask;
     lerp(0xFF00FF) | lerp(0x00FF00)
 }

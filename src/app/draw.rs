@@ -183,6 +183,11 @@ impl App {
             ui::fill_all(pixels, GRID_COLOR);
             return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
         }
+        // So does Edit: the picture with its marks, and the tools.
+        if self.editor.is_some() {
+            self.scene_live = false;
+            return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
+        }
         // Fresh out of the grid, the picture grows from the cell it had
         // there before anything else of it is drawn.
         if self.grid.is_none() {
@@ -378,7 +383,7 @@ impl App {
         self.tend_story();
         self.tend_trailer();
         // The grid replaces the image and everything describing it.
-        let viewing = self.grid.is_none() && self.overview.is_none();
+        let viewing = self.grid.is_none() && self.overview.is_none() && self.editor.is_none();
         // The graphs of the picture's colors are counted from it as it is
         // on the screen, before anything is drawn over it: only the part of
         // it in view, which zoomed in is the part looked at.
@@ -679,7 +684,7 @@ impl App {
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty() && top_left.is_empty() && debug.is_empty();
         // In Inspect's Files tab, it is drawn there instead.
         let panel = if viewing { self.list_panel().filter(|panel| !panel.embedded) } else { None };
-        let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some() || self.compare.is_some() || self.track_picker.is_some() || self.inspector.is_some() || self.track_editor.is_some();
+        let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some() || self.compare.is_some() || self.track_picker.is_some() || self.inspector.is_some() || self.track_editor.is_some() || self.editor.is_some();
         // The filmstrip has words of its own: the lengths of its videos.
         let boxes = boxes || self.palette.is_some() || strip.is_some() || scene_strip.is_some() || self.overview.is_some() || self.triage_on;
         if nothing_to_write && !boxes && !self.help {
@@ -688,6 +693,11 @@ impl App {
             return;
         }
         let mut text = self.text.take().unwrap_or_else(Text::load);
+        // Under all else: it fills the window, and toasts and boxes come
+        // up over it.
+        if self.editor.is_some() {
+            self.draw_editor(canvas, &mut text, px);
+        }
         self.draw_overview(canvas, &mut text, px);
         self.draw_grid_labels(canvas, &mut text, px);
         self.draw_grid_footer(canvas, &mut text, &footer, px);
@@ -876,6 +886,7 @@ impl App {
                 PromptKind::SaveWorkspace => (commands::icons::FOLDER_PLUS, "Save as workspace".to_string(), "Enter to save to the config"),
                 PromptKind::SectionName { start, end } => (commands::icons::PENCIL, format!("Name {} – {}", clock(start), clock(end)), "Enter to save  ·  empty clears it"),
                 PromptKind::FitSize => (commands::icons::REPLACE, "Fit under".to_string(), "500 KB, 1.2 MB  ·  Enter to fit"),
+                PromptKind::EditCopy => (commands::icons::COPY, "Save as copy".to_string(), "Enter to save  ·  beside the original"),
                 PromptKind::TrackLanguage(_) => (commands::icons::PENCIL, "Language".to_string(), "eng, kor, fre…  ·  Enter to set"),
                 PromptKind::TrackTitle(_) => (commands::icons::PENCIL, "Title".to_string(), "Enter to set  ·  empty clears it"),
                 PromptKind::TrackFile => (commands::icons::FOLDER_PLUS, "Add a subtitle or audio file".to_string(), "a path, then +0.5 to move it later  ·  Tab completes"),

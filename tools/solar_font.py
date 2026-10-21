@@ -10,7 +10,7 @@ https://cdn.jsdelivr.net/npm/@iconify-json/solar/icons.json
 tools/solar_icons.txt has a line for each icon jog uses: the name of its
 constant in `commands::icons`, and the code point the font has it at, in
 hex. To add an icon, give it a line there with a code point of its own
-and say in PICKS below which of Solar's drawings it is.
+and say in PICKS below which of Solar's drawings it is, or draw it in OWN.
 
 The line is 2.25 wide where Solar draws it at 1.5: beside text at 13 to
 24 pixels the thinner line is lighter than the letters.
@@ -51,8 +51,31 @@ PICKS = {
     "STEP_BACK": "round-alt-arrow-left", "FAST_FORWARD": "rewind-forward", "REWIND": "rewind-back",
     "SKIP_BACK": "skip-previous", "SKIP_FORWARD": "skip-next", "REPLACE": "transfer-horizontal",
     "LIST_FILTER": "filter", "LIST_X": "filter-close", "PIN": "pin",
+    # Edit's tools, as hotshot has them.
+    "SELECT": "cursor", "ARROW_UP_RIGHT": "arrow-right-up", "MARKER": "paint-roller",
+    "SPOTLIGHT": "flashlight-on", "CROP": "crop", "EDIT": "pen-new-square",
     # Filled ones, taken as Solar draws them: named in full, style and all.
     "CHECK_FILLED": "check-circle-bold", "X_FILLED": "close-circle-bold",
+}
+
+LINE = 'fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"'
+
+# Drawings of jog's own, on Solar's 24 by 24 square and in its manner: the
+# plain shapes Edit draws, which Solar has no icons of. hotshot's, as they are.
+OWN = {
+    "LINE": f'<path d="M5 19L19 5" {LINE}/>',
+    "RECT": f'<rect x="3" y="5" width="18" height="14" rx="4" {LINE}/>',
+    "OVAL": f'<ellipse cx="12" cy="12" rx="9.25" ry="7.25" {LINE}/>',
+    "COUNTER": f'<circle cx="12" cy="12" r="9.25" {LINE}/><path d="M10.25 9.75L12.75 8V16" {LINE}/>',
+    # A mosaic: what a pixelated patch looks like.
+    "BLUR": (
+        f'<rect x="3" y="3" width="18" height="18" rx="4.5" {LINE}/>'
+        '<rect x="7" y="7" width="3.4" height="3.4" rx="0.6" fill="currentColor"/>'
+        '<rect x="13.6" y="7" width="3.4" height="3.4" rx="0.6" fill="currentColor"/>'
+        '<rect x="10.3" y="10.3" width="3.4" height="3.4" rx="0.6" fill="currentColor"/>'
+        '<rect x="7" y="13.6" width="3.4" height="3.4" rx="0.6" fill="currentColor"/>'
+        '<rect x="13.6" y="13.6" width="3.4" height="3.4" rx="0.6" fill="currentColor"/>'
+    ),
 }
 
 EM = 1000
@@ -81,11 +104,11 @@ def main():
     for line in open(consts):
         name, point = line.split()
         pick = PICKS.get(name, "")
-        drawing = solar.get(pick if pick.endswith("-bold") else pick + "-linear")
+        drawing = OWN.get(name) or (solar.get(pick if pick.endswith("-bold") else pick + "-linear") or {}).get("body")
         if not drawing:
             missing.append(f"{name} ({PICKS.get(name, 'no pick')})")
             continue
-        glyphs[name] = outline(drawing["body"], stroke)
+        glyphs[name] = outline(drawing, stroke)
         cmap[int(point, 16)] = name
     if missing:
         sys.exit(f"Solar has no drawing for: {', '.join(missing)}")

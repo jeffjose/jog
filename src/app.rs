@@ -78,6 +78,7 @@ mod timeline;
 mod checks;
 use devtools::{Block, DrawerPane, Pane};
 mod track_editor;
+mod editor;
 mod tracks;
 mod triaging;
 mod video;
@@ -280,6 +281,8 @@ pub enum Event {
     /// The tracks editor's file written, or why not; and whether it took
     /// the original's place.
     TracksWritten(Result<PathBuf, String>, bool),
+    /// A picture saved from Edit, or why not.
+    EditSaved(editor::Saved),
     /// Files moved, copied or trashed on another thread.
     FilesDone(filework::FilesDone),
     /// A video's packets, read for Inspect's Timeline.
@@ -318,6 +321,8 @@ enum Undo {
     Created(Vec<PathBuf>),
     Moved(Vec<Moved>),
     Renamed { id: usize, from: PathBuf, to: PathBuf },
+    /// A file saved over from Edit, and where its original was kept.
+    Replaced { id: usize, path: PathBuf, backup: PathBuf },
 }
 
 /// What Undo took back, as Redo does it again. A delete, or files made
@@ -953,6 +958,8 @@ enum PromptKind {
     TrackLanguage(usize),
     TrackTitle(usize),
     TrackFile,
+    /// The name to save what Edit drew as, beside the picture.
+    EditCopy,
 }
 
 pub struct App {
@@ -1358,6 +1365,11 @@ pub struct App {
     help_kept: Option<((String, i32, i32), [i32; 4], Vec<u32>)>,
     /// The tracks editor: a video's streams to keep, order and tag.
     track_editor: Option<track_editor::TrackEditor>,
+    /// Edit, while it is open; its marks while a save of them is on its
+    /// way, to go back to if it fails; and which save was used last.
+    editor: Option<editor::Editor>,
+    edit_stash: Option<editor::Editor>,
+    edit_last: editor::SaveAs,
     track_memory: Option<HashMap<PathBuf, tracks::TrackChoice>>,
     /// The section marked in each video, by file: still there when the
     /// video is come back to.
@@ -1963,6 +1975,9 @@ impl App {
             video_margins: Cell::new((0.0, 0.0, 0.0)),
             help_kept: None,
             track_editor: None,
+            editor: None,
+            edit_stash: None,
+            edit_last: editor::SaveAs::default(),
             track_memory: None,
             sections: HashMap::new(),
             marked_sections: None,
@@ -2970,6 +2985,7 @@ impl App {
             TrackPicker => self.open_track_picker(),
             Inspect => self.open_inspector(),
             EditTracks => self.open_track_editor(),
+            Edit => self.open_editor(),
             SubtitlesLarger => self.size_subtitles(true),
             SubtitlesSmaller => self.size_subtitles(false),
             ClearFilter => self.clear_filter(false),
@@ -4080,6 +4096,7 @@ impl App {
             Event::Inspected(id, found) => self.inspected(id, found),
             Event::Compared(id, found) => self.compared(id, found),
             Event::TracksWritten(result, replaced) => self.tracks_written(result, replaced),
+            Event::EditSaved(saved) => self.edit_saved(saved),
             Event::FilesDone(done) => self.files_done(done, event_loop),
             Event::Packets(id, packets) => self.packets_read(id, packets),
             Event::TimelineFrames(id, frames) => self.timeline_frames(id, frames),

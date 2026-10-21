@@ -301,6 +301,9 @@ impl App {
                     self.toast("Not undone");
                 }
             }
+            // The original was kept aside: it goes back, and is not kept
+            // for Redo.
+            Some(Undo::Replaced { id, path, backup }) => self.restore_original(id, &path, &backup),
         }
     }
 
@@ -600,6 +603,11 @@ impl App {
                     self.prompt = None;
                     self.fit_size(&typed);
                 }
+                // The box stays up while the name is taken.
+                PromptKind::EditCopy => {
+                    let typed = prompt.field.string();
+                    self.finish_edit_copy(&typed);
+                }
                 PromptKind::SectionName { start, end } => {
                     let typed = prompt.field.string();
                     self.prompt = None;
@@ -635,7 +643,7 @@ impl App {
             PromptKind::Rename => self.files[prompt.id].parent().map(Path::to_path_buf).unwrap_or_default(),
             PromptKind::SendTo { .. } => PathBuf::new(),
             PromptKind::TrackFile => PathBuf::new(),
-            PromptKind::SaveWorkspace | PromptKind::SectionName { .. } | PromptKind::FitSize | PromptKind::TrackLanguage(_) | PromptKind::TrackTitle(_) => return,
+            PromptKind::SaveWorkspace | PromptKind::SectionName { .. } | PromptKind::FitSize | PromptKind::TrackLanguage(_) | PromptKind::TrackTitle(_) | PromptKind::EditCopy => return,
         };
         let before: String = prompt.field.text[..prompt.field.cursor].iter().collect();
         if before.starts_with('@') {
@@ -677,6 +685,7 @@ impl App {
                 let shown = short_dir(&dir.canonicalize().unwrap_or_else(|_| dir.clone()));
                 Some(if dir.is_dir() { format!("→ {shown}") } else { format!("→ {shown}  (new folder)") })
             }
+            PromptKind::EditCopy => self.edit_copy_hint(typed),
             _ => None,
         }
     }

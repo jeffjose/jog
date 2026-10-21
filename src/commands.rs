@@ -81,6 +81,9 @@ pub enum Command {
     Inspect,
     /// Keep, order, tag, add and take out a video's tracks.
     EditTracks,
+    /// Draw on the picture, crop it and round its corners, then save it
+    /// over itself or as a copy.
+    Edit,
     SubtitlesLarger,
     SubtitlesSmaller,
     /// Put the debug overlay's figures on the clipboard, plainly or as JSON.
@@ -323,7 +326,8 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "i" if modifiers.control_key() => TravelForward,
             "i" => ToggleInfo,
             "I" => ToggleDebug,
-            "e" => ToggleExif,
+            "e" => Edit,
+            "E" => ToggleExif,
             "a" => ToggleActions,
             "o" => TogglePointer,
             "M" => MoveTo,
@@ -488,6 +492,18 @@ pub mod icons {
     pub const REPLACE: &str = "\u{e3de}";
     pub const LIST_FILTER: &str = "\u{e464}";
     pub const LIST_X: &str = "\u{e23f}";
+    // Edit's tools.
+    pub const SELECT: &str = "\u{e700}";
+    pub const RECT: &str = "\u{e701}";
+    pub const OVAL: &str = "\u{e702}";
+    pub const ARROW_UP_RIGHT: &str = "\u{e703}";
+    pub const LINE: &str = "\u{e704}";
+    pub const MARKER: &str = "\u{e705}";
+    pub const COUNTER: &str = "\u{e706}";
+    pub const BLUR: &str = "\u{e707}";
+    pub const SPOTLIGHT: &str = "\u{e708}";
+    pub const CROP: &str = "\u{e709}";
+    pub const EDIT: &str = "\u{e70a}";
 }
 
 /// The icon drawn beside a menu item.
@@ -561,6 +577,7 @@ pub fn command_icon(command: Command) -> &'static str {
         CycleAudio | TrackPicker => AUDIO_LINES,
         Inspect => EYE,
         EditTracks => AUDIO_LINES,
+        Edit => EDIT,
         SubtitlesLarger | SubtitlesSmaller => A_LARGE_SMALL,
         ZoomIn | GridLarger => ZOOM_IN,
         ZoomOut | GridSmaller => ZOOM_OUT,
@@ -624,6 +641,7 @@ pub const MENU: &[Option<MenuItem>] = &[
     item("Shuffle", "z", Command::Shuffle),
     item("Workspaces", "G", Command::Overview),
     item("Go to workspace…", "@", Command::WorkspaceList),
+    image_item("Edit", "e", Command::Edit),
     // A window of its own for a picture; the formats, for a video.
     image_item("Convert…", "K", Command::ConvertPanel),
     submenu("Convert to", CONVERT_PICTURE, Applies::Images),
@@ -766,7 +784,7 @@ const VIEW: &[Option<MenuItem>] = &[
     item("Watch for new files", "W", Command::ToggleWatch),
     None,
     item("Info", "i", Command::ToggleInfo),
-    image_item("EXIF data", "e", Command::ToggleExif),
+    image_item("EXIF data", "E", Command::ToggleExif),
     image_item("Ultra HDR  ·  SDR, HDR, gain map", "H", Command::CycleHdr),
     item("List of actions", "a", Command::ToggleActions),
     None,
@@ -1100,7 +1118,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("p", "File list down the side; / searches it, its buttons pin and move it"),
                 ("i", "Info: name, size, zoom"),
                 ("I", "Timings, what a video is made of, graphs of the colors, and a video's HDR: HDR10+ and 2094-50 curves"),
-                ("e", "EXIF data"),
+                ("E", "EXIF data"),
                 ("a", "List of the actions there are"),
                 ("w  o", "Size the window to the picture / hide the pointer"),
                 ("Tab  Right click", "Menu"),
@@ -1129,7 +1147,8 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Y", "Copy for the shell: one line, a folder's files as /dir/img-{1,5}.jpg"),
                 ("F2", "Rename, or move: a path such as /tmp/a.png"),
                 ("K", "Convert: JPEG XL, AVIF, JPEG, PNG, WebP, settings tried on the picture first"),
-                ("u", "Undo copy, move or rename"),
+                ("e", "Edit: draw, write, blur, crop, round the corners · Ctrl+S over it, Ctrl+Shift+S a copy"),
+                ("u", "Undo copy, move, rename or an edit saved over"),
                 ("Delete", "Remove from the list"),
                 ("Ctrl+Delete", "Move to trash"),
                 ("D", "Delete for good (asks)"),
