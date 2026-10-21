@@ -54,7 +54,7 @@ PICKS = {
     # Edit's tools, as hotshot has them.
     "SELECT": "cursor", "ARROW_UP_RIGHT": "arrow-right-up", "MARKER": "paint-roller",
     "SPOTLIGHT": "flashlight-on", "CROP": "crop", "EDIT": "pen-new-square", "REDO": "undo-right",
-    "STICKER": "smile-circle",
+    "STICKER": "smile-circle", "PIPETTE": "pipette", "BADGE": "tag-horizontal",
     # Filled ones, taken as Solar draws them: named in full, style and all.
     "CHECK_FILLED": "check-circle-bold", "X_FILLED": "close-circle-bold",
 }

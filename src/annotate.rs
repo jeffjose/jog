@@ -1,7 +1,8 @@
-//! What Edit draws over a picture: shapes, lines, words, emoji, numbered
-//! marks, blurred patches and spotlights. They are kept in the picture's
-//! own pixels, so the same marks are drawn small over the picture on
-//! screen and at full size into the file that is saved.
+//! What Edit draws over a picture: shapes, lines, words, badges, emoji,
+//! numbered marks, blurred patches, spotlights and zoomed-in views. They
+//! are kept in the picture's own pixels, so the same marks are drawn
+//! small over the picture on screen and at full size into the file that
+//! is saved.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -9,7 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use image::RgbaImage;
 use rayon::prelude::*;
 
-use crate::ui::{mix, Canvas, Text};
+use crate::lettering::{self, Look};
+use crate::ui::mix;
 
 pub type Point = (f32, f32);
 
@@ -24,15 +26,19 @@ pub enum Tool {
     Marker,
     Text,
     Counter,
+    Badge,
     Emoji,
     Blur,
     Spotlight,
+    Zoom,
     Crop,
+    /// Takes a color from the picture.
+    Pipette,
 }
 
 impl Tool {
     /// The tools in the order of the bar, a `None` where a gap parts them.
-    pub const BAR: [Option<Tool>; 16] = [
+    pub const BAR: [Option<Tool>; 18] = [
         Some(Tool::Select),
         None,
         Some(Tool::Rect),
@@ -43,10 +49,12 @@ impl Tool {
         Some(Tool::Marker),
         Some(Tool::Text),
         Some(Tool::Counter),
+        Some(Tool::Badge),
         Some(Tool::Emoji),
         None,
         Some(Tool::Blur),
         Some(Tool::Spotlight),
+        Some(Tool::Zoom),
         None,
         Some(Tool::Crop),
     ];
@@ -63,15 +71,18 @@ impl Tool {
             Tool::Marker => "h",
             Tool::Text => "t",
             Tool::Counter => "n",
+            Tool::Badge => "j",
             Tool::Emoji => "e",
             Tool::Blur => "b",
             Tool::Spotlight => "s",
+            Tool::Zoom => "z",
             Tool::Crop => "x",
+            Tool::Pipette => "i",
         }
     }
 
     pub fn of_key(key: &str) -> Option<Tool> {
-        Tool::BAR.into_iter().flatten().find(|tool| tool.key() == key)
+        Tool::BAR.into_iter().flatten().chain([Tool::Pipette]).find(|tool| tool.key() == key)
     }
 
     pub fn name(self) -> &'static str {
@@ -85,21 +96,24 @@ impl Tool {
             Tool::Marker => "Marker",
             Tool::Text => "Text",
             Tool::Counter => "Counter",
+            Tool::Badge => "Badge",
             Tool::Emoji => "Emoji",
             Tool::Blur => "Blur",
             Tool::Spotlight => "Spotlight",
+            Tool::Zoom => "Zoom",
             Tool::Crop => "Crop",
+            Tool::Pipette => "Pick a color",
         }
     }
 
     /// Whether it is drawn by dragging out from one point to another.
     pub fn spans(self) -> bool {
-        matches!(self, Tool::Rect | Tool::Oval | Tool::Arrow | Tool::Line | Tool::Blur | Tool::Spotlight)
+        matches!(self, Tool::Rect | Tool::Oval | Tool::Arrow | Tool::Line | Tool::Blur | Tool::Spotlight | Tool::Zoom)
     }
 
     /// Whether its size is that of its letters, kept in proportion.
     pub fn lettered(self) -> bool {
-        matches!(self, Tool::Text | Tool::Emoji)
+        matches!(self, Tool::Text | Tool::Emoji | Tool::Badge)
     }
 
     pub fn is_line(self) -> bool {
@@ -116,6 +130,15 @@ pub enum Dash {
     Dotted,
 }
 
+/// The ways words can be set, any of them together: heavier, slanted, on
+/// a wash of yellow as if gone over with a marker, on a patch of their
+/// own color, and each line after a dot.
+pub const BOLD: u8 = 1;
+pub const ITALIC: u8 = 2;
+pub const HIGHLIGHT: u8 = 4;
+pub const BOXED: u8 = 8;
+pub const BULLETS: u8 = 16;
+
 /// The colors to draw in: hotshot's.
 pub const COLORS: [u32; 8] = [0xFF3B30, 0xFF9500, 0xFFCC00, 0x34C759, 0x0A84FF, 0xAF52DE, 0xFFFFFF, 0x1C1C1E];
 /// How opaque a mark can be, out of 256.
@@ -126,6 +149,8 @@ pub const OPACITIES: [u32; 4] = [64, 128, 192, 256];
 const SPOTLIGHT_KEEPS: u32 = 96;
 /// How see-through the marker is, out of 256.
 const MARKER_OPACITY: u32 = 110;
+/// What a highlight is the color of, and how opaque out of 256.
+const HIGHLIGHT_COLOR: (u32, u32) = (0xFFE629, 150);
 /// How many straight lines a bent one is drawn as.
 const BENDS: usize = 24;
 
@@ -136,13 +161,15 @@ pub struct Shape {
     pub color: u32,
     /// Out of 256.
     pub opacity: u32,
-    /// How wide its line is; for text and emoji, how tall its letters are.
+    /// How wide its line is; for words and emoji, how tall the letters are.
     pub stroke: f32,
     /// Where the drag began and where it ended; a pen's every point; the
-    /// top-left of text and emoji; the middle of a counter.
+    /// top-left of words and emoji; the middle of a counter and the tip
+    /// of its tail; what a zoom is of, and where it shows it.
     pub points: Vec<Point>,
     /// The words, or the emoji.
     pub text: String,
+    /// Filled rather than outlined; a zoom square rather than round.
     pub filled: bool,
     /// How round a rectangle's or a spotlight's corners are.
     pub radius: f32,
@@ -151,6 +178,12 @@ pub struct Shape {
     pub dash: Dash,
     /// Where a bent line passes half way along.
     pub bend: Option<Point>,
+    /// The face its words are in.
+    pub face: usize,
+    /// How its words are set: some of `BOLD`, `ITALIC` and the rest.
+    pub style: u8,
+    /// Which of the looks a badge has.
+    pub look: usize,
 }
 
 /// Where the picture is drawn: its pixel `(px, py)` lands at
@@ -184,7 +217,7 @@ pub fn widths(native: (u32, u32)) -> [f32; 4] {
     [1.5, 3.0, 5.0, 8.0].map(|times| times * unit(native))
 }
 
-/// The heights of text the four sizes are.
+/// The heights of words the four sizes are.
 pub fn text_sizes(native: (u32, u32)) -> [f32; 4] {
     [8.0, 12.0, 18.0, 28.0].map(|times| times * unit(native))
 }
@@ -195,16 +228,86 @@ pub fn ink_on(color: u32) -> u32 {
     if r * 299 + g * 587 + b * 114 > 160_000 { 0x1C1C1E } else { 0xFFFFFF }
 }
 
+/// What a picture is drawn into: its pixels, how wide it is, the part of
+/// it that may be drawn on (left, top, right, bottom), and how opaque each
+/// pixel is, when that is kept.
+pub struct Surface<'a> {
+    pub pixels: &'a mut [u32],
+    pub width: usize,
+    pub clip: [i32; 4],
+    pub alpha: Option<&'a mut [u8]>,
+}
+
+impl Surface<'_> {
+    /// A pixel `amount`/256 of the way to `color`.
+    fn blend(&mut self, x: i32, y: i32, color: u32, amount: u32) {
+        if amount == 0 || x < self.clip[0] || y < self.clip[1] || x >= self.clip[2] || y >= self.clip[3] {
+            return;
+        }
+        let at = y as usize * self.width + x as usize;
+        self.pixels[at] = mix(self.pixels[at], color, amount.min(256));
+        if let Some(alpha) = self.alpha.as_deref_mut() {
+            alpha[at] = alpha[at].max(amount.min(255) as u8);
+        }
+    }
+
+    /// Words, as `lettering` draws them.
+    #[allow(clippy::too_many_arguments)]
+    fn words(&mut self, at: Point, px: f32, color: u32, opacity: u32, look: Look, words: &str) {
+        lettering::draw(self.pixels, self.width, self.clip, at, px, color, opacity, look, words, self.alpha.as_deref_mut());
+    }
+
+    /// A rounded rectangle (left, top, right, bottom), each pixel in what
+    /// `color` says for how far across and down it is, from 0 to 1. `soft`
+    /// fades its edge over that many pixels, as a shadow or glow has it.
+    fn patch(&mut self, [l, t, r, b]: [f32; 4], radius: f32, soft: f32, amount: u32, color: impl Fn(f32, f32) -> u32) {
+        let (hw, hh) = ((r - l) / 2.0, (b - t) / 2.0);
+        if hw <= 0.0 || hh <= 0.0 {
+            return;
+        }
+        let (cx, cy) = (l + hw, t + hh);
+        let radius = radius.min(hw).min(hh).max(0.0);
+        let reach = soft.ceil() as i32 + 1;
+        for y in (t.floor() as i32 - reach).max(self.clip[1])..(b.ceil() as i32 + reach).min(self.clip[3]) {
+            for x in (l.floor() as i32 - reach).max(self.clip[0])..(r.ceil() as i32 + reach).min(self.clip[2]) {
+                let away = round_box(x as f32 + 0.5 - cx, y as f32 + 0.5 - cy, hw, hh, radius);
+                let cover = if soft > 0.0 { (0.5 - away / soft).clamp(0.0, 1.0).powi(2) } else { (0.5 - away).clamp(0.0, 1.0) };
+                if cover > 0.0 {
+                    let (across, down) = (((x as f32 - l) / (r - l)).clamp(0.0, 1.0), ((y as f32 - t) / (b - t)).clamp(0.0, 1.0));
+                    self.blend(x, y, color(across, down), (cover * amount as f32) as u32);
+                }
+            }
+        }
+    }
+
+    /// The edge of a rounded rectangle, `thick` wide.
+    fn outline(&mut self, [l, t, r, b]: [f32; 4], radius: f32, thick: f32, color: u32, amount: u32) {
+        let (hw, hh) = ((r - l) / 2.0, (b - t) / 2.0);
+        let (cx, cy) = (l + hw, t + hh);
+        let radius = radius.min(hw).min(hh).max(0.0);
+        for y in (t.floor() as i32 - 2).max(self.clip[1])..(b.ceil() as i32 + 2).min(self.clip[3]) {
+            for x in (l.floor() as i32 - 2).max(self.clip[0])..(r.ceil() as i32 + 2).min(self.clip[2]) {
+                let away = round_box(x as f32 + 0.5 - cx, y as f32 + 0.5 - cy, hw - thick / 2.0, hh - thick / 2.0, (radius - thick / 2.0).max(0.0)).abs() - thick / 2.0;
+                self.blend(x, y, color, ((0.5 - away).clamp(0.0, 1.0) * amount as f32) as u32);
+            }
+        }
+    }
+
+    fn disc(&mut self, (cx, cy): Point, radius: f32, color: u32, amount: u32) {
+        self.patch([cx - radius, cy - radius, cx + radius, cy + radius], radius, 0.0, amount, |_, _| color);
+    }
+}
+
 impl Shape {
     pub fn new(tool: Tool, color: u32, stroke: f32, at: Point) -> Shape {
         let points = if tool.spans() { vec![at, at] } else { vec![at] };
         let heads = [false, tool == Tool::Arrow];
-        Shape { tool, color, opacity: 256, stroke, points, text: String::new(), filled: false, radius: stroke * 1.2, heads, dash: Dash::Solid, bend: None }
+        Shape { tool, color, opacity: 256, stroke, points, text: String::new(), filled: false, radius: stroke * 1.2, heads, dash: Dash::Solid, bend: None, face: 0, style: 0, look: 0 }
     }
 
-    /// The rectangle a two-point shape spans: left, top, right, bottom.
+    /// The rectangle its first two points span: left, top, right, bottom.
     pub fn frame(&self) -> [f32; 4] {
-        let (a, b) = (self.points[0], *self.points.last().unwrap_or(&self.points[0]));
+        let (a, b) = (self.points[0], *self.points.get(1).unwrap_or(&self.points[0]));
         [a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1)]
     }
 
@@ -212,8 +315,80 @@ impl Shape {
         self.stroke * 2.4 + 6.0
     }
 
+    fn lettering(&self) -> Look {
+        Look { face: self.face, bold: self.style & BOLD != 0, italic: self.style & ITALIC != 0 }
+    }
+
+    /// What each line of its words begins with: a dot, with bullets.
+    fn lead(&self) -> &'static str {
+        if self.style & BULLETS != 0 { "\u{2022} " } else { "" }
+    }
+
+    /// How far a badge's words are from its left edge.
+    fn badge_lead(&self) -> f32 {
+        let px = self.stroke;
+        match self.look {
+            0 | 4 => px * 1.25,
+            5 => px,
+            9 => px * 1.5,
+            10 => px * 0.5,
+            _ => px * 0.75,
+        }
+    }
+
+    /// Where a zoom's larger view is: left, top, right, bottom.
+    pub fn zoomed(&self) -> [f32; 4] {
+        let (c, d) = (self.points[2], self.points[3]);
+        [c.0.min(d.0), c.1.min(d.1), c.0.max(d.0), c.1.max(d.1)]
+    }
+
+    /// A zoom just dragged out: shown twice as large, to the right of what
+    /// it is of and a little above.
+    pub fn place_zoom(&mut self) {
+        let [l, t, r, b] = self.frame();
+        let (w, h) = (r - l, b - t);
+        let at = (r + w / 2.0 + self.stroke * 4.0, t - h / 2.0);
+        self.points.truncate(2);
+        self.points.extend([at, (at.0 + w * 2.0, at.1 + h * 2.0)]);
+    }
+
+    /// How many times larger a zoom shows what it is of.
+    pub fn zoom_times(&self) -> f32 {
+        let [l, _, r, _] = self.frame();
+        let [zl, _, zr, _] = self.zoomed();
+        (zr - zl) / (r - l).max(1.0)
+    }
+
+    /// A zoom's two handles: in the middle of its larger view, which moves
+    /// that, and on its rim, which says how many times larger it is.
+    pub fn zoom_handles(&self) -> [Point; 2] {
+        let [l, t, r, b] = self.zoomed();
+        let middle = ((l + r) / 2.0, (t + b) / 2.0);
+        let out = if self.filled { 0.5 } else { std::f32::consts::FRAC_1_SQRT_2 / 2.0 };
+        [middle, (middle.0 + (r - l) * out, middle.1 + (b - t) * out)]
+    }
+
+    /// One of a zoom's handles taken to a point: its middle there, or its
+    /// rim under the point, its middle staying.
+    pub fn zoom_to(&mut self, rim: bool, to: Point) {
+        let [l, t, r, b] = self.zoomed();
+        let [ol, ot, or, ob] = self.frame();
+        let (mut middle, mut size) = (((l + r) / 2.0, (t + b) / 2.0), (r - l, b - t));
+        if rim {
+            let out = if self.filled { 0.5 } else { std::f32::consts::FRAC_1_SQRT_2 / 2.0 };
+            let across = (to.0 - middle.0).abs() / out / (or - ol).max(1.0);
+            let down = (to.1 - middle.1).abs() / out / (ob - ot).max(1.0);
+            let times = across.max(down).clamp(1.25, 12.0);
+            size = ((or - ol) * times, (ob - ot) * times);
+        } else {
+            middle = to;
+        }
+        self.points[2] = (middle.0 - size.0 / 2.0, middle.1 - size.1 / 2.0);
+        self.points[3] = (middle.0 + size.0 / 2.0, middle.1 + size.1 / 2.0);
+    }
+
     /// What it covers, in the picture's pixels: left, top, right, bottom.
-    pub fn bounds(&self, text: &mut Text) -> [f32; 4] {
+    pub fn bounds(&self) -> [f32; 4] {
         let reach = self.stroke * 0.5 + 1.0;
         let around = |points: &[Point], reach: f32| {
             let (mut l, mut t, mut r, mut b) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
@@ -225,9 +400,19 @@ impl Shape {
         match self.tool {
             Tool::Text => {
                 let (x, y) = self.points[0];
-                let px = self.stroke.round().max(1.0) as u32;
-                let width = text.width(&self.text, px).max(px as i32 / 2) as f32;
-                [x, y, x + width, y + Text::line_height(px) as f32]
+                let line = lettering::line_height(self.stroke);
+                let lines: Vec<&str> = self.text.split('\n').collect();
+                let wide = lines.iter().map(|words| lettering::width(self.lettering(), &format!("{}{words}", self.lead()), self.stroke)).fold(self.stroke / 4.0, f32::max);
+                let high = line * lines.len() as f32;
+                // On a patch, the patch with it.
+                let room = if self.style & BOXED != 0 { line / 4.0 } else { 0.0 };
+                [x - room * 1.5, y - room / 2.0, x + wide + room * 1.5, y + high + room / 2.0]
+            }
+            Tool::Badge => {
+                let (x, y) = self.points[0];
+                let line = lettering::line_height(self.stroke);
+                let wide = lettering::width(self.lettering(), &self.text, self.stroke) + self.badge_lead() + self.stroke * 0.75;
+                [x, y, x + wide, y + line * 4.0 / 3.0]
             }
             Tool::Emoji => {
                 let (x, y) = self.points[0];
@@ -235,7 +420,15 @@ impl Shape {
             }
             Tool::Counter => {
                 let ((x, y), r) = (self.points[0], self.counter_radius());
-                [x - r, y - r, x + r, y + r]
+                let [l, t, rr, b] = [x - r, y - r, x + r, y + r];
+                match self.points.get(1) {
+                    Some(tip) => [l.min(tip.0), t.min(tip.1), rr.max(tip.0), b.max(tip.1)],
+                    None => [l, t, rr, b],
+                }
+            }
+            Tool::Zoom => {
+                let ([l, t, r, b], [zl, zt, zr, zb]) = (self.frame(), self.zoomed());
+                [l.min(zl) - reach, t.min(zt) - reach, r.max(zr) + reach, b.max(zb) + reach]
             }
             Tool::Arrow | Tool::Line => around(&self.path(), reach + self.head().1),
             Tool::Pen | Tool::Marker => around(&self.points, self.line_width() * 0.5 + 1.0),
@@ -273,6 +466,26 @@ impl Shape {
             .collect()
     }
 
+    /// The outline of a rectangle or an oval as straight lines all round,
+    /// for its dashes to be counted along.
+    fn ring(&self) -> Vec<Point> {
+        let [l, t, r, b] = self.frame();
+        let (cx, cy, hw, hh) = ((l + r) / 2.0, (t + b) / 2.0, (r - l) / 2.0, (b - t) / 2.0);
+        let arc = |cx: f32, cy: f32, rx: f32, ry: f32, from: f32, steps: usize| -> Vec<Point> {
+            (0..=steps).map(|step| from + std::f32::consts::FRAC_PI_2 * step as f32 / steps as f32).map(|angle| (cx + rx * angle.cos(), cy + ry * angle.sin())).collect()
+        };
+        let mut points = match self.tool {
+            Tool::Oval => (0..4).flat_map(|quarter| arc(cx, cy, hw, hh, quarter as f32 * std::f32::consts::FRAC_PI_2, 18)).collect(),
+            _ => {
+                let radius = self.radius.min(hw).min(hh).max(0.0);
+                let corners = [(r - radius, b - radius), (l + radius, b - radius), (l + radius, t + radius), (r - radius, t + radius)];
+                corners.iter().enumerate().flat_map(|(at, (x, y))| arc(*x, *y, radius, radius, at as f32 * std::f32::consts::FRAC_PI_2, 8)).collect::<Vec<_>>()
+            }
+        };
+        points.push(points[0]);
+        points
+    }
+
     /// Where the dot that bends a line is: on it, half way.
     pub fn middle(&self) -> Point {
         self.bend.unwrap_or_else(|| {
@@ -289,12 +502,11 @@ impl Shape {
     }
 
     /// Whether a point of the picture is on it, `reach` pixels allowed.
-    pub fn hit(&self, p: Point, reach: f32, text: &mut Text) -> bool {
+    pub fn hit(&self, p: Point, reach: f32) -> bool {
+        let within = |[l, t, r, b]: [f32; 4]| p.0 >= l - reach && p.0 <= r + reach && p.1 >= t - reach && p.1 <= b + reach;
         match self.tool {
-            Tool::Text | Tool::Emoji | Tool::Counter | Tool::Blur | Tool::Spotlight => {
-                let [l, t, r, b] = self.bounds(text);
-                p.0 >= l - reach && p.0 <= r + reach && p.1 >= t - reach && p.1 <= b + reach
-            }
+            Tool::Text | Tool::Badge | Tool::Emoji | Tool::Blur | Tool::Spotlight => within(self.bounds()),
+            Tool::Zoom => within(self.frame()) || within(self.zoomed()),
             Tool::Pen | Tool::Marker => {
                 let half = self.line_width() / 2.0 + reach;
                 match self.points.as_slice() {
@@ -303,7 +515,7 @@ impl Shape {
                 }
             }
             // Filled, or outlined: on the line, or anywhere inside.
-            Tool::Rect | Tool::Oval if self.filled => self.distance(p, false) <= reach,
+            Tool::Rect | Tool::Oval if self.filled => self.distance(p, true) <= reach,
             _ => self.distance(p, true) <= reach,
         }
     }
@@ -341,8 +553,12 @@ impl Shape {
     /// Whether it came to nothing: a click with a tool that wants a drag.
     pub fn is_slight(&self) -> bool {
         match self.tool {
-            Tool::Text | Tool::Emoji => self.text.trim().is_empty(),
+            Tool::Text | Tool::Emoji | Tool::Badge => self.text.trim().is_empty(),
             Tool::Counter | Tool::Pen | Tool::Marker => false,
+            Tool::Zoom => {
+                let [l, t, r, b] = self.frame();
+                (r - l).min(b - t) < 4.0
+            }
             _ => {
                 let [l, t, r, b] = self.frame();
                 (r - l).max(b - t) < 3.0
@@ -356,25 +572,43 @@ impl Shape {
         let half = self.stroke / 2.0;
         let [l, t, r, b] = self.frame();
         let (cx, cy, hw, hh) = ((l + r) / 2.0, (t + b) / 2.0, (r - l) / 2.0, (b - t) / 2.0);
+        let outline = |inside: f32| {
+            if self.filled {
+                return inside - half;
+            }
+            let solid = inside.abs() - half;
+            // Dashed: counted along the outline, but only near it, where
+            // it can make a difference.
+            if plain || self.dash == Dash::Solid || solid > self.stroke {
+                solid
+            } else {
+                run_distance(p, &self.ring(), self.dash, self.stroke, (0.0, 0.0))
+            }
+        };
         match self.tool {
-            Tool::Rect => {
-                let inside = round_box(p.0 - cx, p.1 - cy, hw, hh, self.radius.min(hw).min(hh).max(0.0));
-                if self.filled { inside - half } else { inside.abs() - half }
-            }
-            Tool::Oval => {
-                let inside = ellipse(p.0 - cx, p.1 - cy, hw, hh);
-                if self.filled { inside - half } else { inside.abs() - half }
-            }
+            Tool::Rect => outline(round_box(p.0 - cx, p.1 - cy, hw, hh, self.radius.min(hw).min(hh).max(0.0))),
+            Tool::Oval => outline(ellipse(p.0 - cx, p.1 - cy, hw, hh)),
             Tool::Line | Tool::Arrow => self.line_distance(p, plain),
-            Tool::Counter => dist(p, self.points[0]) - self.counter_radius(),
+            Tool::Counter => {
+                let (middle, radius) = (self.points[0], self.counter_radius());
+                let disc = dist(p, middle) - radius;
+                let Some(tip) = self.points.get(1).copied() else { return disc };
+                let length = dist(middle, tip);
+                if length < radius * 1.4 {
+                    return disc;
+                }
+                // A tail from the disc to what it points at.
+                let (dx, dy) = ((tip.0 - middle.0) / length, (tip.1 - middle.1) / length);
+                let wide = radius * 0.55;
+                disc.min(triangle(p, tip, (middle.0 - dy * wide, middle.1 + dx * wide), (middle.0 + dy * wide, middle.1 - dx * wide)) - 0.6)
+            }
             _ => f32::MAX,
         }
     }
 
     fn line_distance(&self, p: Point, plain: bool) -> f32 {
         let path = self.path();
-        let lengths: Vec<f32> = path.windows(2).map(|pair| dist(pair[0], pair[1])).collect();
-        let whole: f32 = lengths.iter().sum();
+        let whole: f32 = path.windows(2).map(|pair| dist(pair[0], pair[1])).sum();
         let half = self.stroke / 2.0;
         if whole < 0.5 {
             return dist(p, path[0]) - half;
@@ -382,9 +616,9 @@ impl Shape {
         // The heads: as long as they would be, but no more than a share of
         // the line, which would be all head.
         let most = if self.heads == [true, true] { 0.45 } else { 0.7 };
-        let (head, _) = self.head();
-        let head = head.min(whole * most);
+        let head = self.head().0.min(whole * most);
         let wide = head * 0.46;
+        let lengths: Vec<f32> = path.windows(2).map(|pair| dist(pair[0], pair[1])).collect();
         let mut nearest = f32::MAX;
         for (end, on) in self.heads.iter().enumerate() {
             if !on {
@@ -398,46 +632,56 @@ impl Shape {
         }
         // The shaft stops inside a head, whose point its round end would
         // otherwise blunt.
-        let first = if self.heads[0] { head * 0.8 } else { 0.0 };
-        let last = whole - if self.heads[1] { head * 0.8 } else { 0.0 };
+        let trim = (if self.heads[0] { head * 0.8 } else { 0.0 }, if self.heads[1] { head * 0.8 } else { 0.0 });
         let dash = if plain { Dash::Solid } else { self.dash };
-        let (period, on) = match dash {
-            Dash::Solid => (0.0, 0.0),
-            Dash::Dashed => (self.stroke * 4.5 + 7.0, self.stroke * 2.5 + 4.0),
-            Dash::Dotted => (self.stroke * 2.2, 0.0),
-        };
-        let mut gone = 0.0f32;
-        for (pair, length) in path.windows(2).zip(&lengths) {
-            let (begins, ends) = (gone, gone + length);
-            gone = ends;
-            if ends <= first || begins >= last || *length <= 0.0 {
-                continue;
-            }
-            let at = |s: f32| (pair[0].0 + (pair[1].0 - pair[0].0) * s / length, pair[0].1 + (pair[1].1 - pair[0].1) * s / length);
-            let (s0, s1) = ((first - begins).max(0.0), (last - begins).min(*length));
-            let (from, to) = (at(s0), at(s1));
-            let run = (s1 - s0).max(1e-3);
-            let t = (((p.0 - from.0) * (to.0 - from.0) + (p.1 - from.1) * (to.1 - from.1)) / (run * run)).clamp(0.0, 1.0);
-            let foot = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
-            let across = dist(p, foot);
-            let far = match dash {
-                Dash::Solid => across - half,
-                _ => {
-                    // How far along the dashes it is, and how far that is
-                    // from the nearest dash or dot.
-                    let s = begins + s0 - first + t * run;
-                    let into = s.rem_euclid(period);
-                    let off = match dash {
-                        Dash::Dotted => into.min(period - into),
-                        _ => if into <= on { 0.0 } else { (into - on).min(period - into) },
-                    };
-                    across.hypot(off) - half
-                }
-            };
-            nearest = nearest.min(far);
-        }
-        nearest
+        nearest.min(run_distance(p, &path, dash, self.stroke, trim))
     }
+}
+
+/// How far a point is from a run of straight lines `stroke` wide, less
+/// `trim` at either end, in dashes or dots if so.
+fn run_distance(p: Point, path: &[Point], dash: Dash, stroke: f32, trim: (f32, f32)) -> f32 {
+    let lengths: Vec<f32> = path.windows(2).map(|pair| dist(pair[0], pair[1])).collect();
+    let whole: f32 = lengths.iter().sum();
+    let half = stroke / 2.0;
+    let (first, last) = (trim.0, whole - trim.1);
+    let (period, on) = match dash {
+        Dash::Solid => (0.0, 0.0),
+        Dash::Dashed => (stroke * 4.5 + 7.0, stroke * 2.5 + 4.0),
+        Dash::Dotted => (stroke * 2.2, 0.0),
+    };
+    let mut nearest = f32::MAX;
+    let mut gone = 0.0f32;
+    for (pair, length) in path.windows(2).zip(&lengths) {
+        let (begins, ends) = (gone, gone + length);
+        gone = ends;
+        if ends <= first || begins >= last || *length <= 0.0 {
+            continue;
+        }
+        let at = |s: f32| (pair[0].0 + (pair[1].0 - pair[0].0) * s / length, pair[0].1 + (pair[1].1 - pair[0].1) * s / length);
+        let (s0, s1) = ((first - begins).max(0.0), (last - begins).min(*length));
+        let (from, to) = (at(s0), at(s1));
+        let run = (s1 - s0).max(1e-3);
+        let t = (((p.0 - from.0) * (to.0 - from.0) + (p.1 - from.1) * (to.1 - from.1)) / (run * run)).clamp(0.0, 1.0);
+        let foot = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+        let across = dist(p, foot);
+        let far = match dash {
+            Dash::Solid => across - half,
+            _ => {
+                // How far along the dashes it is, and how far that is from
+                // the nearest dash or dot.
+                let s = begins + s0 - first + t * run;
+                let into = s.rem_euclid(period);
+                let off = match dash {
+                    Dash::Dotted => into.min(period - into),
+                    _ => if into <= on { 0.0 } else { (into - on).min(period - into) },
+                };
+                across.hypot(off) - half
+            }
+        };
+        nearest = nearest.min(far);
+    }
+    nearest
 }
 
 /// The point `s` along a run of straight lines.
@@ -456,68 +700,310 @@ fn along(path: &[Point], lengths: &[f32], s: f32) -> Point {
 /// Draws `shapes` over `pixels`, a picture `width` wide, as they look at
 /// `place`, inside `clip` (left, top, width, height). Where `alpha` is
 /// given, what is drawn becomes as opaque there as it is.
-#[allow(clippy::too_many_arguments)]
-pub fn paint(shapes: &[Shape], pixels: &mut [u32], width: usize, place: Place, clip: [i32; 4], text: &mut Text, mut alpha: Option<&mut [u8]>) {
+pub fn paint(shapes: &[Shape], pixels: &mut [u32], width: usize, place: Place, clip: [i32; 4], alpha: Option<&mut [u8]>) {
     let height = pixels.len() / width.max(1);
     let clip = [clip[0].max(0), clip[1].max(0), (clip[0] + clip[2]).min(width as i32), (clip[1] + clip[3]).min(height as i32)];
     if clip[2] <= clip[0] || clip[3] <= clip[1] {
         return;
     }
+    let mut surface = Surface { pixels, width, clip, alpha };
     // The spotlights darken the picture before anything is drawn on it:
     // the arrow pointing at what one lights is not to be darkened.
     let lit: Vec<([f32; 4], f32)> = shapes.iter().filter(|shape| shape.tool == Tool::Spotlight).map(|shape| (shape.frame(), shape.radius)).collect();
     if !lit.is_empty() {
-        spotlight(pixels, width, place, clip, &lit);
+        spotlight(surface.pixels, width, place, clip, &lit);
     }
     let mut number = 0;
     for shape in shapes {
-        let [l, t, r, b] = shape.bounds(text);
-        let (sl, st) = place.to_screen((l, t));
-        let (sr, sb) = place.to_screen((r, b));
-        let area = [(sl.floor() as i32).max(clip[0]), (st.floor() as i32).max(clip[1]), (sr.ceil() as i32 + 1).min(clip[2]), (sb.ceil() as i32 + 1).min(clip[3])];
         if shape.tool == Tool::Counter {
             number += 1;
         }
-        if area[2] <= area[0] || area[3] <= area[1] {
-            continue;
+        draw_shape(&mut surface, shape, place, number);
+    }
+}
+
+fn draw_shape(surface: &mut Surface, shape: &Shape, place: Place, number: usize) {
+    let clip = surface.clip;
+    let [l, t, r, b] = shape.bounds();
+    let (sl, st) = place.to_screen((l, t));
+    let (sr, sb) = place.to_screen((r, b));
+    let area = [(sl.floor() as i32).max(clip[0]), (st.floor() as i32).max(clip[1]), (sr.ceil() as i32 + 1).min(clip[2]), (sb.ceil() as i32 + 1).min(clip[3])];
+    if area[2] <= area[0] || area[3] <= area[1] {
+        return;
+    }
+    let scale = place.scale;
+    let width = surface.width;
+    match shape.tool {
+        Tool::Select | Tool::Crop | Tool::Spotlight | Tool::Pipette => {}
+        Tool::Blur => pixelate(surface.pixels, width, place, area, (shape.stroke * 4.0).max(8.0)),
+        Tool::Pen | Tool::Marker => {
+            let half = shape.line_width() / 2.0 * scale;
+            let points: Vec<Point> = shape.points.iter().map(|p| place.to_screen(*p)).collect();
+            let mut mask = vec![0u8; (area[2] - area[0]) as usize * (area[3] - area[1]) as usize];
+            stroke_mask(&mut mask, area, &points, half);
+            let opacity = if shape.tool == Tool::Marker { MARKER_OPACITY * shape.opacity / 256 } else { shape.opacity };
+            blend_mask(surface, area, &mask, shape.color, opacity);
         }
-        match shape.tool {
-            Tool::Select | Tool::Crop | Tool::Spotlight => {}
-            Tool::Blur => pixelate(pixels, width, place, area, (shape.stroke * 4.0).max(8.0)),
-            Tool::Pen | Tool::Marker => {
-                let half = shape.line_width() / 2.0 * place.scale;
-                let points: Vec<Point> = shape.points.iter().map(|p| place.to_screen(*p)).collect();
-                let mut mask = vec![0u8; (area[2] - area[0]) as usize * (area[3] - area[1]) as usize];
-                stroke_mask(&mut mask, area, &points, half);
-                let opacity = if shape.tool == Tool::Marker { MARKER_OPACITY * shape.opacity / 256 } else { shape.opacity };
-                blend_mask(pixels, width, area, &mask, shape.color, opacity, alpha.as_deref_mut());
+        Tool::Text => draw_words(surface, shape, place),
+        Tool::Badge => draw_badge(surface, shape, place),
+        Tool::Emoji => {
+            let side = (shape.stroke * scale).round().max(1.0) as u32;
+            let (x, y) = place.to_screen(shape.points[0]);
+            if let Some(picture) = emoji(&shape.text, side) {
+                stamp(surface.pixels, width, clip, &picture, (x.round() as i32, y.round() as i32), shape.opacity, surface.alpha.as_deref_mut());
             }
-            Tool::Text => {
-                let px = (shape.stroke * place.scale).round().max(1.0) as u32;
-                let (x, y) = place.to_screen(shape.points[0]);
-                draw_words(pixels, width, clip, text, x.round() as i32, y.round() as i32, px, shape.color, &shape.text, alpha.as_deref_mut());
+        }
+        Tool::Zoom => draw_zoom(surface, shape, place),
+        _ => {
+            let distance = |sx: f32, sy: f32| shape.distance(place.to_picture((sx, sy)), false) * scale;
+            let mask = coverage(area, distance);
+            blend_mask(surface, area, &mask, shape.color, shape.opacity);
+            if shape.tool == Tool::Counter {
+                let (cx, cy) = place.to_screen(shape.points[0]);
+                let px = shape.counter_radius() * 1.15 * scale;
+                let words = number.to_string();
+                let w = lettering::width(Look::default(), &words, px);
+                surface.words((cx - w / 2.0, cy - lettering::line_height(px) / 2.0), px, ink_on(shape.color), shape.opacity, Look::default(), &words);
             }
-            Tool::Emoji => {
-                let side = (shape.stroke * place.scale).round().max(1.0) as u32;
-                let (x, y) = place.to_screen(shape.points[0]);
-                if let Some(picture) = emoji(&shape.text, side) {
-                    stamp(pixels, width, clip, &picture, (x.round() as i32, y.round() as i32), shape.opacity, alpha.as_deref_mut());
+        }
+    }
+}
+
+/// Words, a line at a time: gone over with a marker, or on a patch of
+/// their color, and after a dot each, if they are to be.
+fn draw_words(surface: &mut Surface, shape: &Shape, place: Place) {
+    let px = shape.stroke * place.scale;
+    let (x, y) = place.to_screen(shape.points[0]);
+    let line = lettering::line_height(px);
+    let look = shape.lettering();
+    let mut ink = shape.color;
+    if shape.style & BOXED != 0 && !shape.text.is_empty() {
+        let [l, t, r, b] = shape.bounds();
+        let ((sl, st), (sr, sb)) = (place.to_screen((l, t)), place.to_screen((r, b)));
+        surface.patch([sl, st, sr, sb], line / 4.0, 0.0, shape.opacity, |_, _| shape.color);
+        ink = ink_on(shape.color);
+    }
+    for (index, words) in shape.text.split('\n').enumerate() {
+        let shown = format!("{}{words}", shape.lead());
+        let top = y + index as f32 * line;
+        if shape.style & HIGHLIGHT != 0 && !words.is_empty() {
+            let wide = lettering::width(look, &shown, px);
+            let (color, amount) = HIGHLIGHT_COLOR;
+            surface.patch([x - line / 8.0, top + line / 10.0, x + wide + line / 8.0, top + line * 0.9], line / 8.0, 0.0, amount * shape.opacity / 256, |_, _| color);
+        }
+        surface.words((x, top), px, ink, shape.opacity, look, &shown);
+    }
+}
+
+/// How many looks a badge has, and what each is called: hotshot's.
+pub const BADGE_NAMES: [&str; 12] = ["Soft", "Solid", "Outline", "Pill", "Dark", "Label", "Gloss", "Blend", "Glow", "Tag", "Marker", "Sticker"];
+
+/// A color turned so many degrees round the wheel, as light and strong.
+fn turned(color: u32, degrees: f32) -> u32 {
+    let [r, g, b] = [16, 8, 0].map(|shift| (color >> shift & 0xFF) as f32 / 255.0);
+    let (most, least) = (r.max(g).max(b), r.min(g).min(b));
+    let (light, spread) = ((most + least) / 2.0, most - least);
+    if spread < 1e-4 {
+        return color;
+    }
+    let strength = spread / (1.0 - (2.0 * light - 1.0).abs()).max(1e-4);
+    let hue = if most == r { ((g - b) / spread).rem_euclid(6.0) } else if most == g { (b - r) / spread + 2.0 } else { (r - g) / spread + 4.0 };
+    let hue = (hue * 60.0 + degrees).rem_euclid(360.0);
+    let part = |turn: f32| {
+        let at = (turn + hue / 30.0).rem_euclid(12.0);
+        let value = light - strength * light.min(1.0 - light) * (at - 3.0).min(9.0 - at).clamp(-1.0, 1.0);
+        (value.clamp(0.0, 1.0) * 255.0).round() as u32
+    };
+    part(0.0) << 16 | part(8.0) << 8 | part(4.0)
+}
+
+/// A badge: words on a patch in one of twelve looks, each made of the one
+/// color it is given. hotshot's.
+fn draw_badge(surface: &mut Surface, shape: &Shape, place: Place) {
+    let [l, t, r, b] = shape.bounds();
+    let ((l, t), (r, b)) = (place.to_screen((l, t)), place.to_screen((r, b)));
+    let (high, size) = (b - t, shape.stroke * place.scale);
+    let solid = shape.color;
+    let soft = mix(solid, 0xFFFFFF, 216);
+    let deep = mix(solid, 0x000000, 70);
+    let amount = shape.opacity;
+    let rect = [l, t, r, b];
+    let shaded = |solid: u32| move |_: f32, down: f32| mix(mix(solid, 0xFFFFFF, 26), mix(solid, 0x000000, 20), (down * 256.0) as u32);
+    let dot = |surface: &mut Surface| surface.disc((l + size * 0.625, t + high / 2.0), (size / 5.0).max(2.0), solid, amount);
+    let ink = match shape.look {
+        // Soft: the pale under the dark, with a dot and a faint edge.
+        0 => {
+            surface.patch(rect, high / 3.0, 0.0, amount, |_, _| mix(soft, solid, 70));
+            surface.patch([l + 1.0, t + 1.0, r - 1.0, b - 1.0], high / 3.0 - 1.0, 0.0, amount, |_, _| soft);
+            dot(surface);
+            deep
+        }
+        1 => {
+            surface.patch(rect, high / 3.0, 0.0, amount, shaded(solid));
+            ink_on(solid)
+        }
+        // Outlined: nothing under the words but what was there.
+        2 => {
+            surface.outline(rect, high / 3.0, (size / 8.0).max(2.0), solid, amount);
+            solid
+        }
+        // A pill: ends as round as it is tall.
+        3 => {
+            surface.patch(rect, high / 2.0, 0.0, amount, shaded(solid));
+            ink_on(solid)
+        }
+        // Dark: near black, with a dot of the color.
+        4 => {
+            surface.patch(rect, high / 3.0, 0.0, amount, |_, _| 0x161616);
+            dot(surface);
+            0xEEEEEE
+        }
+        // Gloss: lighter at the top, with a pale line along its top edge.
+        6 => {
+            let (top, bottom) = (mix(solid, 0xFFFFFF, 60), mix(solid, 0x000000, 50));
+            surface.patch(rect, high / 3.0, 0.0, amount, |_, _| mix(solid, 0x000000, 90));
+            surface.patch([l + 1.0, t + 1.0, r - 1.0, b - 1.0], high / 3.0 - 1.0, 0.0, amount, |_, down| mix(top, bottom, (down * 256.0) as u32));
+            surface.patch([l + high / 3.0, t + 1.0, r - high / 3.0, t + 2.0], 0.0, 0.0, 90 * amount / 256, |_, _| 0xFFFFFF);
+            ink_on(solid)
+        }
+        // Blend: from the color to one a little round the wheel from it.
+        7 => {
+            let far = turned(solid, 50.0);
+            surface.patch(rect, high / 2.0, 0.0, amount, |across, down| mix(solid, far, ((across * 0.85 + down * 0.15) * 256.0) as u32));
+            ink_on(solid)
+        }
+        // Glow: the color, with light of the same color round it.
+        8 => {
+            let grow = size / 6.0;
+            surface.patch([l - grow, t + size / 6.0 - grow, r + grow, b + size / 6.0 + grow], high / 2.0 + grow, size * 0.6, 150 * amount / 256, |_, _| solid);
+            surface.patch(rect, high / 2.0, 0.0, amount, |_, down| mix(mix(solid, 0xFFFFFF, 36), solid, (down * 256.0) as u32));
+            ink_on(solid)
+        }
+        // A tag: pointed at its left end, with a hole to hang it by.
+        9 => {
+            let (point, middle) = (high / 2.0, t + high / 2.0);
+            surface.patch([l + point, t, r, b], high / 5.0, 0.0, amount, |_, _| solid);
+            let reach = l + point + high / 5.0 + 1.0;
+            for y in t.floor() as i32..b.ceil() as i32 {
+                for x in l.floor() as i32..reach.ceil() as i32 {
+                    let away = triangle((x as f32 + 0.5, y as f32 + 0.5), (l, middle), (reach, t), (reach, b));
+                    surface.blend(x, y, solid, ((0.5 - away).clamp(0.0, 1.0) * amount as f32) as u32);
                 }
             }
-            _ => {
-                let scale = place.scale;
-                let distance = |sx: f32, sy: f32| shape.distance(place.to_picture((sx, sy)), false) * scale;
-                let mask = coverage(area, distance);
-                blend_mask(pixels, width, area, &mask, shape.color, shape.opacity, alpha.as_deref_mut());
-                if shape.tool == Tool::Counter {
-                    let (cx, cy) = place.to_screen(shape.points[0]);
-                    let px = (shape.counter_radius() * 1.15 * scale).round().max(1.0) as u32;
-                    let words = number.to_string();
-                    let w = text.width(&words, px);
-                    let (x, y) = (cx.round() as i32 - w / 2, cy.round() as i32 - Text::line_height(px) / 2);
-                    draw_words(pixels, width, clip, text, x, y, px, ink_on(shape.color), &words, None);
-                }
+            surface.disc((l + point + size / 6.0, middle), (size / 6.0).max(2.0), ink_on(solid), amount);
+            ink_on(solid)
+        }
+        // Marker: gone over with a wide pen, the words as dark as what a
+        // marker is used on.
+        10 => {
+            surface.patch([l, t + high / 5.0, r, b - high / 5.0], high / 6.0, 0.0, amount, |across, _| mix(mix(solid, 0xFFFFFF, 110), mix(solid, 0xFFFFFF, 60), (across * 256.0) as u32));
+            mix(solid, 0x000000, 190)
+        }
+        // A sticker: white all round it, and a shadow under that.
+        11 => {
+            let edge = (size / 6.0).max(2.0);
+            surface.patch([l - edge, t, r + edge, b + edge * 2.0], high / 3.0 + edge, size * 0.5, 110 * amount / 256, |_, _| 0x000000);
+            surface.patch([l - edge, t - edge, r + edge, b + edge], high / 3.0 + edge, 0.0, amount, |_, _| 0xFFFFFF);
+            surface.patch(rect, high / 3.0, 0.0, amount, |_, down| mix(mix(solid, 0xFFFFFF, 30), mix(solid, 0x000000, 24), (down * 256.0) as u32));
+            ink_on(solid)
+        }
+        // A label: white, with a bar of the color down its left side.
+        _ => {
+            surface.patch(rect, high / 5.0, 0.0, amount, |_, _| solid);
+            surface.patch([l + size * 0.4, t, r, b], high / 5.0, 0.0, amount, |_, _| 0xFFFFFF);
+            surface.patch([l + size * 0.4, t, l + size * 0.4 + high / 5.0 + 1.0, b], 0.0, 0.0, amount, |_, _| 0xFFFFFF);
+            0x161616
+        }
+    };
+    let at = (l + shape.badge_lead() * place.scale, t + (high - lettering::line_height(size)) / 2.0);
+    surface.words(at, size, ink, shape.opacity, shape.lettering(), &shape.text);
+}
+
+/// A zoom: what it is of, ringed; lines from that to the larger view of
+/// it; and the larger view, ringed, over them. Round, as a lens is,
+/// unless it is wanted square.
+fn draw_zoom(surface: &mut Surface, shape: &Shape, place: Place) {
+    let screen = |[l, t, r, b]: [f32; 4]| {
+        let ((l, t), (r, b)) = (place.to_screen((l, t)), place.to_screen((r, b)));
+        [l, t, r, b]
+    };
+    let (of, shown) = (screen(shape.frame()), screen(shape.zoomed()));
+    let thick = (shape.stroke * place.scale).max(1.0);
+    let round = !shape.filled;
+    let color = shape.color;
+    // Lines from what it is of to the view: corner to corner, or the two
+    // that touch both rings on either side.
+    let middle = |[l, t, r, b]: [f32; 4]| ((l + r) / 2.0, (t + b) / 2.0);
+    let lines: Vec<(Point, Point)> = if round {
+        let (from, to) = (middle(of), middle(shown));
+        let far = dist(from, to).max(1.0);
+        let (nx, ny) = (-(to.1 - from.1) / far, (to.0 - from.0) / far);
+        let edge = |rect: [f32; 4], side: f32| {
+            let (cx, cy) = middle(rect);
+            (cx + nx * side * (rect[2] - rect[0]) / 2.0, cy + ny * side * (rect[3] - rect[1]) / 2.0)
+        };
+        vec![(edge(of, 1.0), edge(shown, 1.0)), (edge(of, -1.0), edge(shown, -1.0))]
+    } else {
+        let corners = |[l, t, r, b]: [f32; 4]| [(l, t), (r, t), (l, b), (r, b)];
+        corners(of).into_iter().zip(corners(shown)).collect()
+    };
+    for (from, to) in lines {
+        let area = [from.0.min(to.0).floor() as i32 - 2, from.1.min(to.1).floor() as i32 - 2, from.0.max(to.0).ceil() as i32 + 2, from.1.max(to.1).ceil() as i32 + 2];
+        let area = [area[0].max(surface.clip[0]), area[1].max(surface.clip[1]), area[2].min(surface.clip[2]), area[3].min(surface.clip[3])];
+        if area[2] > area[0] && area[3] > area[1] {
+            let mask = coverage(area, |x, y| segment((x, y), from, to) - thick / 4.0 - 0.5);
+            blend_mask(surface, area, &mask, color, shape.opacity);
+        }
+    }
+    magnify(surface, of, shown, round);
+    for rect in [of, shown] {
+        let grown = [rect[0] - thick / 2.0, rect[1] - thick / 2.0, rect[2] + thick / 2.0, rect[3] + thick / 2.0];
+        if round {
+            let (cx, cy) = middle(rect);
+            let (hw, hh) = ((rect[2] - rect[0]) / 2.0, (rect[3] - rect[1]) / 2.0);
+            let area = [(grown[0].floor() as i32 - 1).max(surface.clip[0]), (grown[1].floor() as i32 - 1).max(surface.clip[1]), (grown[2].ceil() as i32 + 1).min(surface.clip[2]), (grown[3].ceil() as i32 + 1).min(surface.clip[3])];
+            if area[2] > area[0] && area[3] > area[1] {
+                let mask = coverage(area, |x, y| ellipse(x - cx, y - cy, hw, hh).abs() - thick / 2.0);
+                blend_mask(surface, area, &mask, color, shape.opacity);
             }
+        } else {
+            surface.outline(grown, thick + 3.0, thick, color, shape.opacity);
+        }
+    }
+}
+
+/// What is in one rectangle drawn again in another, each pixel a blend of
+/// the four it falls among; with `round`, only inside an oval set in it.
+fn magnify(surface: &mut Surface, from: [f32; 4], into: [f32; 4], round: bool) {
+    let clip = surface.clip;
+    let width = surface.width;
+    // Taken first: where the two overlap, it is the picture as it was
+    // that is wanted, not as it is being made.
+    let source = [(from[0].floor() as i32).max(clip[0]), (from[1].floor() as i32).max(clip[1]), (from[2].ceil() as i32).min(clip[2]), (from[3].ceil() as i32).min(clip[3])];
+    if source[2] <= source[0] || source[3] <= source[1] || into[2] <= into[0] || into[3] <= into[1] {
+        return;
+    }
+    let (sw, sh) = ((source[2] - source[0]) as usize, (source[3] - source[1]) as usize);
+    let taken: Vec<u32> = (0..sh).flat_map(|row| {
+        let start = (source[1] as usize + row) * width + source[0] as usize;
+        surface.pixels[start..start + sw].to_vec()
+    }).collect();
+    let at = |x: i32, y: i32| taken[(y.clamp(0, sh as i32 - 1) as usize) * sw + x.clamp(0, sw as i32 - 1) as usize];
+    let (iw, ih) = (into[2] - into[0], into[3] - into[1]);
+    let (fw, fh) = (from[2] - from[0], from[3] - from[1]);
+    for y in (into[1].floor() as i32).max(clip[1])..(into[3].ceil() as i32).min(clip[3]) {
+        for x in (into[0].floor() as i32).max(clip[0])..(into[2].ceil() as i32).min(clip[2]) {
+            let (dx, dy) = (x as f32 + 0.5 - into[0], y as f32 + 0.5 - into[1]);
+            let cover = if round { (0.5 - ellipse(dx - iw / 2.0, dy - ih / 2.0, iw / 2.0, ih / 2.0)).clamp(0.0, 1.0) } else { 1.0 };
+            if cover <= 0.0 {
+                continue;
+            }
+            let (sx, sy) = (from[0] + dx * fw / iw - source[0] as f32 - 0.5, from[1] + dy * fh / ih - source[1] as f32 - 0.5);
+            let (ax, ay) = (sx.floor() as i32, sy.floor() as i32);
+            let (fx, fy) = (((sx - ax as f32) * 256.0) as u32, ((sy - ay as f32) * 256.0) as u32);
+            let upper = mix(at(ax, ay), at(ax + 1, ay), fx);
+            let lower = mix(at(ax, ay + 1), at(ax + 1, ay + 1), fx);
+            surface.blend(x, y, mix(upper, lower, fy), (cover * 256.0) as u32);
         }
     }
 }
@@ -529,8 +1015,7 @@ pub fn render(image: &RgbaImage, shapes: &[Shape], crop: Option<[f32; 4]>, radiu
     let (w, h) = (image.width() as usize, image.height() as usize);
     let mut pixels: Vec<u32> = image.pixels().map(|p| u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2])).collect();
     let mut alpha: Vec<u8> = image.pixels().map(|p| p[3]).collect();
-    let mut text = Text::load();
-    paint(shapes, &mut pixels, w, Place::WHOLE, [0, 0, w as i32, h as i32], &mut text, Some(&mut alpha));
+    paint(shapes, &mut pixels, w, Place::WHOLE, [0, 0, w as i32, h as i32], Some(&mut alpha));
     let [l, t, r, b] = crop.map_or([0, 0, w, h], |[l, t, r, b]| {
         let edge = |v: f32, most: usize| (v.round().max(0.0) as usize).min(most);
         [edge(l, w), edge(t, h), edge(r, w), edge(b, h)]
@@ -652,30 +1137,8 @@ pub fn stamp(pixels: &mut [u32], width: usize, clip: [i32; 4], picture: &(i32, i
     }
 }
 
-/// Words drawn into a bare picture through a canvas over it, and made
-/// opaque where they are drawn.
-#[allow(clippy::too_many_arguments)]
-fn draw_words(pixels: &mut [u32], width: usize, clip: [i32; 4], text: &mut Text, x: i32, y: i32, px: u32, color: u32, words: &str, alpha: Option<&mut [u8]>) {
-    let height = pixels.len() / width.max(1);
-    // Only what is inside the clip is handed over: a canvas of those rows,
-    // the letters moved up by as many.
-    let (top, bottom) = (clip[1].max(0) as usize, (clip[3] as usize).min(height));
-    let rows = &mut pixels[top * width..bottom * width];
-    let mut canvas = Canvas::new(rows, width as u32, (bottom - top) as u32);
-    text.draw(&mut canvas, x, y - top as i32, px, color, words);
-    if let Some(alpha) = alpha {
-        let line = Text::line_height(px);
-        let w = text.width(words, px);
-        for row in y.max(clip[1])..(y + line).min(clip[3]) {
-            for column in x.max(clip[0])..(x + w).min(clip[2]) {
-                alpha[row as usize * width + column as usize] = 255;
-            }
-        }
-    }
-}
-
-/// How much of each pixel of `area` a shape covers, from how far each
-/// pixel's middle is from its edge, in pixels.
+/// How much of each pixel of `area` (left, top, right, bottom) a shape
+/// covers, from how far each pixel's middle is from its edge, in pixels.
 fn coverage(area: [i32; 4], distance: impl Fn(f32, f32) -> f32 + Sync) -> Vec<u8> {
     let w = (area[2] - area[0]) as usize;
     let mut mask = vec![0u8; w * (area[3] - area[1]) as usize];
@@ -714,19 +1177,17 @@ fn stroke_mask(mask: &mut [u8], area: [i32; 4], points: &[Point], half: f32) {
     }
 }
 
-fn blend_mask(pixels: &mut [u32], width: usize, area: [i32; 4], mask: &[u8], color: u32, opacity: u32, alpha: Option<&mut [u8]>) {
+fn blend_mask(surface: &mut Surface, area: [i32; 4], mask: &[u8], color: u32, opacity: u32) {
     let w = (area[2] - area[0]) as usize;
+    let width = surface.width;
     for (row, line) in mask.chunks_exact(w.max(1)).enumerate() {
         let start = (area[1] as usize + row) * width + area[0] as usize;
-        for (pixel, cover) in pixels[start..start + w].iter_mut().zip(line) {
+        for (pixel, cover) in surface.pixels[start..start + w].iter_mut().zip(line) {
             if *cover > 0 {
                 *pixel = mix(*pixel, color, (u32::from(*cover) + 1) * opacity / 256);
             }
         }
-    }
-    if let Some(alpha) = alpha {
-        for (row, line) in mask.chunks_exact(w.max(1)).enumerate() {
-            let start = (area[1] as usize + row) * width + area[0] as usize;
+        if let Some(alpha) = surface.alpha.as_deref_mut() {
             for (a, cover) in alpha[start..start + w].iter_mut().zip(line) {
                 *a = (*a).max(((u32::from(*cover) * opacity) >> 8).min(255) as u8);
             }
@@ -849,8 +1310,7 @@ mod tests {
 
     fn painted(shapes: &[Shape], w: usize, h: usize, place: Place) -> Vec<u32> {
         let mut pixels = vec![0u32; w * h];
-        let mut text = Text::load();
-        paint(shapes, &mut pixels, w, place, [0, 0, w as i32, h as i32], &mut text, None);
+        paint(shapes, &mut pixels, w, place, [0, 0, w as i32, h as i32], None);
         pixels
     }
 
@@ -869,6 +1329,17 @@ mod tests {
         let mut shape = rect((10.0, 10.0), (50.0, 30.0));
         shape.filled = true;
         assert_eq!(painted(&[shape], w, 40, Place::WHOLE)[20 * w + 30], 0xFF0000);
+    }
+
+    #[test]
+    fn a_dashed_outline_has_gaps_along_its_edge() {
+        let w = 220;
+        let mut shape = rect((10.0, 10.0), (210.0, 60.0));
+        let solid = painted(&[shape.clone()], w, 70, Place::WHOLE);
+        assert!((20..200).all(|x| solid[10 * w + x] == 0xFF0000));
+        shape.dash = Dash::Dashed;
+        let dashed = painted(&[shape], w, 70, Place::WHOLE);
+        assert!((20..200).filter(|x| dashed[10 * w + x] == 0).count() > 30);
     }
 
     #[test]
@@ -910,13 +1381,50 @@ mod tests {
     }
 
     #[test]
+    fn a_counter_dragged_out_has_a_tail_to_where_it_points() {
+        let w = 120;
+        let mut counter = Shape::new(Tool::Counter, 0xFF0000, 4.0, (20.0, 30.0));
+        assert_eq!(painted(&[counter.clone()], w, 60, Place::WHOLE)[30 * w + 60], 0);
+        counter.points.push((100.0, 30.0));
+        assert_eq!(painted(&[counter], w, 60, Place::WHOLE)[30 * w + 60], 0xFF0000);
+    }
+
+    #[test]
+    fn a_zoom_shows_what_it_is_of_larger() {
+        let w = 200;
+        let mut pixels = vec![0u32; w * 100];
+        // A white square at 10..20, zoomed into 100..140.
+        for y in 10..20 {
+            pixels[y * w + 10..y * w + 20].fill(0xFFFFFF);
+        }
+        let mut zoom = Shape::new(Tool::Zoom, 0xFF0000, 1.0, (5.0, 5.0));
+        zoom.points[1] = (25.0, 25.0);
+        zoom.filled = true;
+        zoom.points.extend([(100.0, 20.0), (180.0, 100.0)]);
+        paint(&[zoom], &mut pixels, w, Place::WHOLE, [0, 0, w as i32, 100], None);
+        assert_eq!(pixels[60 * w + 140], 0xFFFFFF);
+        assert_eq!(pixels[30 * w + 110], 0);
+    }
+
+    #[test]
+    fn a_badge_draws_its_patch_and_words() {
+        let w = 200;
+        let mut badge = Shape::new(Tool::Badge, 0x0A84FF, 20.0, (10.0, 10.0));
+        badge.text = "Label".to_string();
+        for look in 0..BADGE_NAMES.len() {
+            badge.look = look;
+            let pixels = painted(&[badge.clone()], w, 60, Place::WHOLE);
+            assert!(pixels.iter().filter(|p| **p != 0).count() > 100, "{}", BADGE_NAMES[look]);
+        }
+    }
+
+    #[test]
     fn a_bent_line_passes_through_its_bend() {
         let mut line = Shape::new(Tool::Line, 0, 4.0, (0.0, 0.0));
         line.points[1] = (100.0, 0.0);
         line.bend_to((50.0, 30.0), 4.0);
-        let mut text = Text::load();
-        assert!(line.hit((50.0, 30.0), 1.0, &mut text));
-        assert!(!line.hit((50.0, 0.0), 1.0, &mut text));
+        assert!(line.hit((50.0, 30.0), 1.0));
+        assert!(!line.hit((50.0, 0.0), 1.0));
         // Near the straight line, it straightens.
         line.bend_to((50.0, 2.0), 4.0);
         assert_eq!(line.bend, None);
@@ -933,6 +1441,14 @@ mod tests {
     }
 
     #[test]
+    fn words_on_several_lines_are_as_tall_as_their_lines() {
+        let mut words = Shape::new(Tool::Text, 0, 20.0, (0.0, 0.0));
+        words.text = "one\ntwo".to_string();
+        let [_, t, _, b] = words.bounds();
+        assert_eq!(b - t, lettering::line_height(20.0) * 2.0);
+    }
+
+    #[test]
     fn rendered_it_is_cropped_and_its_corners_turn_clear() {
         let image = RgbaImage::from_pixel(100, 80, image::Rgba([10, 20, 30, 255]));
         let out = render(&image, &[], Some([10.0, 10.0, 90.0, 70.0]), 20.0);
@@ -944,11 +1460,10 @@ mod tests {
 
     #[test]
     fn a_click_finds_the_line_and_not_the_space_beside_it() {
-        let mut text = Text::load();
         let mut line = Shape::new(Tool::Line, 0, 4.0, (0.0, 0.0));
         line.points[1] = (100.0, 0.0);
-        assert!(line.hit((50.0, 3.0), 2.0, &mut text));
-        assert!(!line.hit((50.0, 20.0), 2.0, &mut text));
+        assert!(line.hit((50.0, 3.0), 2.0));
+        assert!(!line.hit((50.0, 20.0), 2.0));
     }
 
     #[test]

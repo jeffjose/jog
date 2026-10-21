@@ -1,14 +1,15 @@
 //! Edit: the picture on view drawn on, cropped and its corners rounded,
 //! then saved over itself or as a copy beside it. The marks stay
-//! editable until it is saved: picked out with the arrow, moved, sized
-//! by their handles, restyled from the panel. Saving is done on another
-//! thread, from the file decoded again at full size.
+//! editable until it is saved: picked out with the arrow, one or several,
+//! moved, sized by their handles, restyled from the panel. Saving is done
+//! on another thread, from the file decoded again at full size.
 
 use image::DynamicImage;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::CursorIcon;
 
-use crate::annotate::{self, Dash, Place, Point, Shape, Tool, COLORS, OPACITIES};
+use crate::annotate::{self, Dash, Place, Point, Shape, Tool, BADGE_NAMES, BOLD, BOXED, BULLETS, COLORS, HIGHLIGHT, ITALIC, OPACITIES};
+use crate::lettering::{self, Look, FACES};
 
 use super::*;
 
@@ -30,16 +31,20 @@ pub enum SaveAs {
     Copy,
 }
 
-/// How the next mark is drawn; the panel sets it along with the mark
+/// How the next mark is drawn; the panel sets it along with the marks
 /// picked out, as hotshot does.
 #[derive(Clone, Copy, Debug)]
 struct Style {
-    color: usize,
+    color: u32,
     size: usize,
     opacity: usize,
     filled: bool,
     heads: [bool; 2],
     dash: Dash,
+    face: usize,
+    text: u8,
+    badge: usize,
+    square: bool,
 }
 
 pub struct Editor {
@@ -52,16 +57,23 @@ pub struct Editor {
     past: Vec<Doc>,
     future: Vec<Doc>,
     tool: Tool,
+    /// The tool to go back to once a color is picked.
+    before_pipette: Tool,
     style: Style,
-    selected: Option<usize>,
+    selected: Vec<usize>,
     /// The mark under the pointer, with the arrow in hand.
     hovered: Option<usize>,
-    /// The words being typed into, by the shape's place.
+    /// The words being typed into, by the shape's place; and whether what
+    /// is there is to go at the first key, as a new badge's "Label" does.
     typing: Option<usize>,
+    replace: bool,
     /// The crop being dragged out, before Enter takes it.
     crop_draft: Option<[f32; 4]>,
     drag: Option<EditDrag>,
     picker: Option<Picker>,
+    /// The lines what is being moved has come to rest against: across at
+    /// these places, and down at these.
+    guides: (Vec<f32>, Vec<f32>),
     /// Escape with something unsaved: the bar that asks what to do.
     leaving: bool,
     /// As last drawn: where the picture is, the part of it on show, and
@@ -87,11 +99,13 @@ struct Picker {
 #[derive(Clone, Debug)]
 enum EditDrag {
     Draw,
-    Move { last: Point, before: Doc, moved: bool, was_selected: bool },
+    Move { from: Point, before: Doc, moved: bool, was_selected: bool },
+    Marquee { from: Point, to: Point, adding: bool },
     Grip { grip: (i8, i8), frame: [f32; 4], from: Point, before: Doc },
     End { end: usize, before: Doc, moved: bool },
     Bend { before: Doc, moved: bool },
     Round { corner: (i8, i8), before: Doc },
+    Zoom { rim: bool, before: Doc },
     Crop { from: Point },
     Slider(Slider),
 }
@@ -112,6 +126,8 @@ enum Handle {
     End(usize),
     Bend,
     Round(i8, i8),
+    ZoomMove,
+    ZoomRim,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -120,12 +136,17 @@ enum EditHit {
     Undo,
     Redo,
     Reset,
-    Color(usize),
+    Color(u32),
+    Pipette,
     Opacity(usize),
     Size(usize),
     Filled(bool),
     Heads([bool; 2]),
     Dash(Dash),
+    Face(usize),
+    Toggle(u8),
+    BadgeLook(usize),
+    Square(bool),
     Slider(Slider),
     ResetCrop,
     Save(SaveAs),
@@ -148,6 +169,9 @@ const BACKUPS_KEPT: Duration = Duration::from_secs(7 * 24 * 3600);
 /// The emoji picker: how many across, and how many rows show.
 const EMOJI_ACROSS: usize = 10;
 const EMOJI_DOWN: usize = 7;
+/// How near, on screen, what is moved comes to an edge before it rests
+/// against it.
+const SNAP: f32 = 6.0;
 
 impl Editor {
     fn new(id: usize, native: (u32, u32)) -> Editor {
@@ -159,13 +183,16 @@ impl Editor {
             past: Vec::new(),
             future: Vec::new(),
             tool: Tool::Rect,
-            style: Style { color: 0, size: 1, opacity: 3, filled: false, heads: [false, true], dash: Dash::Solid },
-            selected: None,
+            before_pipette: Tool::Select,
+            style: Style { color: COLORS[0], size: 1, opacity: 3, filled: false, heads: [false, true], dash: Dash::Solid, face: 0, text: 0, badge: 0, square: false },
+            selected: Vec::new(),
             hovered: None,
             typing: None,
+            replace: false,
             crop_draft: None,
             drag: None,
             picker: None,
+            guides: (Vec::new(), Vec::new()),
             leaving: false,
             place: Place::WHOLE,
             stage: [0; 4],
@@ -191,7 +218,7 @@ impl Editor {
         self.finish_typing();
         if let Some(doc) = self.past.pop() {
             self.future.push(std::mem::replace(&mut self.doc, doc));
-            self.selected = None;
+            self.selected.clear();
         }
     }
 
@@ -199,7 +226,7 @@ impl Editor {
         self.finish_typing();
         if let Some(doc) = self.future.pop() {
             self.past.push(std::mem::replace(&mut self.doc, doc));
-            self.selected = None;
+            self.selected.clear();
         }
     }
 
@@ -209,48 +236,74 @@ impl Editor {
         if self.dirty() {
             self.snap();
             self.doc = self.opened.clone();
-            self.selected = None;
+            self.selected.clear();
             self.crop_draft = None;
         }
     }
 
     fn stroke(&self, tool: Tool, size: usize) -> f32 {
         match tool {
-            Tool::Text => annotate::text_sizes(self.native)[size],
+            Tool::Text | Tool::Badge => annotate::text_sizes(self.native)[size],
             Tool::Emoji => annotate::text_sizes(self.native)[size] * 2.0,
             _ => annotate::widths(self.native)[size],
         }
     }
 
-    /// The mark the panel speaks of: the one picked out or being typed.
+    /// The one mark picked out, if it is one.
+    fn one(&self) -> Option<usize> {
+        match self.selected.as_slice() {
+            [one] if *one < self.doc.shapes.len() => Some(*one),
+            _ => None,
+        }
+    }
+
+    /// The mark the panel speaks of: the one being typed, or the first of
+    /// those picked out.
     fn subject(&self) -> Option<usize> {
-        self.typing.or(self.selected).filter(|at| *at < self.doc.shapes.len())
+        self.typing.or(self.selected.first().copied()).filter(|at| *at < self.doc.shapes.len())
+    }
+
+    /// The marks a change goes to: those picked out, or being typed.
+    fn targets(&self) -> Vec<usize> {
+        let mut targets = self.selected.clone();
+        targets.extend(self.typing);
+        targets.retain(|at| *at < self.doc.shapes.len());
+        targets
     }
 
     /// A new mark of `tool` at `at`, drawn as the panel says.
     fn fresh(&self, tool: Tool, at: Point) -> Shape {
-        let mut shape = Shape::new(tool, COLORS[self.style.color], self.stroke(tool, self.style.size), at);
+        let mut shape = Shape::new(tool, self.style.color, self.stroke(tool, self.style.size), at);
         shape.opacity = OPACITIES[self.style.opacity];
-        if matches!(tool, Tool::Rect | Tool::Oval) {
-            shape.filled = self.style.filled;
+        match tool {
+            Tool::Rect | Tool::Oval => {
+                shape.filled = self.style.filled;
+                shape.dash = self.style.dash;
+            }
+            Tool::Arrow => {
+                shape.heads = self.style.heads;
+                shape.dash = self.style.dash;
+            }
+            Tool::Line => shape.dash = self.style.dash,
+            Tool::Zoom => shape.filled = self.style.square,
+            _ => {}
         }
-        if tool == Tool::Arrow {
-            shape.heads = self.style.heads;
-        }
-        if tool.is_line() {
-            shape.dash = self.style.dash;
-        }
+        shape.face = self.style.face;
+        shape.style = self.style.text;
+        shape.look = self.style.badge;
         shape
     }
 
-    /// Changes the mark picked out, kept for Undo if it changed.
+    /// Changes the marks picked out, kept for Undo if they changed.
     fn restyle(&mut self, change: impl Fn(&mut Shape)) {
-        let Some(at) = self.subject() else { return };
-        let mut shape = self.doc.shapes[at].clone();
-        change(&mut shape);
-        if shape != self.doc.shapes[at] {
+        let targets = self.targets();
+        let mut shapes = self.doc.shapes.clone();
+        for at in &targets {
+            change(&mut shapes[*at]);
+        }
+        if shapes != self.doc.shapes {
             self.snap();
-            self.doc.shapes[at] = shape;
+            self.doc.shapes = shapes;
         }
     }
 
@@ -285,8 +338,13 @@ impl Editor {
         if tool == Tool::Crop {
             self.crop_draft = self.doc.crop;
         }
-        if tool != Tool::Select {
-            self.selected = None;
+        // The pipette keeps what it would color.
+        if tool == Tool::Pipette {
+            if self.tool != Tool::Pipette {
+                self.before_pipette = self.tool;
+            }
+        } else if tool != Tool::Select {
+            self.selected.clear();
         }
         self.picker = (tool == Tool::Emoji).then(Picker::default);
         self.tool = tool;
@@ -294,7 +352,7 @@ impl Editor {
 
     /// A mark just made: picked out, with the arrow in hand to adjust it.
     fn made(&mut self, at: usize) {
-        self.selected = Some(at);
+        self.selected = vec![at];
         self.tool = Tool::Select;
         self.picker = None;
     }
@@ -302,14 +360,15 @@ impl Editor {
     /// Words typed and done with: left, and picked out, if there are any;
     /// gone if not.
     fn finish_typing(&mut self) {
+        self.replace = false;
         let Some(at) = self.typing.take() else { return };
         if self.doc.shapes.get(at).is_some_and(|shape| shape.text.trim().is_empty()) {
             self.doc.shapes.remove(at);
-            // A text that came to nothing leaves nothing to undo.
+            // Words that came to nothing leave nothing to undo.
             if self.past.last() == Some(&self.doc) {
                 self.past.pop();
             }
-            self.selected = None;
+            self.selected.clear();
         } else if at < self.doc.shapes.len() {
             self.made(at);
         }
@@ -327,8 +386,7 @@ impl Editor {
     }
 
     fn hit_at(&self, x: i32, y: i32) -> Option<EditHit> {
-        let inside = |[l, t, w, h]: [i32; 4]| (l..l + w).contains(&x) && (t..t + h).contains(&y);
-        self.hits.iter().rev().find(|(_, place)| inside(*place)).map(|(hit, _)| *hit)
+        self.hits.iter().rev().find(|(_, place)| inside(*place, (x, y))).map(|(hit, _)| *hit)
     }
 
     fn handle_at(&self, x: i32, y: i32) -> Option<Handle> {
@@ -370,6 +428,59 @@ impl Editor {
         self.snap();
         self.doc.shapes.push(shape);
         self.made(self.doc.shapes.len() - 1);
+    }
+
+    /// What is picked out moved by `by`, from where it was in `before`,
+    /// resting against the edges and middles of the rest and of the
+    /// picture when near them, unless `free`.
+    fn move_selected(&mut self, before: &Doc, by: Point, free: bool) {
+        let mut by = by;
+        self.guides = (Vec::new(), Vec::new());
+        let bounds = |shapes: &[Shape], which: &[usize]| {
+            which.iter().map(|at| shapes[*at].bounds()).reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])
+        };
+        if let (false, Some([l, t, r, b])) = (free, bounds(&before.shapes, &self.selected)) {
+            let near = SNAP / self.place.scale;
+            let mut others: Vec<[f32; 4]> = (0..before.shapes.len()).filter(|at| !self.selected.contains(at)).map(|at| before.shapes[at].bounds()).collect();
+            others.push(self.region());
+            for axis in 0..2 {
+                let (from, to) = if axis == 0 { (l, r) } else { (t, b) };
+                let shift = if axis == 0 { by.0 } else { by.1 };
+                let ours = [from, (from + to) / 2.0, to].map(|v| v + shift);
+                let theirs: Vec<f32> = others.iter().flat_map(|o| if axis == 0 { [o[0], (o[0] + o[2]) / 2.0, o[2]] } else { [o[1], (o[1] + o[3]) / 2.0, o[3]] }).collect();
+                let best = ours.iter().flat_map(|mine| theirs.iter().map(move |theirs| theirs - mine)).filter(|gap| gap.abs() < near).min_by(|a, b| a.abs().total_cmp(&b.abs()));
+                if let Some(gap) = best {
+                    let lines: Vec<f32> = ours.iter().map(|v| v + gap).filter(|v| theirs.iter().any(|t| (t - v).abs() < 0.01)).collect();
+                    if axis == 0 {
+                        by.0 += gap;
+                        self.guides.0 = lines;
+                    } else {
+                        by.1 += gap;
+                        self.guides.1 = lines;
+                    }
+                }
+            }
+        }
+        for at in self.selected.clone() {
+            let mut shape = before.shapes[at].clone();
+            shape.translate(by.0, by.1);
+            self.doc.shapes[at] = shape;
+        }
+    }
+
+    /// The marks a box from `from` to `to` touches picked out, along with
+    /// those already, if `adding`.
+    fn pick_within(&mut self, from: Point, to: Point, adding: bool) {
+        let [l, t, r, b] = [from.0.min(to.0), from.1.min(to.1), from.0.max(to.0), from.1.max(to.1)];
+        if !adding {
+            self.selected.clear();
+        }
+        for at in 0..self.doc.shapes.len() {
+            let [sl, st, sr, sb] = self.doc.shapes[at].bounds();
+            if sl <= r && sr >= l && st <= b && sb >= t && !self.selected.contains(&at) {
+                self.selected.push(at);
+            }
+        }
     }
 }
 
@@ -421,14 +532,27 @@ impl App {
         let shift = self.modifiers.shift_key();
         let Some(editor) = &mut self.editor else { return };
         // Words being typed take every key but the ones that end them.
-        if let Some(at) = editor.typing.filter(|_| !control) {
-            let shape = &mut editor.doc.shapes[at];
+        if let Some(at) = editor.typing {
+            let badge = editor.doc.shapes[at].tool == Tool::Badge;
             match key {
-                Key::Named(NamedKey::Escape | NamedKey::Enter) => editor.finish_typing(),
-                Key::Named(NamedKey::Backspace) => drop(shape.text.pop()),
-                Key::Named(NamedKey::Space) => shape.text.push(' '),
-                Key::Character(typed) => shape.text.push_str(typed),
-                _ => {}
+                Key::Character("b") if control => return self.edit_option(EditHit::Toggle(BOLD)),
+                Key::Character("i") if control => return self.edit_option(EditHit::Toggle(ITALIC)),
+                Key::Named(NamedKey::Enter) if control || badge => editor.finish_typing(),
+                Key::Named(NamedKey::Escape) => editor.finish_typing(),
+                _ if control => {}
+                key => {
+                    let shape = &mut editor.doc.shapes[at];
+                    if std::mem::take(&mut editor.replace) {
+                        shape.text.clear();
+                    }
+                    match key {
+                        Key::Named(NamedKey::Enter) => shape.text.push('\n'),
+                        Key::Named(NamedKey::Backspace) => drop(shape.text.pop()),
+                        Key::Named(NamedKey::Space) => shape.text.push(' '),
+                        Key::Character(typed) => shape.text.push_str(typed),
+                        _ => {}
+                    }
+                }
             }
             return self.redraw();
         }
@@ -461,19 +585,34 @@ impl App {
             Key::Character("z" | "Z") if control && shift => editor.redo(),
             Key::Character("z") if control => editor.undo(),
             Key::Character("y") if control => editor.redo(),
+            Key::Character("a") if control => {
+                editor.selected = (0..editor.doc.shapes.len()).collect();
+                editor.tool = Tool::Select;
+            }
+            Key::Character("b") if control => return self.edit_option(EditHit::Toggle(BOLD)),
+            Key::Character("i") if control => return self.edit_option(EditHit::Toggle(ITALIC)),
             Key::Character("d") if control => {
-                if let Some(at) = editor.selected {
-                    let mut copy = editor.doc.shapes[at].clone();
+                if !editor.selected.is_empty() {
                     let step = 12.0 / editor.place.scale;
-                    copy.translate(step, step);
+                    let copies: Vec<Shape> = editor
+                        .selected
+                        .iter()
+                        .map(|at| {
+                            let mut copy = editor.doc.shapes[*at].clone();
+                            copy.translate(step, step);
+                            copy
+                        })
+                        .collect();
                     editor.snap();
-                    editor.doc.shapes.push(copy);
-                    editor.made(editor.doc.shapes.len() - 1);
+                    let first = editor.doc.shapes.len();
+                    editor.doc.shapes.extend(copies);
+                    editor.selected = (first..editor.doc.shapes.len()).collect();
+                    editor.tool = Tool::Select;
                 }
             }
             // Over or under the rest, one step or all the way.
             Key::Character(way @ ("]" | "[" | "}" | "{")) if control => {
-                if let Some(at) = editor.selected {
+                if let Some(at) = editor.one() {
                     let last = editor.doc.shapes.len() - 1;
                     let to = match way {
                         "]" => (at + 1).min(last),
@@ -485,7 +624,7 @@ impl App {
                         editor.snap();
                         let shape = editor.doc.shapes.remove(at);
                         editor.doc.shapes.insert(to, shape);
-                        editor.selected = Some(to);
+                        editor.selected = vec![to];
                     }
                 }
             }
@@ -496,8 +635,10 @@ impl App {
             Key::Named(NamedKey::Escape) => {
                 if editor.tool == Tool::Crop && editor.crop_draft != editor.doc.crop {
                     editor.crop_draft = editor.doc.crop;
-                } else if editor.selected.is_some() {
-                    editor.selected = None;
+                } else if editor.tool == Tool::Pipette {
+                    editor.tool = editor.before_pipette;
+                } else if !editor.selected.is_empty() {
+                    editor.selected.clear();
                 } else if editor.tool != Tool::Select {
                     editor.set_tool(Tool::Select);
                 } else if editor.dirty() {
@@ -507,21 +648,25 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Enter) if editor.tool == Tool::Crop => editor.apply_crop(),
-            // A text picked out: Enter goes back to typing it.
+            // Words picked out: Enter goes back to typing them.
             Key::Named(NamedKey::Enter) => {
-                if let Some(at) = editor.selected.filter(|at| editor.doc.shapes[*at].tool == Tool::Text) {
+                if let Some(at) = editor.one().filter(|at| matches!(editor.doc.shapes[*at].tool, Tool::Text | Tool::Badge)) {
                     editor.snap();
                     editor.typing = Some(at);
                 }
             }
             Key::Named(NamedKey::Delete | NamedKey::Backspace) => {
-                if let Some(at) = editor.selected.take() {
+                if !editor.selected.is_empty() {
                     editor.snap();
-                    editor.doc.shapes.remove(at);
+                    let mut gone = std::mem::take(&mut editor.selected);
+                    gone.sort_unstable();
+                    for at in gone.into_iter().rev() {
+                        editor.doc.shapes.remove(at);
+                    }
                 }
             }
             Key::Named(arrow @ (NamedKey::ArrowLeft | NamedKey::ArrowRight | NamedKey::ArrowUp | NamedKey::ArrowDown)) => {
-                if let Some(at) = editor.selected {
+                if !editor.selected.is_empty() {
                     let step = if shift { 10.0 } else { 1.0 } / editor.place.scale;
                     let (dx, dy) = match arrow {
                         NamedKey::ArrowLeft => (-step, 0.0),
@@ -530,7 +675,9 @@ impl App {
                         _ => (0.0, step),
                     };
                     editor.snap();
-                    editor.doc.shapes[at].translate(dx, dy);
+                    for at in editor.selected.clone() {
+                        editor.doc.shapes[at].translate(dx, dy);
+                    }
                 }
             }
             Key::Character(digit @ ("1" | "2" | "3" | "4")) => {
@@ -539,12 +686,16 @@ impl App {
             }
             // Through the colors, as hotshot's C does.
             Key::Character("c") => {
-                let color = (editor.style.color + 1) % COLORS.len();
-                return self.edit_option(EditHit::Color(color));
+                let next = COLORS.iter().position(|c| *c == editor.style.color).map_or(0, |at| (at + 1) % COLORS.len());
+                return self.edit_option(EditHit::Color(COLORS[next]));
             }
             Key::Character("f") => {
                 let filled = !editor.style.filled;
                 return self.edit_option(EditHit::Filled(filled));
+            }
+            Key::Character("g") => {
+                let face = (editor.style.face + 1) % FACES.len();
+                return self.edit_option(EditHit::Face(face));
             }
             Key::Character("d") => {
                 let dash = match editor.style.dash {
@@ -565,13 +716,13 @@ impl App {
     }
 
     /// One of the panel's choices: kept for what is drawn next, and given
-    /// to the mark picked out.
+    /// to the marks picked out.
     fn edit_option(&mut self, hit: EditHit) {
         let Some(editor) = &mut self.editor else { return };
         match hit {
             EditHit::Color(color) => {
                 editor.style.color = color;
-                editor.restyle(|shape| shape.color = COLORS[color]);
+                editor.restyle(|shape| shape.color = color);
             }
             EditHit::Opacity(opacity) => {
                 editor.style.opacity = opacity;
@@ -579,9 +730,14 @@ impl App {
             }
             EditHit::Size(size) => {
                 editor.style.size = size;
-                if let Some(at) = editor.subject() {
-                    let stroke = editor.stroke(editor.doc.shapes[at].tool, size);
-                    editor.restyle(|shape| shape.stroke = stroke);
+                let strokes: Vec<(usize, f32)> = editor.targets().into_iter().map(|at| (at, editor.stroke(editor.doc.shapes[at].tool, size))).collect();
+                let mut shapes = editor.doc.shapes.clone();
+                for (at, stroke) in strokes {
+                    shapes[at].stroke = stroke;
+                }
+                if shapes != editor.doc.shapes {
+                    editor.snap();
+                    editor.doc.shapes = shapes;
                 }
             }
             EditHit::Filled(filled) => {
@@ -603,8 +759,34 @@ impl App {
             EditHit::Dash(dash) => {
                 editor.style.dash = dash;
                 editor.restyle(|shape| {
-                    if shape.tool.is_line() {
+                    if shape.tool.is_line() || matches!(shape.tool, Tool::Rect | Tool::Oval) {
                         shape.dash = dash;
+                    }
+                });
+            }
+            EditHit::Face(face) => {
+                editor.style.face = face;
+                editor.restyle(|shape| shape.face = face);
+            }
+            EditHit::Toggle(flag) => {
+                // On for all if it was off for the first, as a style bar has it.
+                let on = editor.subject().map_or(editor.style.text, |at| editor.doc.shapes[at].style) & flag == 0;
+                editor.style.text = if on { editor.style.text | flag } else { editor.style.text & !flag };
+                editor.restyle(|shape| {
+                    if shape.tool == Tool::Text {
+                        shape.style = if on { shape.style | flag } else { shape.style & !flag };
+                    }
+                });
+            }
+            EditHit::BadgeLook(look) => {
+                editor.style.badge = look;
+                editor.restyle(|shape| shape.look = look);
+            }
+            EditHit::Square(square) => {
+                editor.style.square = square;
+                editor.restyle(|shape| {
+                    if shape.tool == Tool::Zoom {
+                        shape.filled = square;
                     }
                 });
             }
@@ -620,28 +802,46 @@ impl App {
         self.redraw();
     }
 
+    /// The color of the picture as it was opened, under a point of it.
+    fn picture_color(&self, p: Point) -> Option<u32> {
+        let editor = self.editor.as_ref()?;
+        let frame = self.source()?;
+        let (fx, fy) = (frame.width as f32 / editor.native.0.max(1) as f32, frame.height as f32 / editor.native.1.max(1) as f32);
+        let (x, y) = ((p.0 * fx).floor(), (p.1 * fy).floor());
+        if x < 0.0 || y < 0.0 || x >= frame.width as f32 || y >= frame.height as f32 {
+            return None;
+        }
+        Some(frame.pixels[y as usize * frame.width as usize + x as usize] & 0xFFFFFF)
+    }
+
     pub(super) fn editor_mouse(&mut self, pressed: bool) {
         let (x, y) = self.mouse;
         if !pressed {
             return self.editor_release();
         }
-        let mut text = self.text.take().unwrap_or_else(Text::load);
+        let adding = self.modifiers.shift_key() || self.modifiers.control_key();
         let hit = self.editor.as_ref().and_then(|editor| editor.hit_at(x as i32, y as i32));
         let handle = self.editor.as_ref().and_then(|editor| editor.handle_at(x as i32, y as i32));
+        // The pipette takes the color under it, from the picture itself.
+        if hit.is_none() && self.editor.as_ref().is_some_and(|editor| editor.tool == Tool::Pipette) {
+            let p = self.editor.as_ref().map(|editor| editor.place.to_picture((x as f32, y as f32))).unwrap_or_default();
+            if let Some(color) = self.picture_color(p) {
+                self.edit_option(EditHit::Color(color));
+            }
+            if let Some(editor) = &mut self.editor {
+                editor.tool = editor.before_pipette;
+            }
+            return self.redraw();
+        }
         match (hit, handle) {
-            (Some(hit @ (EditHit::Color(_) | EditHit::Opacity(_) | EditHit::Size(_) | EditHit::Filled(_) | EditHit::Heads(_) | EditHit::Dash(_))), _) => self.edit_option(hit),
-            (Some(EditHit::Save(way)), _) => {
-                self.text = Some(text);
-                return self.save_edit(way);
-            }
-            (Some(EditHit::Discard), _) => {
-                self.text = Some(text);
-                return self.discard_edit();
-            }
-            (Some(hit), handle) if hit != EditHit::Inside || handle.is_none() => {
+            (Some(hit @ (EditHit::Color(_) | EditHit::Opacity(_) | EditHit::Size(_) | EditHit::Filled(_) | EditHit::Heads(_) | EditHit::Dash(_) | EditHit::Face(_) | EditHit::Toggle(_) | EditHit::BadgeLook(_) | EditHit::Square(_))), _) => self.edit_option(hit),
+            (Some(EditHit::Save(way)), _) => return self.save_edit(way),
+            (Some(EditHit::Discard), _) => return self.discard_edit(),
+            (Some(hit), _) if hit != EditHit::Inside || handle.is_none() => {
                 if let Some(editor) = &mut self.editor {
                     match hit {
                         EditHit::Tool(tool) => editor.set_tool(tool),
+                        EditHit::Pipette => editor.set_tool(Tool::Pipette),
                         EditHit::Undo => editor.undo(),
                         EditHit::Redo => editor.redo(),
                         EditHit::Reset => editor.reset(),
@@ -666,40 +866,34 @@ impl App {
                         }
                         EditHit::KeepEditing => editor.leaving = false,
                         EditHit::Emoji(which) => editor.place_emoji(which),
-                        // Somewhere on the bars that is none of their buttons.
-                        EditHit::Inside => {}
                         _ => {}
                     }
                 }
             }
             (_, Some(handle)) => {
                 if let Some(editor) = &mut self.editor {
-                    grab(editor, handle, (x as f32, y as f32), &mut text);
+                    grab(editor, handle, (x as f32, y as f32));
                 }
             }
             (None, None) => {
                 if let Some(editor) = &mut self.editor {
-                    editor_press(editor, (x as f32, y as f32), &mut text);
+                    editor_press(editor, (x as f32, y as f32), adding);
                 }
             }
             _ => {}
         }
-        self.text = Some(text);
         self.redraw();
     }
 
     pub(super) fn editor_motion(&mut self) {
         let (x, y) = self.mouse;
         let shift = self.modifiers.shift_key();
-        let mut text = self.text.take().unwrap_or_else(Text::load);
-        let Some(editor) = &mut self.editor else {
-            self.text = Some(text);
-            return;
-        };
+        let free = self.modifiers.control_key();
+        let Some(editor) = &mut self.editor else { return };
         let p = editor.place.to_picture((x as f32, y as f32));
         let (w, h) = (editor.native.0 as f32, editor.native.1 as f32);
         let scale = editor.place.scale;
-        let selected = editor.selected;
+        let one = editor.one();
         match editor.drag.clone() {
             Some(EditDrag::Draw) => {
                 if let Some(shape) = editor.doc.shapes.last_mut() {
@@ -710,31 +904,35 @@ impl App {
                                 shape.points.push(p);
                             }
                         }
+                        // A counter dragged from grows a tail to the pointer.
+                        Tool::Counter => {
+                            shape.points.truncate(1);
+                            shape.points.push(p);
+                        }
                         Tool::Arrow | Tool::Line if shift => shape.points[1] = level(shape.points[0], p),
+                        Tool::Rect | Tool::Oval | Tool::Blur | Tool::Spotlight | Tool::Zoom if shift => shape.points[1] = square(shape.points[0], p),
                         _ => shape.points[1] = p,
                     }
                 }
             }
-            Some(EditDrag::Move { last, before, was_selected, .. }) => {
-                let (dx, dy) = (p.0 - last.0, p.1 - last.1);
-                editor.drag = Some(EditDrag::Move { last: p, before, moved: true, was_selected });
-                if let Some(at) = selected {
-                    editor.doc.shapes[at].translate(dx, dy);
-                }
+            Some(EditDrag::Move { from, before, was_selected, .. }) => {
+                editor.move_selected(&before, (p.0 - from.0, p.1 - from.1), free);
+                editor.drag = Some(EditDrag::Move { from, before, moved: true, was_selected });
             }
+            Some(EditDrag::Marquee { from, adding, .. }) => editor.drag = Some(EditDrag::Marquee { from, to: p, adding }),
             Some(EditDrag::Grip { grip, frame, from, before }) => {
                 let [l, t, r, b] = frame;
                 let size = ((r - l).max(1.0), (b - t).max(1.0));
                 let still = (if grip.0 < 0 { r } else { l }, if grip.1 < 0 { b } else { t });
                 let pull = |g: i8, d: f32, size: f32| if g == 0 { 1.0 } else { (size + f32::from(g) * d) / size };
                 let mut times = (pull(grip.0, p.0 - from.0, size.0), pull(grip.1, p.1 - from.1, size.1));
-                // Shift, or a corner of words: in proportion.
+                // Shift: in proportion.
                 if shift && grip.0 != 0 && grip.1 != 0 {
                     let both = times.0.abs().max(times.1.abs());
                     times = (both.copysign(times.0), both.copysign(times.1));
                 }
                 let keep = |t: f32| if t.abs() < 0.02 { 0.02f32.copysign(t) } else { t };
-                if let Some(at) = selected {
+                if let Some(at) = one {
                     let mut shape = before.shapes[at].clone();
                     shape.scale(still, (keep(times.0), keep(times.1)));
                     editor.doc.shapes[at] = shape;
@@ -742,22 +940,27 @@ impl App {
             }
             Some(EditDrag::End { end, before, .. }) => {
                 editor.drag = Some(EditDrag::End { end, before, moved: true });
-                if let Some(shape) = selected.and_then(|at| editor.doc.shapes.get_mut(at)) {
-                    shape.points[end] = if shift { level(shape.points[1 - end], p) } else { p };
+                if let Some(shape) = one.and_then(|at| editor.doc.shapes.get_mut(at)) {
+                    shape.points[end] = if shift && shape.tool.is_line() { level(shape.points[1 - end], p) } else { p };
                 }
             }
             Some(EditDrag::Bend { before, .. }) => {
                 editor.drag = Some(EditDrag::Bend { before, moved: true });
-                if let Some(shape) = selected.and_then(|at| editor.doc.shapes.get_mut(at)) {
+                if let Some(shape) = one.and_then(|at| editor.doc.shapes.get_mut(at)) {
                     shape.bend_to(p, 4.0 / scale);
                 }
             }
             Some(EditDrag::Round { corner, .. }) => {
-                if let Some(shape) = selected.and_then(|at| editor.doc.shapes.get_mut(at)) {
+                if let Some(shape) = one.and_then(|at| editor.doc.shapes.get_mut(at)) {
                     let [l, t, r, b] = shape.frame();
                     let (cx, cy) = (if corner.0 < 0 { l } else { r }, if corner.1 < 0 { t } else { b });
                     let most = (r - l).min(b - t) / 2.0;
                     shape.radius = (p.0 - cx).abs().min((p.1 - cy).abs()).clamp(0.0, most);
+                }
+            }
+            Some(EditDrag::Zoom { rim, .. }) => {
+                if let Some(shape) = one.and_then(|at| editor.doc.shapes.get_mut(at)) {
+                    shape.zoom_to(rim, p);
                 }
             }
             Some(EditDrag::Crop { from }) => {
@@ -778,13 +981,12 @@ impl App {
             None => {
                 // The pointer says what a press would do, and with the
                 // arrow in hand the mark under it is outlined.
-                let [l, t, sw, sh] = editor.stage;
-                let over_stage = (l..l + sw).contains(&(x as i32)) && (t..t + sh).contains(&(y as i32));
+                let over_stage = inside(editor.stage, (x as i32, y as i32));
                 let on_button = editor.hit_at(x as i32, y as i32).is_some();
                 let on_handle = editor.handle_at(x as i32, y as i32).is_some();
                 let hovered = if over_stage && !on_button && editor.tool == Tool::Select {
                     let reach = 6.0 / scale;
-                    editor.doc.shapes.iter().rposition(|shape| shape.hit(p, reach, &mut text))
+                    editor.doc.shapes.iter().rposition(|shape| shape.hit(p, reach))
                 } else {
                     None
                 };
@@ -794,29 +996,36 @@ impl App {
                     (false, _) => CursorIcon::Default,
                     (true, Tool::Select) if hovered.is_some() => CursorIcon::Move,
                     (true, Tool::Select | Tool::Emoji) => CursorIcon::Default,
-                    (true, Tool::Text) => CursorIcon::Text,
+                    (true, Tool::Text | Tool::Badge) => CursorIcon::Text,
                     (true, _) => CursorIcon::Crosshair,
                 };
-                self.text = Some(text);
                 self.set_edit_cursor(icon);
                 return self.redraw();
             }
         }
-        self.text = Some(text);
         self.redraw();
     }
 
     fn editor_release(&mut self) {
         let Some(editor) = &mut self.editor else { return };
+        editor.guides = (Vec::new(), Vec::new());
         match editor.drag.take() {
             Some(EditDrag::Draw) => {
                 let last = editor.doc.shapes.len() - 1;
-                if editor.doc.shapes[last].is_slight() {
+                let shape = &mut editor.doc.shapes[last];
+                // A counter's tail too short to point anywhere goes.
+                if shape.tool == Tool::Counter && shape.points.len() > 1 && (shape.points[1].0 - shape.points[0].0).hypot(shape.points[1].1 - shape.points[0].1) < shape.counter_radius() * 1.4 {
+                    shape.points.truncate(1);
+                }
+                if shape.is_slight() {
                     editor.doc.shapes.pop();
                     editor.past.pop();
                 } else if matches!(editor.tool, Tool::Pen | Tool::Marker | Tool::Counter) {
                     // These come several at a time: the tool stays.
                 } else {
+                    if shape.tool == Tool::Zoom {
+                        shape.place_zoom();
+                    }
                     editor.made(last);
                 }
             }
@@ -826,13 +1035,14 @@ impl App {
                     editor.future.clear();
                 } else if was_selected {
                     // A click on words already picked out goes to typing.
-                    if let Some(at) = editor.selected.filter(|at| editor.doc.shapes[*at].tool == Tool::Text) {
+                    if let Some(at) = editor.one().filter(|at| matches!(editor.doc.shapes[*at].tool, Tool::Text | Tool::Badge)) {
                         editor.snap();
                         editor.typing = Some(at);
                     }
                 }
             }
-            Some(EditDrag::Grip { before, .. } | EditDrag::Round { before, .. }) => {
+            Some(EditDrag::Marquee { from, to, adding }) => editor.pick_within(from, to, adding),
+            Some(EditDrag::Grip { before, .. } | EditDrag::Round { before, .. } | EditDrag::Zoom { before, .. }) => {
                 if before != editor.doc {
                     editor.past.push(before);
                     editor.future.clear();
@@ -842,7 +1052,7 @@ impl App {
                 if moved {
                     editor.past.push(before);
                     editor.future.clear();
-                } else if let Some(at) = editor.selected {
+                } else if let Some(at) = editor.one().filter(|at| editor.doc.shapes[*at].tool.is_line()) {
                     // A click on an end puts a head there, or takes it off.
                     editor.snap();
                     let shape = &mut editor.doc.shapes[at];
@@ -856,7 +1066,7 @@ impl App {
                 if moved {
                     editor.past.push(before);
                     editor.future.clear();
-                } else if let Some(at) = editor.selected {
+                } else if let Some(at) = editor.one() {
                     // A click on the bend straightens the line.
                     if editor.doc.shapes[at].bend.is_some() {
                         editor.snap();
@@ -1035,6 +1245,11 @@ impl App {
         let frame = self.source();
         let last = self.edit_last;
         let mouse = (self.mouse.0 as i32, self.mouse.1 as i32);
+        let pointed = self
+            .editor
+            .as_ref()
+            .filter(|editor| editor.tool == Tool::Pipette && inside(editor.stage, mouse))
+            .and_then(|editor| self.picture_color(editor.place.to_picture((mouse.0 as f32, mouse.1 as f32))));
         let Some(editor) = &mut self.editor else { return };
         let name = self.files[editor.id].file_name().unwrap_or_default().to_string_lossy().into_owned();
         let format = Format::of(&self.files[editor.id]);
@@ -1075,7 +1290,7 @@ impl App {
             let crop = [f64::from(region[0]) * fx, f64::from(region[1]) * fy, f64::from(rw) * fx, f64::from(rh) * fy];
             let behind = if radius > 0.0 { canvas.copy(px0, py0, pw, ph) } else { Vec::new() };
             let _ = render::draw_crop(canvas.all(), width as usize, &frame.pixels, (frame.width, frame.height), crop, [px0, py0, pw, ph]);
-            annotate::paint(&editor.doc.shapes, canvas.all(), width as usize, place, [px0, py0, pw, ph], text, None);
+            annotate::paint(&editor.doc.shapes, canvas.all(), width as usize, place, [px0, py0, pw, ph], None);
             if radius > 0.0 {
                 round_corners(canvas, [px0, py0, pw, ph], radius, &behind);
             }
@@ -1083,9 +1298,8 @@ impl App {
         // The crop being chosen: the rest dimmed, and its size.
         if cropping {
             let draft = editor.crop_draft.unwrap_or([0.0, 0.0, editor.native.0 as f32, editor.native.1 as f32]);
-            let (l, t) = place.to_screen((draft[0], draft[1]));
-            let (r, b) = place.to_screen((draft[2], draft[3]));
-            let [l, t, r, b] = [l.round() as i32, t.round() as i32, r.round() as i32, b.round() as i32];
+            let [l, t, w, h] = on_screen(place, draft, 0);
+            let (r, b) = (l + w, t + h);
             for [x, y, w, h] in [[px0, py0, pw, t - py0], [px0, b, pw, py0 + ph - b], [px0, t, l - px0, b - t], [r, t, px0 + pw - r, b - t]] {
                 canvas.shade(x, y, w, h, 96);
             }
@@ -1096,21 +1310,49 @@ impl App {
             canvas.round_fill(l, ly, lw, small_line + pad / 3, pad / 3, 0x000000, 200);
             text.draw(canvas, l + pad / 2, ly + pad / 6, small, TEXT_COLOR, &label);
         }
-        // The mark under the pointer, faintly; the one picked out, with its
-        // handles.
-        if let Some(shape) = editor.hovered.filter(|at| Some(*at) != editor.selected).and_then(|at| editor.doc.shapes.get(at)) {
-            let [x, y, w, h] = on_screen(place, shape.bounds(text), 3);
+        // The mark under the pointer, faintly; those picked out, outlined,
+        // and the one picked out alone with its handles.
+        if let Some(shape) = editor.hovered.filter(|at| !editor.selected.contains(at)).and_then(|at| editor.doc.shapes.get(at)) {
+            let [x, y, w, h] = on_screen(place, shape.bounds(), 3);
             canvas.round_outline(x, y, w, h, 2, 1, accent_soft());
         }
-        if let Some(at) = editor.subject() {
-            let shape = editor.doc.shapes[at].clone();
-            draw_handles(editor, canvas, text, &shape, pad);
-            if editor.typing == Some(at) {
-                let size = (shape.stroke * scale).round().max(1.0) as u32;
-                let (sx, sy) = place.to_screen(shape.points[0]);
-                let caret = sx as i32 + text.width(&shape.text, size) + 1;
-                canvas.fill(caret, sy as i32, 2.max(size as i32 / 12), Text::line_height(size), accent());
+        if editor.one().is_none() {
+            for at in editor.selected.clone() {
+                let [x, y, w, h] = on_screen(place, editor.doc.shapes[at].bounds(), 3);
+                canvas.round_outline(x, y, w, h, 2, 1, accent());
             }
+        }
+        if let Some(at) = editor.typing.or(editor.one()) {
+            let shape = editor.doc.shapes[at].clone();
+            draw_handles(editor, canvas, &shape, pad);
+            if editor.typing == Some(at) {
+                draw_caret(canvas, place, &shape);
+            }
+        }
+        // The edges what is moved rests against.
+        for x in editor.guides.0.clone() {
+            let (sx, _) = place.to_screen((x, 0.0));
+            canvas.fill(sx.round() as i32, py0, 1, ph, accent_soft());
+        }
+        for y in editor.guides.1.clone() {
+            let (_, sy) = place.to_screen((0.0, y));
+            canvas.fill(px0, sy.round() as i32, pw, 1, accent_soft());
+        }
+        // A box being dragged out to pick out what it touches.
+        if let Some(EditDrag::Marquee { from, to, .. }) = editor.drag {
+            let rect = [from.0.min(to.0), from.1.min(to.1), from.0.max(to.0), from.1.max(to.1)];
+            let [x, y, w, h] = on_screen(place, rect, 0);
+            canvas.round_fill(x, y, w, h, 0, accent(), 40);
+            canvas.round_outline(x, y, w, h, 0, 1, accent());
+        }
+        // The color the pipette is over, beside it.
+        if let Some(color) = pointed {
+            let words = format!("#{color:06X}");
+            let (x, y) = (mouse.0 + pad, mouse.1 + pad);
+            let w = text.width(&words, small) + pad * 2 + small_line;
+            canvas.round_fill(x, y, w, small_line + pad / 2, pad / 3, 0x000000, 220);
+            canvas.round_fill(x + pad / 3, y + pad / 4, small_line, small_line, small_line / 2, color, 256);
+            text.draw(canvas, x + pad / 2 + small_line + pad / 3, y + pad / 4, small, TEXT_COLOR, &words);
         }
 
         // The heading: what is being edited, and whether it is saved.
@@ -1245,6 +1487,35 @@ fn level(from: Point, to: Point) -> Point {
     (from.0 + length * angle.cos(), from.1 + length * angle.sin())
 }
 
+/// The far corner of a box kept square, or a circle round.
+fn square(from: Point, to: Point) -> Point {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let side = dx.abs().max(dy.abs());
+    (from.0 + side.copysign(dx), from.1 + side.copysign(dy))
+}
+
+/// Where the next letter typed goes: after the last of the last line.
+fn draw_caret(canvas: &mut Canvas, place: Place, shape: &Shape) {
+    let size = shape.stroke * place.scale;
+    let line = lettering::line_height(size);
+    let look = Look { face: shape.face, bold: shape.style & BOLD != 0, italic: shape.style & ITALIC != 0 };
+    let (x, y) = match shape.tool {
+        Tool::Badge => {
+            let [_, t, r, b] = shape.bounds();
+            let ((sr, st), (_, sb)) = (place.to_screen((r, t)), place.to_screen((r, b)));
+            (sr - size * 0.75, st + (sb - st - line) / 2.0)
+        }
+        _ => {
+            let (sx, sy) = place.to_screen(shape.points[0]);
+            let lines: Vec<&str> = shape.text.split('\n').collect();
+            let lead = if shape.style & BULLETS != 0 { "\u{2022} " } else { "" };
+            let last = lines.last().copied().unwrap_or_default();
+            (sx + lettering::width(look, &format!("{lead}{last}"), size) + 1.0, sy + line * (lines.len() - 1) as f32)
+        }
+    };
+    canvas.fill(x as i32, y as i32, 2.max(size as i32 / 12), line as i32, accent());
+}
+
 #[allow(clippy::too_many_arguments)]
 fn bar_button(canvas: &mut Canvas, text: &mut Text, place: [i32; 4], icon: &str, on: bool, able: bool, over: bool, px: u32, pad: i32) {
     let line = Text::line_height(px);
@@ -1261,9 +1532,9 @@ fn bar_button(canvas: &mut Canvas, text: &mut Text, place: [i32; 4], icon: &str,
 }
 
 /// The handles of the mark picked out: grips at its corners and sides,
-/// dots at a line's ends and middle, and inside a rectangle's corners
-/// the dots that round them.
-fn draw_handles(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, shape: &Shape, pad: i32) {
+/// dots at a line's ends and middle, inside a rectangle's corners the
+/// dots that round them, and a zoom's two.
+fn draw_handles(editor: &mut Editor, canvas: &mut Canvas, shape: &Shape, pad: i32) {
     let place = editor.place;
     let grip = (pad / 5).max(3);
     let ring = |canvas: &mut Canvas, (x, y): (i32, i32), r: i32| {
@@ -1274,6 +1545,7 @@ fn draw_handles(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, shape
         let (x, y) = place.to_screen(p);
         (x.round() as i32, y.round() as i32)
     };
+    let [x, y, w, h] = on_screen(place, shape.bounds(), 3);
     match shape.tool {
         Tool::Arrow | Tool::Line => {
             for end in 0..2 {
@@ -1289,11 +1561,26 @@ fn draw_handles(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, shape
             }
         }
         Tool::Counter => {
-            let [x, y, w, h] = on_screen(place, shape.bounds(text), 3);
             canvas.round_outline(x, y, w, h, 2, 1, accent());
+            if let Some(tip) = shape.points.get(1) {
+                let at = screen(*tip);
+                ring(canvas, at, grip + 1);
+                editor.handles.push((Handle::End(1), at));
+            }
         }
+        Tool::Zoom => {
+            for rect in [shape.frame(), shape.zoomed()] {
+                let [x, y, w, h] = on_screen(place, rect, 2);
+                canvas.round_outline(x, y, w, h, 2, 1, accent());
+            }
+            let [middle, rim] = shape.zoom_handles();
+            ring(canvas, screen(middle), grip + 1);
+            ring(canvas, screen(rim), grip + 1);
+            editor.handles.push((Handle::ZoomMove, screen(middle)));
+            editor.handles.push((Handle::ZoomRim, screen(rim)));
+        }
+        Tool::Badge => canvas.round_outline(x, y, w, h, 2, 1, accent()),
         _ => {
-            let [x, y, w, h] = on_screen(place, shape.bounds(text), 3);
             canvas.round_outline(x, y, w, h, 2, 1, accent());
             if editor.typing.is_some() {
                 return;
@@ -1324,22 +1611,24 @@ fn draw_handles(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, shape
 }
 
 /// A press on a handle of the mark picked out.
-fn grab(editor: &mut Editor, handle: Handle, at: Point, text: &mut Text) {
-    let Some(index) = editor.selected else { return };
+fn grab(editor: &mut Editor, handle: Handle, at: Point) {
+    let Some(index) = editor.one() else { return };
     let p = editor.place.to_picture(at);
     let before = editor.doc.clone();
     editor.drag = Some(match handle {
-        Handle::Grip(gx, gy) => EditDrag::Grip { grip: (gx, gy), frame: editor.doc.shapes[index].bounds(text), from: p, before },
+        Handle::Grip(gx, gy) => EditDrag::Grip { grip: (gx, gy), frame: editor.doc.shapes[index].bounds(), from: p, before },
         Handle::End(end) => EditDrag::End { end, before, moved: false },
         Handle::Bend => EditDrag::Bend { before, moved: false },
         Handle::Round(cx, cy) => EditDrag::Round { corner: (cx, cy), before },
+        Handle::ZoomMove => EditDrag::Zoom { rim: false, before },
+        Handle::ZoomRim => EditDrag::Zoom { rim: true, before },
     });
 }
 
-/// A press on the picture, with the tool in hand.
-fn editor_press(editor: &mut Editor, at: Point, text: &mut Text) {
-    let [l, t, w, h] = editor.stage;
-    if !(l as f32..(l + w) as f32).contains(&at.0) || !(t as f32..(t + h) as f32).contains(&at.1) {
+/// A press on the picture, with the tool in hand; `adding` with Shift or
+/// Ctrl, which adds to what is picked out rather than starting afresh.
+fn editor_press(editor: &mut Editor, at: Point, adding: bool) {
+    if !inside(editor.stage, (at.0 as i32, at.1 as i32)) {
         editor.finish_typing();
         return;
     }
@@ -1351,15 +1640,29 @@ fn editor_press(editor: &mut Editor, at: Point, text: &mut Text) {
         Tool::Select | Tool::Emoji => {
             editor.picker = None;
             editor.tool = Tool::Select;
+            let hit = editor.doc.shapes.iter().rposition(|shape| shape.hit(p, reach));
             // What is picked out is taken hold of anywhere in its box.
-            let held = editor.selected.filter(|at| {
-                let [l, t, r, b] = editor.doc.shapes[*at].bounds(text);
+            let held = editor.selected.iter().any(|at| {
+                let [l, t, r, b] = editor.doc.shapes[*at].bounds();
                 p.0 >= l - reach && p.0 <= r + reach && p.1 >= t - reach && p.1 <= b + reach
             });
-            let was_selected = held.is_some();
-            editor.selected = held.or_else(|| editor.doc.shapes.iter().rposition(|shape| shape.hit(p, reach, text)));
-            if editor.selected.is_some() {
-                editor.drag = Some(EditDrag::Move { last: p, before: editor.doc.clone(), moved: false, was_selected });
+            match (hit, adding) {
+                (Some(at), true) => {
+                    if let Some(found) = editor.selected.iter().position(|chosen| *chosen == at) {
+                        editor.selected.remove(found);
+                    } else {
+                        editor.selected.push(at);
+                    }
+                }
+                _ if held && !adding => {
+                    let was_selected = editor.one().is_some();
+                    editor.drag = Some(EditDrag::Move { from: p, before: editor.doc.clone(), moved: false, was_selected });
+                }
+                (Some(at), false) => {
+                    editor.selected = vec![at];
+                    editor.drag = Some(EditDrag::Move { from: p, before: editor.doc.clone(), moved: false, was_selected: false });
+                }
+                (None, adding) => editor.drag = Some(EditDrag::Marquee { from: p, to: p, adding }),
             }
         }
         Tool::Crop => {
@@ -1368,38 +1671,39 @@ fn editor_press(editor: &mut Editor, at: Point, text: &mut Text) {
             editor.crop_draft = Some([from.0, from.1, from.0, from.1]);
             editor.drag = Some(EditDrag::Crop { from });
         }
-        Tool::Text => {
+        Tool::Text | Tool::Badge => {
             // On words already there, more of them; elsewhere, new ones.
-            let on = editor.doc.shapes.iter().rposition(|shape| shape.tool == Tool::Text && shape.hit(p, reach, text));
+            let tool = editor.tool;
+            let on = editor.doc.shapes.iter().rposition(|shape| shape.tool == tool && shape.hit(p, reach));
             editor.snap();
             let at = on.unwrap_or_else(|| {
-                let stroke = editor.stroke(Tool::Text, editor.style.size);
+                let stroke = editor.stroke(tool, editor.style.size);
                 // The pointer in the middle of the first line.
-                let shape = editor.fresh(Tool::Text, (p.0, p.1 - stroke * 0.65));
+                let mut shape = editor.fresh(tool, (p.0, p.1 - stroke * 0.65));
+                // A badge says what it is for once something is typed.
+                if tool == Tool::Badge {
+                    shape.text = "Label".to_string();
+                    editor.replace = true;
+                }
                 editor.doc.shapes.push(shape);
                 editor.doc.shapes.len() - 1
             });
             editor.typing = Some(at);
-            editor.selected = None;
+            editor.selected.clear();
         }
-        Tool::Counter => {
-            editor.snap();
-            let shape = editor.fresh(Tool::Counter, p);
-            editor.doc.shapes.push(shape);
-            editor.drag = Some(EditDrag::Draw);
-        }
+        Tool::Pipette => {}
         tool => {
             editor.snap();
             let shape = editor.fresh(tool, p);
             editor.doc.shapes.push(shape);
             editor.drag = Some(EditDrag::Draw);
-            editor.selected = None;
+            editor.selected.clear();
         }
     }
 }
 
-/// The panel down the right: how the mark picked out, or the next one, is
-/// drawn; then the picture's own corners and crop; then the keys.
+/// The panel down the right: how the marks picked out, or the next one,
+/// are drawn; then the picture's own corners and crop; then the keys.
 #[allow(clippy::too_many_arguments)]
 fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, top, side, high]: [i32; 4], px: u32, format: Option<Format>, mouse: (i32, i32)) {
     let pad = px as i32;
@@ -1414,29 +1718,46 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
     let subject = editor.subject().map(|at| editor.doc.shapes[at].clone());
     let kind = subject.as_ref().map_or(editor.tool, |shape| shape.tool);
     let heading = |canvas: &mut Canvas, text: &mut Text, y: i32, words: &str| text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, words);
-    let marks = !matches!(kind, Tool::Select | Tool::Crop);
+    let marks = !matches!(kind, Tool::Select | Tool::Crop) || editor.selected.len() > 1;
+    let words = matches!(kind, Tool::Text | Tool::Badge);
 
     if marks {
-        text.draw(canvas, inner, y, px, TEXT_COLOR, kind.name());
+        let title = if editor.selected.len() > 1 { format!("{} picked out", editor.selected.len()) } else { kind.name().to_string() };
+        text.draw(canvas, inner, y, px, TEXT_COLOR, &title);
         y += line + pad / 2;
     }
     let colored = marks && !matches!(kind, Tool::Blur | Tool::Spotlight | Tool::Emoji);
     if colored {
-        let color = subject.as_ref().and_then(|shape| COLORS.iter().position(|c| *c == shape.color)).unwrap_or(editor.style.color);
-        let swatch = (inner_w - pad / 3 * 7) / 8;
-        for (at, c) in COLORS.iter().enumerate() {
+        let color = subject.as_ref().map_or(editor.style.color, |shape| shape.color);
+        let swatch = (inner_w - pad / 3 * 8) / 9;
+        let mut cells: Vec<(EditHit, u32)> = COLORS.iter().map(|c| (EditHit::Color(*c), *c)).collect();
+        // The ninth takes a color from the picture, and shows one taken.
+        let custom = if COLORS.contains(&color) { MENU_COLOR } else { color };
+        cells.push((EditHit::Pipette, custom));
+        for (at, (hit, c)) in cells.into_iter().enumerate() {
             let sx = inner + at as i32 * (swatch + pad / 3);
-            if at == color {
+            let on = match hit {
+                EditHit::Color(chosen) => chosen == color,
+                _ => !COLORS.contains(&color) || editor.tool == Tool::Pipette,
+            };
+            if on {
                 canvas.round_fill(sx - 2, y - 2, swatch + 4, swatch + 4, swatch / 2 + 2, TEXT_COLOR, 256);
                 canvas.round_fill(sx, y, swatch, swatch, swatch / 2, MENU_COLOR, 256);
             }
-            let inset = if at == color { 2 } else { 0 };
-            canvas.round_fill(sx + inset, y + inset, swatch - inset * 2, swatch - inset * 2, swatch / 2, *c, 256);
-            // The near-black one would be lost on the panel.
-            if *c < 0x404040 {
+            let inset = if on { 2 } else { 0 };
+            canvas.round_fill(sx + inset, y + inset, swatch - inset * 2, swatch - inset * 2, swatch / 2, c, 256);
+            // The near-black ones would be lost on the panel.
+            if c < 0x404040 {
                 canvas.round_outline(sx + inset, y + inset, swatch - inset * 2, swatch - inset * 2, swatch / 2, 1, MENU_EDGE_COLOR);
             }
-            editor.hits.push((EditHit::Color(at), [sx, y, swatch, swatch]));
+            if hit == EditHit::Pipette {
+                let icon = commands::icons::PIPETTE;
+                let tiny = (small * 4 / 5).max(9);
+                let iw = text.width(icon, tiny);
+                text.draw(canvas, sx + (swatch - iw) / 2, y + (swatch - Text::line_height(tiny)) / 2, tiny, annotate::ink_on(c), icon);
+                editor.tips.push(([sx, y, swatch, swatch], "Pick a color  I".to_string()));
+            }
+            editor.hits.push((hit, [sx, y, swatch, swatch]));
         }
         y += swatch + pad;
     }
@@ -1449,17 +1770,81 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         y += line + pad;
     }
     if marks {
-        let words = match kind {
-            Tool::Text | Tool::Emoji | Tool::Counter => "Size",
+        let label = match kind {
+            Tool::Text | Tool::Badge | Tool::Emoji | Tool::Counter => "Size",
             Tool::Blur => "Strength",
             _ => "Width",
         };
-        heading(canvas, text, y, words);
+        heading(canvas, text, y, label);
         y += small_line + pad / 3;
         let size = subject.as_ref().map_or(editor.style.size, |shape| (0..4).find(|at| (editor.stroke(shape.tool, *at) - shape.stroke).abs() < 0.01).unwrap_or(usize::MAX));
         let cells = segments(canvas, text, [inner, y, inner_w, line], &["1", "2", "3", "4"], Some(size), small, mouse);
         editor.hits.extend(cells.into_iter().enumerate().map(|(at, place)| (EditHit::Size(at), place)));
         y += line + pad;
+    }
+    if words {
+        heading(canvas, text, y, "Font");
+        y += small_line + pad / 3;
+        let face = subject.as_ref().map_or(editor.style.face, |shape| shape.face);
+        let cells = segments(canvas, text, [inner, y, inner_w, line], &[""; 5], Some(face), small, mouse);
+        let width = canvas.width as usize;
+        for (at, cell) in cells.iter().enumerate() {
+            // Each face shows itself.
+            let size = small as f32 * 1.1;
+            let look = Look { face: at, bold: false, italic: false };
+            let w = lettering::width(look, "Aa", size);
+            let ink = if at == face { TEXT_COLOR } else { DIM_TEXT_COLOR };
+            let clip = [cell[0], cell[1], cell[0] + cell[2], cell[1] + cell[3]];
+            let spot = (cell[0] as f32 + (cell[2] as f32 - w) / 2.0, cell[1] as f32 + (cell[3] as f32 - lettering::line_height(size)) / 2.0);
+            lettering::draw(canvas.all(), width, clip, spot, size, ink, 256, look, "Aa", None);
+            editor.hits.push((EditHit::Face(at), *cell));
+            editor.tips.push((*cell, format!("{}  G", FACES[at])));
+        }
+        y += line + pad / 2;
+    }
+    if kind == Tool::Text {
+        let style = subject.as_ref().map_or(editor.style.text, |shape| shape.style);
+        let flags = [(BOLD, "B", "Bold  Ctrl+B"), (ITALIC, "I", "Italic  Ctrl+I"), (HIGHLIGHT, "H", "Highlight"), (BOXED, "A", "On a patch"), (BULLETS, "•", "Bullets")];
+        let cells = segments(canvas, text, [inner, y, inner_w, line], &flags.map(|(_, label, _)| label), None, small, mouse);
+        for ((flag, label, tip), cell) in flags.iter().zip(cells) {
+            if style & flag != 0 {
+                canvas.round_fill(cell[0], cell[1], cell[2], cell[3], line / 4, accent(), 256);
+                let lw = text.width(label, small);
+                text.draw(canvas, cell[0] + (cell[2] - lw) / 2, cell[1] + (line - small_line) / 2, small, on_accent(), label);
+            }
+            editor.hits.push((EditHit::Toggle(*flag), cell));
+            editor.tips.push((cell, tip.to_string()));
+        }
+        y += line + pad;
+    } else if words {
+        y += pad / 2;
+    }
+    if kind == Tool::Badge {
+        heading(canvas, text, y, "Look");
+        y += small_line + pad / 3;
+        let look = subject.as_ref().map_or(editor.style.badge, |shape| shape.look);
+        let color = subject.as_ref().map_or(editor.style.color, |shape| shape.color);
+        let (across, gap) = (3, pad / 3);
+        let cell_w = (inner_w - gap * (across - 1)) / across;
+        let cell_h = line + pad / 2;
+        let width = canvas.width as usize;
+        for at in 0..BADGE_NAMES.len() {
+            let (column, row) = (at as i32 % across, at as i32 / across);
+            let cell = [inner + column * (cell_w + gap), y + row * (cell_h + gap), cell_w, cell_h];
+            if at == look || inside(cell, mouse) {
+                canvas.round_fill(cell[0], cell[1], cell[2], cell[3], pad / 3, if at == look { PLACEHOLDER_COLOR } else { 0x202020 }, 256);
+            }
+            // Each look as it would be, with its name on it.
+            let size = small as f32 * 0.8;
+            let mut sample = Shape::new(Tool::Badge, color, size, (0.0, 0.0));
+            sample.look = at;
+            sample.text = BADGE_NAMES[at].to_string();
+            let [l, t, r, b] = sample.bounds();
+            sample.points[0] = (cell[0] as f32 + (cell[2] as f32 - (r - l)) / 2.0, cell[1] as f32 + (cell[3] as f32 - (b - t)) / 2.0);
+            annotate::paint(&[sample], canvas.all(), width, Place::WHOLE, cell, None);
+            editor.hits.push((EditHit::BadgeLook(at), cell));
+        }
+        y += (BADGE_NAMES.len() as i32 + across - 1) / across * (cell_h + gap) + pad;
     }
     if matches!(kind, Tool::Rect | Tool::Oval) {
         heading(canvas, text, y, "Fill");
@@ -1467,9 +1852,26 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         let filled = subject.as_ref().map_or(editor.style.filled, |shape| shape.filled);
         let cells = segments(canvas, text, [inner, y, inner_w, line], &["Outline", "Filled"], Some(usize::from(filled)), small, mouse);
         editor.hits.extend(cells.into_iter().enumerate().map(|(at, place)| (EditHit::Filled(at == 1), place)));
+        y += line + pad / 2;
+        if !filled {
+            let dash = subject.as_ref().map_or(editor.style.dash, |shape| shape.dash);
+            y = dashes(editor, canvas, text, [inner, y, inner_w, line], dash, small, mouse) + pad / 2;
+        } else {
+            y += pad / 2;
+        }
+    }
+    if kind == Tool::Zoom {
+        heading(canvas, text, y, "Lens");
+        let times = subject.as_ref().map(|shape| format!("{:.1}×", shape.zoom_times())).unwrap_or_default();
+        let tw = text.width(&times, small);
+        text.draw(canvas, inner + inner_w - tw, y, small, TEXT_COLOR, &times);
+        y += small_line + pad / 3;
+        let square = subject.as_ref().map_or(editor.style.square, |shape| shape.filled);
+        let cells = segments(canvas, text, [inner, y, inner_w, line], &["Round", "Square"], Some(usize::from(square)), small, mouse);
+        editor.hits.extend(cells.into_iter().enumerate().map(|(at, place)| (EditHit::Square(at == 1), place)));
         y += line + pad;
     }
-    if let Some(shape) = subject.as_ref().filter(|shape| matches!(shape.tool, Tool::Rect | Tool::Spotlight)) {
+    if let Some(shape) = subject.as_ref().filter(|shape| matches!(shape.tool, Tool::Rect | Tool::Spotlight) && editor.selected.len() <= 1) {
         let value = format!("{} px", shape.radius.round());
         y = slider(editor, canvas, text, [inner, y, inner_w], "Corners", &value, shape.radius / editor.slider_most(Slider::Shape).max(1.0), Slider::Shape, small, pad);
     }
@@ -1480,20 +1882,12 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         let choices = [[false, false], [false, true], [true, true]];
         let cells = segments(canvas, text, [inner, y, inner_w, line], &["", "", ""], choices.iter().position(|c| *c == heads), small, mouse);
         for (cell, choice) in cells.iter().zip(choices) {
-            preview(canvas, text, *cell, choice, Dash::Solid, pad);
+            preview(canvas, *cell, choice, Dash::Solid, pad);
             editor.hits.push((EditHit::Heads(choice), *cell));
         }
         y += line + pad / 2;
         let dash = subject.as_ref().map_or(editor.style.dash, |shape| shape.dash);
-        let dashes = [Dash::Solid, Dash::Dashed, Dash::Dotted];
-        let cells = segments(canvas, text, [inner, y, inner_w, line], &["", "", ""], dashes.iter().position(|d| *d == dash), small, mouse);
-        for (cell, dash) in cells.iter().zip(dashes) {
-            preview(canvas, text, *cell, [false, false], dash, pad);
-            editor.hits.push((EditHit::Dash(dash), *cell));
-        }
-        y += line + pad;
-    }
-    if kind == Tool::Arrow || kind == Tool::Line {
+        y = dashes(editor, canvas, text, [inner, y, inner_w, line], dash, small, mouse);
         text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, "Click an end  ·  drag the middle");
         y += small_line + pad;
     }
@@ -1532,7 +1926,7 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, "Overwrite → white  ·  Copy → PNG");
         y += small_line;
     }
-    let keys = [("Ctrl+S", "overwrite  ·  Shift copy"), ("Ctrl+D", "duplicate  ·  Del remove"), ("1–4  c  d  f", "size, color, dash, fill"), ("Esc", "leave")];
+    let keys = [("Ctrl+S", "overwrite  ·  Shift copy"), ("Shift+click", "pick out more"), ("Ctrl+D", "duplicate  ·  Del remove"), ("c d f g", "color, dash, fill, font"), ("Esc", "leave")];
     let key_w = keys.iter().map(|(key, _)| text.width(key, small)).max().unwrap_or(0) + pad / 2;
     let mut y = y.max(top + high - pad - keys.len() as i32 * small_line);
     for (key, what) in keys {
@@ -1540,6 +1934,20 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         text.draw(canvas, inner + key_w, y, small, DIM_TEXT_COLOR, what);
         y += small_line;
     }
+}
+
+/// Solid, dashed and dotted, each drawn as it would look; where the next
+/// row goes.
+#[allow(clippy::too_many_arguments)]
+fn dashes(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, place: [i32; 4], dash: Dash, small: u32, mouse: (i32, i32)) -> i32 {
+    let pad = small as i32;
+    let choices = [Dash::Solid, Dash::Dashed, Dash::Dotted];
+    let cells = segments(canvas, text, place, &["", "", ""], choices.iter().position(|d| *d == dash), small, mouse);
+    for (cell, choice) in cells.iter().zip(choices) {
+        preview(canvas, *cell, [false, false], choice, pad);
+        editor.hits.push((EditHit::Dash(choice), *cell));
+    }
+    place[1] + place[3] + pad / 2
 }
 
 /// A row of choices side by side, the one chosen filled in; where each is.
@@ -1568,13 +1976,13 @@ fn segments(canvas: &mut Canvas, text: &mut Text, [x, y, w, h]: [i32; 4], labels
 }
 
 /// A short line in a cell, with heads and dashes as a choice would draw it.
-fn preview(canvas: &mut Canvas, text: &mut Text, [x, y, w, h]: [i32; 4], heads: [bool; 2], dash: Dash, pad: i32) {
+fn preview(canvas: &mut Canvas, [x, y, w, h]: [i32; 4], heads: [bool; 2], dash: Dash, pad: i32) {
     let mut shape = Shape::new(Tool::Line, TEXT_COLOR, 2.0, ((x + pad / 2) as f32, (y + h / 2) as f32));
     shape.points[1] = ((x + w - pad / 2) as f32, (y + h / 2) as f32);
     shape.heads = heads;
     shape.dash = dash;
     let width = canvas.width as usize;
-    annotate::paint(&[shape], canvas.all(), width, Place::WHOLE, [x, y, w, h], text, None);
+    annotate::paint(&[shape], canvas.all(), width, Place::WHOLE, [x, y, w, h], None);
 }
 
 /// A slider with its name and value above it; where the next row goes.
@@ -1623,7 +2031,8 @@ fn draw_picker(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, left: 
     let side = (cell - pad / 2).max(8) as u32;
     let mut caption = if found.is_empty() { "None by that name".to_string() } else { format!("{} emoji  ·  Enter places the first", found.len()) };
     let width = canvas.width as usize;
-    for (n, which) in found.iter().skip(picker.scroll * EMOJI_ACROSS).take(EMOJI_ACROSS * EMOJI_DOWN).enumerate() {
+    let scroll = picker.scroll;
+    for (n, which) in found.iter().skip(scroll * EMOJI_ACROSS).take(EMOJI_ACROSS * EMOJI_DOWN).enumerate() {
         let (column, row) = ((n % EMOJI_ACROSS) as i32, (n / EMOJI_ACROSS) as i32);
         let place = [x + pad / 2 + column * cell, grid_y + row * cell, cell, cell];
         if inside(place, mouse) {
@@ -1632,16 +2041,11 @@ fn draw_picker(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, left: 
         }
         if let Some(picture) = annotate::emoji(list[*which].0, side) {
             let at = (place[0] + (cell - picture.0) / 2, place[1] + (cell - picture.1) / 2);
-            annotate::stamp(canvas.all(), width, place_clip(place), &picture, at, 256, None);
+            annotate::stamp(canvas.all(), width, [place[0], place[1], place[0] + cell, place[1] + cell], &picture, at, 256, None);
         }
         editor.hits.push((EditHit::Emoji(*which), place));
     }
     text.draw(canvas, x + pad / 2, grid_y + cell * EMOJI_DOWN as i32 + pad / 4, small, DIM_TEXT_COLOR, &caption);
-}
-
-/// A rectangle as the clip `stamp` takes: left, top, right, bottom.
-fn place_clip([x, y, w, h]: [i32; 4]) -> [i32; 4] {
-    [x, y, x + w, y + h]
 }
 
 fn tool_icon(tool: Tool) -> &'static str {
@@ -1656,10 +2060,13 @@ fn tool_icon(tool: Tool) -> &'static str {
         Tool::Marker => MARKER,
         Tool::Text => TYPE,
         Tool::Counter => COUNTER,
+        Tool::Badge => BADGE,
         Tool::Emoji => STICKER,
         Tool::Blur => BLUR,
         Tool::Spotlight => SPOTLIGHT,
+        Tool::Zoom => ZOOM_IN,
         Tool::Crop => CROP,
+        Tool::Pipette => PIPETTE,
     }
 }
 
@@ -1819,5 +2226,40 @@ mod tests {
         put_back(&backup.unwrap(), &photo).unwrap();
         assert_eq!(std::fs::read(&photo).unwrap(), before);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn shape_at(l: f32, t: f32, r: f32, b: f32) -> Shape {
+        let mut shape = Shape::new(Tool::Rect, 0, 2.0, (l, t));
+        shape.points[1] = (r, b);
+        shape
+    }
+
+    #[test]
+    fn a_mark_moved_near_another_rests_against_its_edge() {
+        let mut editor = Editor::new(0, (1000, 1000));
+        editor.doc.shapes = vec![shape_at(100.0, 100.0, 200.0, 200.0), shape_at(400.0, 130.0, 500.0, 230.0)];
+        editor.selected = vec![0];
+        let before = editor.doc.clone();
+        // Its right edge three pixels short of the other's left edge.
+        editor.move_selected(&before, (194.0, 0.0), false);
+        let right = editor.doc.shapes[0].bounds()[2];
+        let left = editor.doc.shapes[1].bounds()[0];
+        assert!((right - left).abs() < 0.01);
+        assert!(!editor.guides.0.is_empty());
+        // With Ctrl, it goes where it is put.
+        editor.move_selected(&before, (194.0, 0.0), true);
+        assert!((editor.doc.shapes[0].bounds()[2] - left).abs() > 1.0);
+    }
+
+    #[test]
+    fn a_box_dragged_out_picks_out_what_it_touches() {
+        let mut editor = Editor::new(0, (1000, 1000));
+        editor.doc.shapes = vec![shape_at(100.0, 100.0, 200.0, 200.0), shape_at(400.0, 400.0, 500.0, 500.0), shape_at(800.0, 800.0, 900.0, 900.0)];
+        editor.pick_within((450.0, 450.0), (50.0, 50.0), false);
+        assert_eq!(editor.selected, vec![0, 1]);
+        editor.pick_within((850.0, 850.0), (860.0, 860.0), true);
+        assert_eq!(editor.selected, vec![0, 1, 2]);
+        editor.pick_within((850.0, 850.0), (860.0, 860.0), false);
+        assert_eq!(editor.selected, vec![2]);
     }
 }

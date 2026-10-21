@@ -1,4 +1,5 @@
 mod annotate;
+mod lettering;
 mod app;
 mod boxes;
 mod commands;
