@@ -1029,6 +1029,7 @@ dependencies = [
  "softbuffer",
  "ssimulacra2",
  "toml",
+ "ttf-parser",
  "vergen-gitcl",
  "webp",
  "winit",

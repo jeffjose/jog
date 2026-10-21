@@ -504,6 +504,8 @@ pub mod icons {
     pub const SPOTLIGHT: &str = "\u{e708}";
     pub const CROP: &str = "\u{e709}";
     pub const EDIT: &str = "\u{e70a}";
+    pub const REDO: &str = "\u{e70b}";
+    pub const STICKER: &str = "\u{e70c}";
 }
 
 /// The icon drawn beside a menu item.
@@ -1147,7 +1149,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Y", "Copy for the shell: one line, a folder's files as /dir/img-{1,5}.jpg"),
                 ("F2", "Rename, or move: a path such as /tmp/a.png"),
                 ("K", "Convert: JPEG XL, AVIF, JPEG, PNG, WebP, settings tried on the picture first"),
-                ("e", "Edit: draw, write, blur, crop, round the corners · Ctrl+S over it, Ctrl+Shift+S a copy"),
+                ("e", "Edit: draw, write, emoji, blur, crop, round the corners · Ctrl+S over it, Ctrl+Shift+S a copy"),
                 ("u", "Undo copy, move, rename or an edit saved over"),
                 ("Delete", "Remove from the list"),
                 ("Ctrl+Delete", "Move to trash"),

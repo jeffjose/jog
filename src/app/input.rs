@@ -705,13 +705,13 @@ impl App {
     }
 
     pub(super) fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
-        if self.editor.is_some() {
-            return;
-        }
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => f64::from(y),
             MouseScrollDelta::PixelDelta(position) => position.y / 50.0,
         };
+        if self.editor.is_some() {
+            return self.editor_wheel(lines);
+        }
         // With the loupe up, the wheel makes it stronger or weaker.
         if let Some(strength) = &mut self.loupe {
             *strength = (*strength * 1.25f64.powf(lines)).clamp(0.5, 8.0);
