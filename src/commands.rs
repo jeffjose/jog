@@ -147,6 +147,9 @@ pub enum Command {
     ClearMarks,
     /// Narrow the list to the marked files.
     OnlyMarked,
+    /// Narrow the list to its pictures, or to its videos.
+    OnlyImages,
+    OnlyVideos,
     CopyName,
     /// Copy the name of the file on view alone, marks or none: a click on
     /// it in the info overlay.
@@ -375,6 +378,8 @@ pub enum Applies {
     Videos,
     /// Only while the list is narrowed to the matches of a search.
     Filtered,
+    /// Only while the list holds both pictures and videos.
+    Mixed,
 }
 
 pub struct MenuItem {
@@ -397,6 +402,10 @@ const fn image_item(label: &'static str, keys: &'static str, command: Command) -
 
 const fn video_item(label: &'static str, keys: &'static str, command: Command) -> Option<MenuItem> {
     Some(MenuItem { label, keys, command, applies: Applies::Videos, sub: &[] })
+}
+
+const fn mixed_item(label: &'static str, keys: &'static str, command: Command) -> Option<MenuItem> {
+    Some(MenuItem { label, keys, command, applies: Applies::Mixed, sub: &[] })
 }
 
 const fn submenu(label: &'static str, sub: &'static [Option<MenuItem>], applies: Applies) -> Option<MenuItem> {
@@ -607,6 +616,8 @@ pub fn command_icon(command: Command) -> &'static str {
         Mark | MarkAll => STAR,
         MarkMenu | InvertMarks => FLAG,
         OnlyMarked => LIST_FILTER,
+        OnlyImages => IMAGES,
+        OnlyVideos => FILM,
         CopyTo | CopyToAsk => FOLDER_PLUS,
         MoveTo | MoveToAsk => FOLDER_INPUT,
         Rename => PENCIL,
@@ -640,6 +651,8 @@ pub const MENU: &[Option<MenuItem>] = &[
     video_item("Next", "Ctrl+Right", Command::Next),
     video_item("Previous", "Ctrl+Left", Command::Previous),
     item("Find…", "/", Command::Search),
+    mixed_item("Only pictures", "", Command::OnlyImages),
+    mixed_item("Only videos", "", Command::OnlyVideos),
     Some(MenuItem { label: "Back from this search", keys: "Esc", command: Command::ClearFilter, applies: Applies::Filtered, sub: &[] }),
     Some(MenuItem { label: "Show all files, stay on this one", keys: "", command: Command::ShowAllHere, applies: Applies::Filtered, sub: &[] }),
     item("Shuffle", "z", Command::Shuffle),
@@ -907,6 +920,8 @@ pub const GRID_MENU: &[Option<MenuItem>] = &[
     item("Delete…", "D", Command::Delete),
     None,
     item("Find…", "/", Command::Search),
+    mixed_item("Only pictures", "", Command::OnlyImages),
+    mixed_item("Only videos", "", Command::OnlyVideos),
     submenu("Sort", SORT, Applies::Always),
     submenu("Marks", MARKS, Applies::Always),
     None,
@@ -944,6 +959,8 @@ pub const LIST_MENU: &[Option<MenuItem>] = &[
     item("Delete…", "D", Command::Delete),
     None,
     item("Find…", "/", Command::Search),
+    mixed_item("Only pictures", "", Command::OnlyImages),
+    mixed_item("Only videos", "", Command::OnlyVideos),
     submenu("Sort", SORT, Applies::Always),
     submenu("Marks", MARKS, Applies::Always),
 ];
@@ -951,6 +968,8 @@ pub const LIST_MENU: &[Option<MenuItem>] = &[
 /// The menu for the grid as a whole, on a right click off the pictures.
 pub const GRID_AROUND_MENU: &[Option<MenuItem>] = &[
     item("Find…", "/", Command::Search),
+    mixed_item("Only pictures", "", Command::OnlyImages),
+    mixed_item("Only videos", "", Command::OnlyVideos),
     submenu("Sort", SORT, Applies::Always),
     item("Shuffle", "z", Command::Shuffle),
     item("Workspaces", "G", Command::Overview),
@@ -1053,7 +1072,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("@  Ctrl+1  Ctrl+Tab", "Workspaces: list, go to, next"),
                 ("Ctrl+`", "Back to what jog was started on"),
                 ("word  ^start  !not", "Match names"),
-                ("#video  #marked  >10mb", "Match kinds and sizes"),
+                ("#image  #video  #marked  >10mb", "Match kinds and sizes"),
                 ("is:new  is:kept  is:rejected", "Videos not watched yet, and what a triage decided"),
                 (">sort", "Find a command and run it"),
                 (":42  :1:30  :50%", "Go to a file number or a time"),

@@ -2908,6 +2908,17 @@ impl App {
                 let picked = matches.first().copied();
                 self.keep_matches("is:marked".to_string(), matches, picked);
             }
+            // As `#image` or `#video` typed and kept, staying on the file
+            // on view if it is one of them.
+            OnlyImages | OnlyVideos => {
+                let typed = if command == OnlyVideos { "#video" } else { "#image" };
+                let (matches, _) = self.matching(typed);
+                if matches.is_empty() {
+                    return self.toast(if command == OnlyVideos { "No videos" } else { "No pictures" });
+                }
+                let picked = Some(self.id()).filter(|id| matches.contains(id)).or(matches.first().copied());
+                self.keep_matches(typed.to_string(), matches, picked);
+            }
             MarkAll => {
                 self.marks = self.list.iter().copied().collect();
                 self.toast(format!("{} marked", self.marks.len()));

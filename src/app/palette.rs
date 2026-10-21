@@ -80,6 +80,7 @@ impl App {
                     Applies::Images => !video,
                     Applies::Videos => video,
                     Applies::Filtered => self.filter.is_some(),
+                    Applies::Mixed => self.mixed(),
                 };
                 match item.command {
                     _ if !applies => {}
@@ -611,6 +612,13 @@ impl App {
     /// How many files there are in all, whatever the list is narrowed to.
     pub(super) fn total(&self) -> usize {
         self.filter.as_ref().map_or(self.list.len(), |(_, all)| all.len())
+    }
+
+    /// Whether the list on view holds both pictures and videos, so that
+    /// narrowing it to one kind would leave something out.
+    pub(super) fn mixed(&self) -> bool {
+        let mut kinds = self.list.iter().map(|id| files::is_video(&self.files[*id]));
+        kinds.next().is_some_and(|first| kinds.any(|kind| kind != first))
     }
 
     /// Every file, whatever the list is narrowed to, in the list's order.

@@ -47,6 +47,7 @@ impl App {
             Applies::Images => videos < ids.len(),
             Applies::Videos => videos > 0,
             Applies::Filtered => self.filter.is_some(),
+            Applies::Mixed => self.mixed(),
         };
         let mut entries: Vec<Option<&'static MenuItem>> = Vec::new();
         for entry in all_entries {
