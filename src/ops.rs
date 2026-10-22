@@ -75,10 +75,18 @@ pub fn copy_file(from: &Path, to: &Path) -> io::Result<()> {
 
 /// Puts text on the clipboard with whichever helper is installed. These
 /// keep serving the text after jog exits, which an in-process clipboard
-/// could not. Returns whether one of them took it.
+/// could not. It goes to the primary selection too, which Shift+Insert and
+/// the middle button paste. Returns whether the clipboard took it.
 pub fn set_clipboard(text: &str) -> bool {
     let helpers: [&[&str]; 3] =
         [&["xclip", "-selection", "clipboard"], &["xsel", "--clipboard", "--input"], &["wl-copy"]];
+    let primary: [&[&str]; 3] = [&["xclip", "-selection", "primary"], &["xsel", "--primary", "--input"], &["wl-copy", "--primary"]];
+    give(&primary, text);
+    give(&helpers, text)
+}
+
+/// Text handed to the first of `helpers` that takes it.
+fn give(helpers: &[&[&str]], text: &str) -> bool {
     helpers.iter().any(|helper| {
         let child = Command::new(helper[0])
             .args(&helper[1..])
@@ -147,6 +155,16 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("out/b.txt")).unwrap(), "b");
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Needs a display of its own: `xvfb-run -a cargo test -- --ignored clipboard`.
+    #[test]
+    #[ignore]
+    fn copied_text_is_on_the_clipboard_and_the_primary_selection() {
+        assert!(set_clipboard("jog-copied"));
+        assert_eq!(clipboard().as_deref(), Some("jog-copied"));
+        let primary = Command::new("xclip").args(["-selection", "primary", "-o"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&primary.stdout), "jog-copied");
     }
 
     #[test]
