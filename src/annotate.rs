@@ -139,10 +139,44 @@ pub const HIGHLIGHT: u8 = 4;
 pub const BOXED: u8 = 8;
 pub const BULLETS: u8 = 16;
 
-/// The colors to draw in: hotshot's.
+/// The colors to hand, a click each.
 pub const COLORS: [u32; 8] = [0xFF3B30, 0xFF9500, 0xFFCC00, 0x34C759, 0x0A84FF, 0xAF52DE, 0xFFFFFF, 0x1C1C1E];
-/// How opaque a mark can be, out of 256.
-pub const OPACITIES: [u32; 4] = [64, 128, 192, 256];
+
+/// The rest, in the color picker: Radix's, at the step meant for solid
+/// backgrounds, as hotshot has them; the reds round to the violets, the
+/// blues to the greens, the bright ones and those that are no color.
+pub const PALETTE: [u32; 24] = [
+    0xE54D2E, 0xE5484D, 0xE54666, 0xE93D82, 0xD6409F, 0xAB4ABA, 0x8E4EC6, 0x6E56CF,
+    0x5B5BD6, 0x3E63DD, 0x0090FF, 0x00A2C7, 0x12A594, 0x29A383, 0x30A46C, 0x46A758,
+    0xBDEE63, 0xFFE629, 0xFFC53D, 0xF76B15, 0xAD7F58, 0x8D8D8D, 0xFFFFFF, 0x161616,
+];
+
+/// A color as hue (0 to 360), saturation and value (0 to 1).
+pub fn to_hsv(color: u32) -> (f32, f32, f32) {
+    let [r, g, b] = [16, 8, 0].map(|shift| (color >> shift & 0xFF) as f32 / 255.0);
+    let (most, least) = (r.max(g).max(b), r.min(g).min(b));
+    let spread = most - least;
+    let hue = if spread == 0.0 {
+        0.0
+    } else if most == r {
+        60.0 * ((g - b) / spread).rem_euclid(6.0)
+    } else if most == g {
+        60.0 * ((b - r) / spread + 2.0)
+    } else {
+        60.0 * ((r - g) / spread + 4.0)
+    };
+    (hue, if most == 0.0 { 0.0 } else { spread / most }, most)
+}
+
+/// The color of a hue, saturation and value.
+pub fn from_hsv((hue, saturation, value): (f32, f32, f32)) -> u32 {
+    let part = |n: f32| {
+        let k = (n + hue / 60.0).rem_euclid(6.0);
+        let v = value - value * saturation * k.min(4.0 - k).clamp(0.0, 1.0);
+        (v.clamp(0.0, 1.0) * 255.0).round() as u32
+    };
+    part(5.0) << 16 | part(3.0) << 8 | part(1.0)
+}
 
 /// How much darker what is outside a spotlight is: it keeps this much of
 /// its brightness, out of 256.
@@ -176,6 +210,9 @@ pub struct Shape {
     /// Whether a line has a head at its first end and at its last.
     pub heads: [bool; 2],
     pub dash: Dash,
+    /// How long a dash is, or how wide a dot; and the gap between them.
+    pub dash_length: f32,
+    pub gap: f32,
     /// Where a bent line passes half way along.
     pub bend: Option<Point>,
     /// The face its words are in.
@@ -302,7 +339,21 @@ impl Shape {
     pub fn new(tool: Tool, color: u32, stroke: f32, at: Point) -> Shape {
         let points = if tool.spans() { vec![at, at] } else { vec![at] };
         let heads = [false, tool == Tool::Arrow];
-        Shape { tool, color, opacity: 256, stroke, points, text: String::new(), filled: false, radius: stroke * 1.2, heads, dash: Dash::Solid, bend: None, face: 0, style: 0, look: 0 }
+        Shape { tool, color, opacity: 256, stroke, points, text: String::new(), filled: false, radius: stroke * 1.2, heads, dash: Dash::Solid, dash_length: 0.0, gap: 0.0, bend: None, face: 0, style: 0, look: 0 }
+    }
+
+    /// Drawn solid, in dashes or in dots, those as long and as far apart
+    /// as suits its width until they are set otherwise.
+    pub fn set_dash(&mut self, dash: Dash) {
+        if dash == self.dash {
+            return;
+        }
+        self.dash = dash;
+        (self.dash_length, self.gap) = match dash {
+            Dash::Solid => (self.dash_length, self.gap),
+            Dash::Dashed => (self.stroke * 3.0 + 4.0, self.stroke * 2.0 + 3.0),
+            Dash::Dotted => (self.stroke, self.stroke * 1.2 + 1.0),
+        };
     }
 
     /// The rectangle its first two points span: left, top, right, bottom.
@@ -586,7 +637,7 @@ impl Shape {
             if plain || self.dash == Dash::Solid || solid > self.stroke {
                 solid
             } else {
-                run_distance(p, &self.ring(), self.dash, self.stroke, (0.0, 0.0))
+                run_distance(p, &self.ring(), (self.dash, self.dash_length, self.gap), self.stroke, (0.0, 0.0))
             }
         };
         match self.tool {
@@ -638,21 +689,25 @@ impl Shape {
         // otherwise blunt.
         let trim = (if self.heads[0] { head * 0.8 } else { 0.0 }, if self.heads[1] { head * 0.8 } else { 0.0 });
         let dash = if plain { Dash::Solid } else { self.dash };
-        nearest.min(run_distance(p, &path, dash, self.stroke, trim))
+        nearest.min(run_distance(p, &path, (dash, self.dash_length, self.gap), self.stroke, trim))
     }
 }
 
 /// How far a point is from a run of straight lines `stroke` wide, less
-/// `trim` at either end, in dashes or dots if so.
-fn run_distance(p: Point, path: &[Point], dash: Dash, stroke: f32, trim: (f32, f32)) -> f32 {
+/// `trim` at either end: in dashes `length` long, or dots `length` across,
+/// with `gap` between them, if so.
+fn run_distance(p: Point, path: &[Point], (dash, piece, gap): (Dash, f32, f32), stroke: f32, trim: (f32, f32)) -> f32 {
     let lengths: Vec<f32> = path.windows(2).map(|pair| dist(pair[0], pair[1])).collect();
     let whole: f32 = lengths.iter().sum();
     let half = stroke / 2.0;
     let (first, last) = (trim.0, whole - trim.1);
+    let (piece, gap) = (piece.max(0.5), gap.max(0.5));
+    // A dash's round ends make it longer by the width of the line: what
+    // is between them is that much shorter, so that it is as long as asked.
     let (period, on) = match dash {
         Dash::Solid => (0.0, 0.0),
-        Dash::Dashed => (stroke * 4.5 + 7.0, stroke * 2.5 + 4.0),
-        Dash::Dotted => (stroke * 2.2, 0.0),
+        Dash::Dashed => (piece + gap, (piece - stroke).max(0.0)),
+        Dash::Dotted => (piece + gap, 0.0),
     };
     let mut nearest = f32::MAX;
     let mut gone = 0.0f32;
@@ -675,12 +730,18 @@ fn run_distance(p: Point, path: &[Point], dash: Dash, stroke: f32, trim: (f32, f
                 // How far along the dashes it is, and how far that is from
                 // the nearest dash or dot.
                 let s = begins + s0 - first + t * run;
-                let into = s.rem_euclid(period);
-                let off = match dash {
-                    Dash::Dotted => into.min(period - into),
-                    _ => if into <= on { 0.0 } else { (into - on).min(period - into) },
-                };
-                across.hypot(off) - half
+                match dash {
+                    // Dots as large as asked, whatever the line's width.
+                    Dash::Dotted => {
+                        let into = (s - piece / 2.0).rem_euclid(period);
+                        across.hypot(into.min(period - into)) - piece / 2.0
+                    }
+                    _ => {
+                        let into = (s - half).rem_euclid(period);
+                        let off = if into <= on { 0.0 } else { (into - on).min(period - into) };
+                        across.hypot(off) - half
+                    }
+                }
             }
         };
         nearest = nearest.min(far);
@@ -1350,7 +1411,7 @@ mod tests {
         let mut shape = rect((10.0, 10.0), (210.0, 60.0));
         let solid = painted(&[shape.clone()], w, 70, Place::WHOLE);
         assert!((20..200).all(|x| solid[10 * w + x] == 0xFF0000));
-        shape.dash = Dash::Dashed;
+        shape.set_dash(Dash::Dashed);
         let dashed = painted(&[shape], w, 70, Place::WHOLE);
         assert!((20..200).filter(|x| dashed[10 * w + x] == 0).count() > 30);
     }
@@ -1374,7 +1435,7 @@ mod tests {
         let solid = painted(&[line.clone()], w, 20, Place::WHOLE);
         assert!((0..200).filter(|x| solid[10 * w + x] == 0).count() < 4);
         for dash in [Dash::Dashed, Dash::Dotted] {
-            line.dash = dash;
+            line.set_dash(dash);
             let broken = painted(&[line.clone()], w, 20, Place::WHOLE);
             assert!((0..200).filter(|x| broken[10 * w + x] == 0).count() > 40, "{dash:?}");
         }
