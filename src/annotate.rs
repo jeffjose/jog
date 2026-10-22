@@ -370,12 +370,12 @@ impl Shape {
         self.stroke * 2.4 + 6.0
     }
 
-    fn lettering(&self) -> Look {
+    pub fn lettering(&self) -> Look {
         Look { face: self.face, bold: self.style & BOLD != 0, italic: self.style & ITALIC != 0 }
     }
 
     /// What each line of its words begins with: a dot, with bullets.
-    fn lead(&self) -> &'static str {
+    pub fn lead(&self) -> &'static str {
         if self.style & BULLETS != 0 { "\u{2022} " } else { "" }
     }
 
@@ -389,6 +389,53 @@ impl Shape {
             10 => px * 0.5,
             _ => px * 0.75,
         }
+    }
+
+    /// Where its words begin: the top-left of the first line's box, unturned.
+    pub fn text_origin(&self) -> Point {
+        let (x, y) = self.points[0];
+        match self.tool {
+            Tool::Badge => (x + self.badge_lead(), y + lettering::line_height(self.stroke) / 6.0),
+            _ => (x, y),
+        }
+    }
+
+    /// What each line begins with, as drawn: a badge has no bullets.
+    fn line_lead(&self) -> &'static str {
+        if self.tool == Tool::Text { self.lead() } else { "" }
+    }
+
+    /// Where the caret stands before letter `at` of its words: the top of
+    /// it, unturned, and how tall it is.
+    pub fn caret_spot(&self, at: usize) -> (Point, f32) {
+        let before: String = self.text.chars().take(at).collect();
+        let line = before.matches('\n').count();
+        let column = before.rsplit('\n').next().unwrap_or_default();
+        let (x, y) = self.text_origin();
+        let height = lettering::line_height(self.stroke);
+        let wide = lettering::width(self.lettering(), &format!("{}{column}", self.line_lead()), self.stroke);
+        let wide = if column.is_empty() && self.line_lead().is_empty() { 0.0 } else { wide };
+        ((x + wide, y + line as f32 * height), height)
+    }
+
+    /// The letter whose place is nearest a point of the picture, where a
+    /// click there puts the caret.
+    pub fn caret_at(&self, p: Point) -> usize {
+        let p = self.unturn(p);
+        let (x, y) = self.text_origin();
+        let height = lettering::line_height(self.stroke);
+        let lines: Vec<&str> = self.text.split('\n').collect();
+        let line = (((p.1 - y) / height).floor().max(0.0) as usize).min(lines.len() - 1);
+        let before: usize = lines[..line].iter().map(|words| words.chars().count() + 1).sum();
+        let words = lines[line];
+        let lead = self.line_lead();
+        let column = (0..=words.chars().count())
+            .min_by(|a, b| {
+                let at = |n: usize| x + lettering::width(self.lettering(), &format!("{lead}{}", words.chars().take(n).collect::<String>()), self.stroke);
+                (at(*a) - p.0).abs().total_cmp(&(at(*b) - p.0).abs())
+            })
+            .unwrap_or(0);
+        before + column
     }
 
     /// Where a zoom's larger view is: left, top, right, bottom.

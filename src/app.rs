@@ -281,6 +281,10 @@ pub enum Event {
     /// The tracks editor's file written, or why not; and whether it took
     /// the original's place.
     TracksWritten(Result<PathBuf, String>, bool),
+    /// Text from the clipboard, for Edit to paste.
+    EditPaste(String),
+    /// The straight edges found in a picture being edited, down and across.
+    EditEdges(usize, Vec<f32>, Vec<f32>),
     /// A picture saved from Edit, or why not.
     EditSaved(editor::Saved),
     /// Files moved, copied or trashed on another thread.
@@ -1369,6 +1373,8 @@ pub struct App {
     /// way, to go back to if it fails.
     editor: Option<editor::Editor>,
     edit_stash: Option<editor::Editor>,
+    /// The file `--edit` opens in Edit once it is loaded.
+    edit_waiting: Option<usize>,
     track_memory: Option<HashMap<PathBuf, tracks::TrackChoice>>,
     /// The section marked in each video, by file: still there when the
     /// video is come back to.
@@ -1976,6 +1982,7 @@ impl App {
             track_editor: None,
             editor: None,
             edit_stash: None,
+            edit_waiting: None,
             track_memory: None,
             sections: HashMap::new(),
             marked_sections: None,
@@ -2335,6 +2342,10 @@ impl App {
                 }
                 self.shown = Some((id, frame));
                 self.error = None;
+                // `--edit`, now that there is a picture to edit.
+                if self.edit_waiting.take_if(|waiting| *waiting == id).is_some() {
+                    self.open_editor();
+                }
             }
             Some(Err(reason)) => {
                 self.shown = None;
@@ -4106,6 +4117,8 @@ impl App {
             Event::Compared(id, found) => self.compared(id, found),
             Event::TracksWritten(result, replaced) => self.tracks_written(result, replaced),
             Event::EditSaved(saved) => self.edit_saved(saved),
+            Event::EditPaste(words) => self.edit_paste(words),
+            Event::EditEdges(id, down, across) => self.edit_edges(id, down, across),
             Event::FilesDone(done) => self.files_done(done, event_loop),
             Event::Packets(id, packets) => self.packets_read(id, packets),
             Event::TimelineFrames(id, frames) => self.timeline_frames(id, frames),

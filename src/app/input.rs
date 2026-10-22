@@ -389,8 +389,12 @@ impl App {
         // Edit has the whole window; while its copy is being named, the
         // box has the keys and the mouse waits.
         if self.editor.is_some() {
-            if button == MouseButton::Left && self.prompt.is_none() {
-                self.editor_mouse(pressed);
+            if self.prompt.is_none() {
+                match button {
+                    MouseButton::Left => self.editor_mouse(pressed),
+                    MouseButton::Right if pressed => self.editor_right_click(),
+                    _ => {}
+                }
             }
             return;
         }

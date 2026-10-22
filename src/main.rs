@@ -213,7 +213,7 @@ fn main() -> ExitCode {
         let _ = proxy.send_event(Event::Loaded(loader::Job::Fitted(playlist.start)));
     }
 
-    let (watch, filter, choosing) = (options.watch, options.filter.clone(), !options.sessions.is_empty());
+    let (watch, filter, choosing, edit) = (options.watch, options.filter.clone(), !options.sessions.is_empty(), options.edit);
     let benchmark = options.benchmark;
     let mut app = App::new(options, files, playlist.start, loader, proxy, cwd);
     if benchmark {
@@ -229,6 +229,10 @@ fn main() -> ExitCode {
             eprintln!("jog: nothing matches --filter '{typed}'");
             return ExitCode::FAILURE;
         }
+    }
+    // --edit: the first picture opens in Edit once it is loaded.
+    if edit {
+        app.edit_on_open();
     }
     // With sessions to choose from, they are what is shown first.
     if choosing {

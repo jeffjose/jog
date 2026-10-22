@@ -52,6 +52,8 @@ pub const TOPICS: &[(&str, &str, &str)] = &[
                              random, which also shuffles it now
       --filter TEXT          start with only the files the find box would show
                              for TEXT: jog --filter 'beach #video >10mb'
+      --edit                 open the first picture in Edit (e), to draw on,
+                             crop and save; for a video, nothing
       --watch                add files as they appear in the directories, and
                              drop those that go (W turns it on and off)"),
     ("sessions", "Sessions", "
@@ -381,6 +383,8 @@ pub struct Options {
     /// Whether videos are decoded by the GPU, where one can.
     pub hwdec: bool,
     pub watch: bool,
+    /// Whether the first picture opens in Edit.
+    pub edit: bool,
     /// What to narrow the list to from the start, as typed in the find box.
     pub filter: Option<String>,
     /// What coming back to what was opened does, if it was said.
@@ -594,7 +598,7 @@ fn is_switch(name: &str) -> bool {
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "random",
         "newest", "oldest",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
-        "debug", "verbose", "watch", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "hitches", "no-hitches", "hwdec", "no-hwdec", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
+        "debug", "verbose", "watch", "edit", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "hitches", "no-hitches", "hwdec", "no-hwdec", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
     switches.contains(&name)
 }
@@ -654,6 +658,7 @@ fn parse_with(
         hitches: true,
         hwdec: true,
         watch: false,
+        edit: false,
         filter: None,
         start: None,
         workspaces: Vec::new(),
@@ -881,6 +886,7 @@ fn apply(
         "no-hwdec" => options.hwdec = false,
         "verbose" => options.verbose = true,
         "watch" => options.watch = true,
+        "edit" => options.edit = true,
         "positions" => options.resume = true,
         "no-positions" => options.resume = false,
         "resume" => options.session = true,
