@@ -14,6 +14,8 @@ memchr = "2"
 fontdue = "0.9"
 # Emoji are pictures kept in the system's color emoji font, read with this.
 ttf-parser = "0.25"
+# Fills the outlines of the layers Twemoji is made of.
+ab_glyph_rasterizer = "0.1"
 kamadak-exif = "0.6"
 bytemuck = "1"
 toml = { version = "1", default-features = false, features = ["parse", "serde", "std", "preserve_order"] }
