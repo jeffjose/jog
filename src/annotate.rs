@@ -576,6 +576,24 @@ impl Shape {
         }
     }
 
+    /// Where it is once the picture is mirrored, `to` saying where each of
+    /// its points goes. Words and pictures are not mirrored, only moved,
+    /// so that they still read; turned, they turn the other way.
+    pub fn mirror(&mut self, to: impl Fn(Point) -> Point) {
+        if self.turnable() {
+            let (from, at) = (self.centre(), to(self.centre()));
+            self.translate(at.0 - from.0, at.1 - from.1);
+            self.angle = (-self.angle).rem_euclid(std::f32::consts::TAU);
+        } else {
+            for point in &mut self.points {
+                *point = to(*point);
+            }
+            if let Some(bend) = &mut self.bend {
+                *bend = to(*bend);
+            }
+        }
+    }
+
     /// The corners of its box as unturned, turned: where they are.
     pub fn corners(&self) -> [Point; 4] {
         let [l, t, r, b] = self.local_bounds();
@@ -1347,7 +1365,7 @@ fn magnify(surface: &mut Surface, from: [f32; 4], into: [f32; 4], round: bool) {
 /// The picture at full size with the marks drawn on it, cropped to `crop`
 /// (left, top, right, bottom) and its corners rounded by `radius`: what
 /// Edit saves.
-pub fn render(image: &RgbaImage, shapes: &[Shape], crop: Option<[f32; 4]>, radius: f32) -> RgbaImage {
+pub fn render(image: &RgbaImage, shapes: &[Shape], crop: Option<[f32; 4]>, radius: f32, circle: bool) -> RgbaImage {
     let (w, h) = (image.width() as usize, image.height() as usize);
     let mut pixels: Vec<u32> = image.pixels().map(|p| u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2])).collect();
     let mut alpha: Vec<u8> = image.pixels().map(|p| p[3]).collect();
@@ -1365,8 +1383,11 @@ pub fn render(image: &RgbaImage, shapes: &[Shape], crop: Option<[f32; 4]>, radiu
             let at = sy * w + (l + x).min(w - 1);
             let rgb = pixels[at];
             let mut a = f32::from(alpha[at]);
-            if radius > 0.0 {
-                let inside = round_box(x as f32 + 0.5 - cw as f32 / 2.0, y as f32 + 0.5 - ch as f32 / 2.0, cw as f32 / 2.0, ch as f32 / 2.0, radius);
+            let (dx, dy) = (x as f32 + 0.5 - cw as f32 / 2.0, y as f32 + 0.5 - ch as f32 / 2.0);
+            if circle {
+                a *= (0.5 - ellipse(dx, dy, cw as f32 / 2.0, ch as f32 / 2.0)).clamp(0.0, 1.0);
+            } else if radius > 0.0 {
+                let inside = round_box(dx, dy, cw as f32 / 2.0, ch as f32 / 2.0, radius);
                 a *= (0.5 - inside).clamp(0.0, 1.0);
             }
             row[x * 4..x * 4 + 4].copy_from_slice(&[(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, a.round() as u8]);
@@ -1873,7 +1894,7 @@ fn round_box(x: f32, y: f32, hw: f32, hh: f32, radius: f32) -> f32 {
 }
 
 /// Near enough how far a point is from an ellipse, negative inside.
-fn ellipse(x: f32, y: f32, a: f32, b: f32) -> f32 {
+pub fn ellipse(x: f32, y: f32, a: f32, b: f32) -> f32 {
     let (a, b) = (a.max(0.5), b.max(0.5));
     let k0 = (x / a).hypot(y / b);
     let k1 = (x / (a * a)).hypot(y / (b * b));
@@ -2121,11 +2142,18 @@ mod tests {
     #[test]
     fn rendered_it_is_cropped_and_its_corners_turn_clear() {
         let image = RgbaImage::from_pixel(100, 80, image::Rgba([10, 20, 30, 255]));
-        let out = render(&image, &[], Some([10.0, 10.0, 90.0, 70.0]), 20.0);
+        let out = render(&image, &[], Some([10.0, 10.0, 90.0, 70.0]), 20.0, false);
         assert_eq!(out.dimensions(), (80, 60));
         assert_eq!(out.get_pixel(0, 0)[3], 0);
         assert_eq!(out.get_pixel(40, 30).0, [10, 20, 30, 255]);
         assert_eq!(out.get_pixel(40, 0)[3], 255);
+        // Cut to a circle, its sides touch the crop's and its corners go.
+        let out = render(&image, &[], Some([10.0, 10.0, 70.0, 70.0]), 0.0, true);
+        assert_eq!(out.get_pixel(30, 30)[3], 255);
+        assert!(out.get_pixel(30, 0)[3] > 200);
+        assert!(out.get_pixel(0, 30)[3] > 200);
+        assert_eq!(out.get_pixel(4, 4)[3], 0);
+        assert_eq!(out.get_pixel(59, 59)[3], 0);
     }
 
     #[test]

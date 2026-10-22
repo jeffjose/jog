@@ -100,6 +100,22 @@ impl Transform {
         self.mirrored
     }
 
+    /// The transform that undoes `self`. Mirrored, a turn one way and back
+    /// the other is the same mirror and turn again.
+    pub fn inverse(self) -> Transform {
+        if self.mirrored { self } else { Transform { turns: (4 - self.turns) % 4, mirrored: false } }
+    }
+
+    /// Where a point of a picture `size` wide and high is once the picture
+    /// is transformed: mirrored left to right, then turned clockwise.
+    pub fn point(self, (x, y): (f32, f32), (w, h): (f32, f32)) -> (f32, f32) {
+        let (mut x, mut y, mut w, mut h) = (if self.mirrored { w - x } else { x }, y, w, h);
+        for _ in 0..self.turns {
+            (x, y, w, h) = (h - y, x, h, w);
+        }
+        (x, y)
+    }
+
     /// The transform equivalent to applying `self` and then `next`.
     pub fn then(self, next: Transform) -> Transform {
         // Mirroring reverses the direction of any rotation done before it.
@@ -127,6 +143,27 @@ mod tests {
 
     fn frame(width: u32, height: u32, pixels: &[u32]) -> Frame {
         Frame::still(width, height, (width, height), pixels.to_vec())
+    }
+
+    #[test]
+    fn a_transform_undone_and_a_point_carried_with_it() {
+        let all = [Transform::CW, Transform::CCW, Transform::MIRROR, Transform::FLIP, Transform::CW.then(Transform::MIRROR)];
+        for t in all {
+            assert!(t.then(t.inverse()).is_identity(), "{t:?}");
+            assert!(t.inverse().then(t).is_identity(), "{t:?}");
+        }
+        // The point goes where its pixel goes when the picture is turned.
+        let f = frame(3, 2, &[1, 2, 3, 4, 5, 6]);
+        for t in all {
+            let turned = f.transformed(t);
+            let (w, h) = (turned.width as usize, turned.height as usize);
+            for (at, value) in [1u32, 2, 3, 4, 5, 6].iter().enumerate() {
+                let (x, y) = t.point(((at % 3) as f32 + 0.5, (at / 3) as f32 + 0.5), (3.0, 2.0));
+                let (x, y) = (x as usize, y as usize);
+                assert!(x < w && y < h);
+                assert_eq!(turned.picture(0)[y * w + x], *value, "{t:?}");
+            }
+        }
     }
 
     #[test]

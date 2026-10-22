@@ -24,6 +24,17 @@ pub struct Doc {
     pub crop: Option<[f32; 4]>,
     /// How round its corners are, in its pixels.
     pub radius: f32,
+    /// Cut to the oval its crop fits in: a circle, if that is square.
+    pub circle: bool,
+    /// How the file is turned and mirrored to be the picture drawn on.
+    pub turn: Transform,
+}
+
+impl Doc {
+    /// Whether its corners, or all outside its circle, go clear.
+    fn cut(&self) -> bool {
+        self.radius > 0.0 || self.circle
+    }
 }
 
 /// The two ways out with what was drawn.
@@ -122,6 +133,9 @@ pub struct Editor {
     /// these places across, and across at these down, for marks and the crop
     /// to rest against.
     edges: (Vec<f32>, Vec<f32>),
+    /// The turn that `native` and `edges` are of, and the picture shown:
+    /// the doc's own once Undo or a turn has been caught up with.
+    shown_turn: Transform,
     /// How much larger than fitted the picture is shown, and how far its
     /// middle is moved from the middle of the room for it, on screen; and
     /// what fitting it takes, as last drawn.
@@ -222,6 +236,10 @@ enum EditHit {
     Aspect(Option<f32>),
     ApplyCrop,
     ResetCrop,
+    /// Cut to an oval, or not.
+    Circle,
+    /// Turned left or right, mirrored, or flipped: 0 to 3.
+    Turn(u8),
     /// What the picture says that is not for every eye, blacked out.
     Redact,
     Save(SaveAs),
@@ -313,6 +331,7 @@ impl Editor {
             flyout_at: None,
             tool_menu: None,
             edges: (Vec::new(), Vec::new()),
+            shown_turn: Transform::default(),
             zoom: 1.0,
             pan: (0.0, 0.0),
             fit: 1.0,
@@ -380,6 +399,53 @@ impl Editor {
             self.selected.clear();
             self.crop_draft = None;
         }
+    }
+
+    /// The picture turned a quarter either way, or mirrored either way, and
+    /// what is drawn on it and its crop with it.
+    fn turn_picture(&mut self, step: Transform) {
+        self.finish_typing();
+        self.commit_field();
+        if self.tool == Tool::Crop {
+            self.crop_draft = None;
+            self.tool = Tool::Select;
+        }
+        self.snap();
+        // As the doc is turned, which what is shown may not have caught up with.
+        let behind = self.shown_turn.inverse().then(self.doc.turn).swaps_axes();
+        let (w, h) = if behind { (self.native.1 as f32, self.native.0 as f32) } else { (self.native.0 as f32, self.native.1 as f32) };
+        for shape in &mut self.doc.shapes {
+            if step.swaps_axes() {
+                let by = if step == Transform::CW { std::f32::consts::FRAC_PI_2 } else { -std::f32::consts::FRAC_PI_2 };
+                shape.turn(by, (w / 2.0, h / 2.0));
+                shape.translate((h - w) / 2.0, (w - h) / 2.0);
+            } else {
+                shape.mirror(|p| step.point(p, (w, h)));
+            }
+        }
+        if let Some([l, t, r, b]) = self.doc.crop {
+            let (a, z) = (step.point((l, t), (w, h)), step.point((r, b), (w, h)));
+            self.doc.crop = Some([a.0.min(z.0), a.1.min(z.1), a.0.max(z.0), a.1.max(z.1)]);
+        }
+        self.doc.turn = self.doc.turn.then(step);
+    }
+
+    /// Its size and edges, and the picture shown, made those of `turn`; the
+    /// step from what they were, for the picture to be turned by, if any.
+    fn show_turn(&mut self, turn: Transform) -> Option<Transform> {
+        let step = self.shown_turn.inverse().then(turn);
+        if step.is_identity() {
+            return None;
+        }
+        let size = (self.native.0 as f32, self.native.1 as f32);
+        self.edges = turned_edges(&self.edges, step, size);
+        if step.swaps_axes() {
+            self.native = (self.native.1, self.native.0);
+        }
+        self.shown_turn = turn;
+        (self.zoom, self.pan) = (1.0, (0.0, 0.0));
+        self.crop_draft = None;
+        Some(step)
     }
 
     /// What a new mark of `tool` is drawn as wide, or as tall, as.
@@ -1097,6 +1163,7 @@ impl App {
         if let Some(editor) = self.edit_stash.take() {
             if editor.id == id {
                 self.editor = Some(editor);
+                self.sync_edit_turn();
                 return self.redraw();
             }
             self.edit_stash = Some(editor);
@@ -1107,7 +1174,11 @@ impl App {
         if files::is_video(&self.files[id]) || frame.animation.is_some() {
             return self.toast("Edit · stills only");
         }
-        self.editor = Some(Editor::new(id, frame.native));
+        let mut editor = Editor::new(id, frame.native);
+        // Turned in the viewer already, it is drawn on turned.
+        let turn = self.transforms.get(&id).copied().unwrap_or_default();
+        (editor.doc.turn, editor.opened.turn, editor.shown_turn) = (turn, turn, turn);
+        self.editor = Some(editor);
         self.menu = None;
         // The picture's straight edges, for marks and the crop to rest
         // against: looked for off this thread, in the file decoded at full
@@ -1143,11 +1214,61 @@ impl App {
     /// The straight edges found in the picture being edited.
     pub(super) fn edit_edges(&mut self, id: usize, down: Vec<f32>, across: Vec<f32>) {
         if let Some(editor) = self.editor.as_mut().filter(|editor| editor.id == id) {
-            editor.edges = (down, across);
+            // Found in the picture as it was opened, which may be turned since.
+            let step = editor.opened.turn.inverse().then(editor.shown_turn);
+            let size = if step.swaps_axes() { (editor.native.1 as f32, editor.native.0 as f32) } else { (editor.native.0 as f32, editor.native.1 as f32) };
+            editor.edges = turned_edges(&(down, across), step, size);
+        }
+    }
+
+    /// The picture turned or mirrored from the panel.
+    fn edit_turn(&mut self, step: Transform) {
+        if let Some(editor) = &mut self.editor {
+            editor.turn_picture(step);
+        }
+        self.sync_edit_turn();
+    }
+
+    /// The picture shown as the doc has it turned, after a turn, an Undo
+    /// or a Redo: as the viewer turns it, so that the loader brings it in
+    /// turned and a save turns it so.
+    pub(super) fn sync_edit_turn(&mut self) {
+        let Some(editor) = &mut self.editor else { return };
+        let turn = editor.doc.turn;
+        if let Some(step) = editor.show_turn(turn) {
+            let id = editor.id;
+            self.show_turned(id, step, turn);
+        }
+    }
+
+    /// The viewer's turn for `id` made `turn`, what is on screen turned by
+    /// `step` to it right away.
+    fn show_turned(&mut self, id: usize, step: Transform, turn: Transform) {
+        if turn.is_identity() {
+            self.transforms.remove(&id);
+        } else {
+            self.transforms.insert(id, turn);
+        }
+        self.loader.set_transform(id, turn);
+        if let Some((shown_id, frame)) = &self.shown {
+            if *shown_id == id {
+                self.shown = Some((id, Arc::new(frame.transformed(step))));
+            }
+        }
+    }
+
+    /// Back to the turn it was opened with, on leaving without saving over.
+    fn unturn_edit(&mut self, editor: &mut Editor) {
+        let turn = editor.opened.turn;
+        if let Some(step) = editor.show_turn(turn) {
+            self.show_turned(editor.id, step, turn);
         }
     }
 
     fn close_editor(&mut self) {
+        if let Some(mut editor) = self.editor.take() {
+            self.unturn_edit(&mut editor);
+        }
         self.editor = None;
         self.set_edit_cursor(CursorIcon::Default);
         self.redraw();
@@ -1724,6 +1845,10 @@ impl App {
             (Some(EditHit::Save(way)), _) => return self.save_edit(way),
             (Some(EditHit::Clipboard), _) => return self.copy_edit(),
             (Some(EditHit::Redact), _) => return self.redact_edit(),
+            (Some(EditHit::Turn(way)), _) => {
+                self.edit_turn([Transform::CCW, Transform::CW, Transform::MIRROR, Transform::FLIP][usize::from(way)]);
+                return self.redraw();
+            }
             (Some(hit), _) if hit != EditHit::Inside || handle.is_none() => {
                 if let Some(editor) = &mut self.editor {
                     match hit {
@@ -1767,6 +1892,10 @@ impl App {
                                 editor.snap();
                                 editor.doc.crop = None;
                             }
+                        }
+                        EditHit::Circle => {
+                            editor.snap();
+                            editor.doc.circle = !editor.doc.circle;
                         }
                         EditHit::Emoji(which) => editor.place_emoji(which),
                         _ => {}
@@ -2176,7 +2305,7 @@ impl App {
             }
             SaveAs::Copy => {
                 let id = editor.id;
-                let name = copy_name(&path, editor.doc.radius > 0.0);
+                let name = copy_name(&path, editor.doc.cut());
                 let chars: Vec<char> = name.chars().collect();
                 // The name but not its extension picked out, to type over.
                 let stem = chars.iter().rposition(|c| *c == '.').unwrap_or(chars.len());
@@ -2198,7 +2327,7 @@ impl App {
         }
         let mut target = path.parent().map(|dir| dir.join(typed)).unwrap_or_else(|| PathBuf::from(typed));
         if target.extension().is_none() {
-            let fallback = copy_name(path, editor.doc.radius > 0.0);
+            let fallback = copy_name(path, editor.doc.cut());
             target.set_extension(Path::new(&fallback).extension().unwrap_or_default());
         }
         if target.exists() {
@@ -2220,7 +2349,7 @@ impl App {
             return Some(format!("{} exists", target.file_name()?.to_string_lossy()));
         }
         let jpeg = Format::of(&target) == Some(Format::Jpeg);
-        if jpeg && editor.doc.radius > 0.0 {
+        if jpeg && editor.doc.cut() {
             return Some("Enter to save  ·  JPEG · corners → white".to_string());
         }
         None
@@ -2277,7 +2406,7 @@ impl App {
         std::thread::spawn(move || {
             let words = crate::decode::open(&source).map_err(|error| error.to_string()).and_then(|image| {
                 let image = convert::turned(image, transform).to_rgba8();
-                let part = annotate::render(&image, &shapes, Some(rect), 0.0);
+                let part = annotate::render(&image, &shapes, Some(rect), 0.0, false);
                 let words = read_words(&part)?;
                 // A scripted test run must not replace the user's clipboard.
                 if keep && !words.is_empty() && !crate::ops::set_clipboard(&words) {
@@ -2316,7 +2445,7 @@ impl App {
         std::thread::spawn(move || {
             let found = crate::decode::open(&source).map_err(|error| error.to_string()).and_then(|image| {
                 let image = convert::turned(image, transform).to_rgba8();
-                let painted = annotate::render(&image, &shapes, None, 0.0);
+                let painted = annotate::render(&image, &shapes, None, 0.0, false);
                 let (tsv, times) = tesseract(&painted, &["tsv"])?;
                 Ok(sensitive(&words_in(&tsv, times)))
             });
@@ -2358,9 +2487,14 @@ impl App {
             self.editor = Some(editor);
             return;
         }
+        let mut editor = editor;
+        let transform = doc.turn;
+        // A copy leaves the file as it was, and as it was shown.
+        if !over {
+            self.unturn_edit(&mut editor);
+        }
         self.edit_stash = Some(editor);
         self.set_edit_cursor(CursorIcon::Default);
-        let transform = self.transforms.get(&id).copied().unwrap_or_default();
         let settings = self.options.convert;
         let name = target.file_name().unwrap_or_default().to_string_lossy().into_owned();
         self.toast(format!("Saving → {name}…"));
@@ -2425,6 +2559,8 @@ impl App {
     }
 
     pub(super) fn draw_editor(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
+        // After an Undo of a turn, or a Redo of one, the picture turned to match.
+        self.sync_edit_turn();
         let frame = self.source();
         let mouse = (self.mouse.0 as i32, self.mouse.1 as i32);
         let pointed = self
@@ -2482,7 +2618,10 @@ impl App {
             let crop = [f64::from(from_x) * fx, f64::from(from_y) * fy, f64::from(shown[2] as f32 / scale) * fx, f64::from(shown[3] as f32 / scale) * fy];
             let _ = render::draw_crop(canvas.all(), width as usize, &frame.pixels, (frame.width, frame.height), crop, shown);
             annotate::paint(&editor.doc.shapes, canvas.all(), width as usize, place, shown, None);
-            if radius > 0.0 {
+            if editor.doc.circle && !cropping {
+                let (a, b) = (pw as f32 / 2.0, ph as f32 / 2.0);
+                clear_outside(canvas, [px0, py0, pw, ph], shown, |dx, dy| annotate::ellipse(dx, dy, a, b));
+            } else if radius > 0.0 {
                 round_corners(canvas, [px0, py0, pw, ph], shown, radius);
             }
         }
@@ -3379,8 +3518,21 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
     heading(canvas, text, y, "Corners");
     y += small_line + pad / 3;
     number(editor, canvas, text, [inner, y, half, line], "R", Field::Corners, small, mouse);
+    let circle = editor.doc.circle;
+    let cells = segments(canvas, text, [inner + half + pad / 2, y, half, line], &["Circle"], circle.then_some(0), small, mouse);
+    editor.hits.extend(cells.into_iter().map(|place| (EditHit::Circle, place)));
     y += line + pad / 2;
-    if editor.doc.radius > 0.0 && format == Some(Format::Jpeg) {
+    // Turned a quarter either way, or mirrored either way.
+    heading(canvas, text, y, "Turn");
+    y += small_line + pad / 3;
+    let turns = [(commands::icons::ROTATE_CCW, "Turn left"), (commands::icons::ROTATE_CW, "Turn right"), (commands::icons::FLIP_HORIZONTAL, "Mirror"), (commands::icons::FLIP_VERTICAL, "Flip upside down")];
+    let cells = segments(canvas, text, [inner, y, inner_w, line], &turns.map(|(icon, _)| icon), None, small, mouse);
+    for (at, place) in cells.into_iter().enumerate() {
+        editor.hits.push((EditHit::Turn(at as u8), place));
+        editor.tips.push((place, turns[at].1.to_string()));
+    }
+    y += line + pad / 2;
+    if editor.doc.cut() && format == Some(Format::Jpeg) {
         text.draw(canvas, inner, y, small, MARK_COLOR, "JPEG · no clear corners");
         y += small_line;
         text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, "Overwrite → white  ·  Copy → PNG");
@@ -3778,7 +3930,7 @@ fn write_edited(source: &Path, target: &Path, over: bool, transform: Transform, 
 /// it is shown, with the marks drawn on it, cropped and its corners rounded.
 fn render_edited(source: &Path, transform: Transform, doc: &Doc) -> Result<image::RgbaImage, String> {
     let image = convert::turned(crate::decode::open(source).map_err(|error| error.to_string())?, transform);
-    Ok(annotate::render(&image.to_rgba8(), &doc.shapes, doc.crop, doc.radius))
+    Ok(annotate::render(&image.to_rgba8(), &doc.shapes, doc.crop, doc.radius, doc.circle))
 }
 
 /// The picture as edited, on the clipboard as a PNG; how large it is.
@@ -3817,6 +3969,23 @@ fn read_words(picture: &image::RgbaImage) -> Result<String, String> {
     let (words, _) = tesseract(picture, &[])?;
     let lines: Vec<&str> = words.lines().map(str::trim_end).collect();
     Ok(lines.join("\n").trim_matches(|c: char| c.is_whitespace() || c == '\u{c}').to_string())
+}
+
+/// Straight edges of a picture `size` wide and high, where they are once
+/// it is transformed by `step`: those down may come to be across.
+fn turned_edges((down, across): &(Vec<f32>, Vec<f32>), step: Transform, size: (f32, f32)) -> (Vec<f32>, Vec<f32>) {
+    let (mut new_down, mut new_across) = (Vec::new(), Vec::new());
+    for x in down {
+        let p = step.point((*x, size.1 / 2.0), size);
+        if step.swaps_axes() { new_across.push(p.1) } else { new_down.push(p.0) }
+    }
+    for y in across {
+        let p = step.point((size.0 / 2.0, *y), size);
+        if step.swaps_axes() { new_down.push(p.0) } else { new_across.push(p.1) }
+    }
+    new_down.sort_by(f32::total_cmp);
+    new_across.sort_by(f32::total_cmp);
+    (new_down, new_across)
 }
 
 /// A word tesseract read: what it says, the line it is on, and its box in
@@ -3975,7 +4144,7 @@ mod tests {
         let photo = dir.join("p.png");
         image::RgbImage::from_pixel(40, 30, image::Rgb([200, 10, 10])).save(&photo).unwrap();
         let before = std::fs::read(&photo).unwrap();
-        let doc = Doc { shapes: Vec::new(), crop: Some([0.0, 0.0, 20.0, 30.0]), radius: 0.0 };
+        let doc = Doc { shapes: Vec::new(), crop: Some([0.0, 0.0, 20.0, 30.0]), radius: 0.0, ..Doc::default() };
         let (_, backup) = write_edited(&photo, &photo, true, Transform::default(), &doc, &convert::Settings::default()).unwrap();
         assert_eq!(image::open(&photo).unwrap().width(), 20);
         put_back(&backup.unwrap(), &photo).unwrap();
@@ -4129,6 +4298,46 @@ mod tests {
         for color in COLORS.iter().chain(PALETTE.iter()) {
             assert_eq!(annotate::from_hsv(annotate::to_hsv(*color)), *color, "{color:06X}");
         }
+    }
+
+    #[test]
+    fn marks_crop_and_edges_turn_with_the_picture() {
+        let mut editor = Editor::new(0, (300, 200));
+        let mut arrow = Shape::new(Tool::Arrow, 0xFF0000, 4.0, (10.0, 20.0));
+        arrow.points[1] = (50.0, 60.0);
+        let mut words = Shape::new(Tool::Text, 0xFF0000, 20.0, (100.0, 30.0));
+        words.text = "Hi".to_string();
+        editor.doc.shapes = vec![arrow, words];
+        editor.doc.crop = Some([5.0, 10.0, 105.0, 90.0]);
+        editor.edges = (vec![40.0], vec![70.0]);
+        let before = editor.doc.shapes.clone();
+        // A quarter to the right: the arrow's tail at (10, 20) goes to
+        // (200 - 20, 10), the crop with it, the size the other way round.
+        editor.turn_picture(Transform::CW);
+        assert!(editor.show_turn(editor.doc.turn).is_some());
+        assert_eq!(editor.native, (200, 300));
+        let tail = editor.doc.shapes[0].points[0];
+        assert!((tail.0 - 180.0).abs() < 1e-3 && (tail.1 - 10.0).abs() < 1e-3, "{tail:?}");
+        assert_eq!(editor.doc.crop, Some([110.0, 5.0, 190.0, 105.0]));
+        assert_eq!(editor.edges, (vec![130.0], vec![40.0]));
+        assert!((editor.doc.shapes[1].angle - std::f32::consts::FRAC_PI_2).abs() < 1e-4);
+        // Three more, and all is as it was; so too after two mirrors.
+        for step in [Transform::CW, Transform::CW, Transform::CW, Transform::MIRROR, Transform::MIRROR, Transform::FLIP, Transform::FLIP] {
+            editor.turn_picture(step);
+        }
+        assert!(editor.show_turn(editor.doc.turn).is_some());
+        assert!(editor.doc.turn.is_identity());
+        assert_eq!(editor.native, (300, 200));
+        assert_eq!(editor.edges, (vec![40.0], vec![70.0]));
+        let crop = editor.doc.crop.unwrap();
+        assert!(crop.iter().zip([5.0, 10.0, 105.0, 90.0]).all(|(a, b)| (a - b).abs() < 1e-3), "{crop:?}");
+        for (now, was) in editor.doc.shapes.iter().zip(&before) {
+            assert!(now.points.iter().zip(&was.points).all(|(a, b)| (a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3), "{now:?}");
+        }
+        assert!(editor.doc.shapes[1].angle.abs() < 1e-4 || (editor.doc.shapes[1].angle - std::f32::consts::TAU).abs() < 1e-4);
+        // Undo goes back over the turns too.
+        editor.undo();
+        assert!(!editor.doc.turn.is_identity());
     }
 
     #[test]
