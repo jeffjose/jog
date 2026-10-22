@@ -32,9 +32,12 @@ impl App {
                     }
                 }
             });
-            // Whatever changed before the watching began.
-            let listed = files::relist(&self.options.paths, &self.options.listing);
-            self.take_listing(listed, true);
+            // Whatever changed before the watching began; while the first
+            // listing is still coming in, it brings that.
+            if !self.scanning() {
+                let listed = files::relist(&self.options.paths, &self.options.listing);
+                self.take_listing(listed, true);
+            }
         }
         self.toast(if on { "Watching" } else { "Not watching" });
     }
@@ -50,8 +53,12 @@ impl App {
 
     pub(super) fn take_listing_as(&mut self, listed: Vec<PathBuf>, taking: Taking) {
         let watching = taking != Taking::Refreshing;
-        // Not under an open search box, whose own lists would go stale.
-        if self.palette.is_some() {
+        // Not under an open search box, whose own lists would go stale; nor
+        // while the first listing is still coming in, which brings them all.
+        if self.palette.is_some() || self.scanning() {
+            if taking == Taking::Refreshing && self.scanning() {
+                self.toast("Still listing");
+            }
             return;
         }
         // What a triage decided is looked up again for the files as they

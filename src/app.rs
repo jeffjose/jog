@@ -69,6 +69,7 @@ mod input;
 mod menu;
 mod palette;
 mod refresh;
+mod scanning;
 mod scenes_strip;
 mod scripted;
 mod inspect;
@@ -312,6 +313,10 @@ pub enum Event {
     Font(Text),
     /// The files in the directories being watched, after a change.
     Listed(Vec<PathBuf>),
+    /// More of the listing, found since the window opened.
+    Scanned(Vec<files::Found>),
+    /// The listing done.
+    ScanDone,
     /// How long a video is, in seconds, for the file list.
     Duration(usize, Option<f64>),
     /// A frame from along a video, or word about fetching them.
@@ -1119,6 +1124,8 @@ pub struct App {
     /// Set while the directories are watched; clearing it stops the thread
     /// that does the watching.
     watch: Option<Arc<AtomicBool>>,
+    /// The listing still coming in, when the window opened before it was done.
+    scan: Option<scanning::Scanning>,
     /// File sizes looked up for searches such as `>10mb`.
     sizes: HashMap<usize, Option<u64>>,
     /// Where videos were left, read the first time one is played.
@@ -1850,6 +1857,7 @@ impl App {
             trailer: None,
             trailers: None,
             watch: None,
+            scan: None,
             sizes: HashMap::new(),
             positions: None,
             seen: RefCell::new(None),
@@ -4070,6 +4078,8 @@ impl ApplicationHandler<Event> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let began = Instant::now();
+        // What the listing found while a search box was open, now it is not.
+        self.scan_catch_up();
         self.waiting(event_loop);
         self.hitch_turn(began, "timers");
     }
@@ -4163,6 +4173,8 @@ impl App {
                 self.preview_signal(Signal::Events);
             }
             Event::Listed(listed) => self.take_listing(listed, true),
+            Event::Scanned(found) => self.take_scanned(found),
+            Event::ScanDone => self.scan_done(),
             Event::HdrInfo(id, info) => {
                 self.hdr_infos.insert(id, info);
                 self.redraw();

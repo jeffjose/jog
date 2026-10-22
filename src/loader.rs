@@ -369,6 +369,11 @@ impl Loader {
         self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).files.push(path);
     }
 
+    /// Several at once, as a listing brings them in, the lock taken once.
+    pub fn add_files(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).files.extend(paths);
+    }
+
     /// Forgets everything decoded for `id`, so it is read from disk again.
     pub fn invalidate(&self, id: usize) {
         let mut state = self.shared.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

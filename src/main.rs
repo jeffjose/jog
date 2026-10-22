@@ -135,7 +135,18 @@ fn main() -> ExitCode {
     }
 
     let started = std::time::Instant::now();
-    let playlist = files::collect(&options.paths, &options.listing);
+    // Shown as soon as the first files are found, the rest listed on other
+    // threads and coming in as they are: unless what was asked for needs
+    // all of them first, as a file to start at, a filter or a conversion do.
+    let whole_first = options.listing.start_at.is_some() || options.filter.is_some() || options.convert_to.is_some();
+    let mut scanning = None;
+    let playlist = if whole_first {
+        files::collect(&options.paths, &options.listing)
+    } else {
+        let (found, rest) = files::first_found(&options.paths, &options.listing);
+        scanning = rest;
+        found
+    };
     if playlist.files.is_empty() {
         // A path that is not there has been said to be missing already;
         // that is the whole of the matter.
@@ -170,7 +181,8 @@ fn main() -> ExitCode {
     }
     if options.verbose {
         let videos = playlist.files.iter().filter(|path| files::is_video(path)).count();
-        eprintln!("jog: {} files, {videos} of them videos, listed in {:.1?}", playlist.files.len(), started.elapsed());
+        let more = if scanning.is_some() { ", the rest listed meanwhile" } else { "" };
+        eprintln!("jog: {} files, {videos} of them videos, listed in {:.1?}{more}", playlist.files.len(), started.elapsed());
     }
     let files = playlist.files;
 
@@ -216,6 +228,9 @@ fn main() -> ExitCode {
     let (watch, filter, choosing, edit) = (options.watch, options.filter.clone(), !options.sessions.is_empty(), options.edit);
     let benchmark = options.benchmark;
     let mut app = App::new(options, files, playlist.start, loader, proxy, cwd);
+    if let Some(scan) = scanning {
+        app.keep_scanning(scan, started);
+    }
     if benchmark {
         app.start_benchmark(started);
     }
