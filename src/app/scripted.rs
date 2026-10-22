@@ -30,6 +30,10 @@ impl App {
     /// `{Tab}`, `{F2}` and so on press the named key.
     pub(super) fn play_keys(&mut self, keys: &str, event_loop: &ActiveEventLoop) {
         let mut rest = keys;
+        // `{Hold:Shift}`, `{Hold:Alt}`, `{Hold:Ctrl}` keep a modifier held
+        // through what follows, moves and all, as a hand on the key would;
+        // `{Hold:}` lets go.
+        let mut sticky = ModifiersState::empty();
         while let Some(c) = rest.chars().next() {
             let (mut repeating, mut pressing, mut releasing) = (false, true, true);
             let named = rest.strip_prefix('{').and_then(|inner| inner.split_once('}'));
@@ -51,7 +55,21 @@ impl App {
                         Some(("Held" | "Down" | "Up", name)) => (ModifiersState::empty(), name),
                         _ => (ModifiersState::empty(), name),
                     };
-                    self.modifiers = held;
+                    if let Some(which) = name.strip_prefix("Hold:") {
+                        sticky = which.split('+').fold(ModifiersState::empty(), |all, key| match key {
+                            "Shift" => all | ModifiersState::SHIFT,
+                            "Alt" => all | ModifiersState::ALT,
+                            "Ctrl" => all | ModifiersState::CONTROL,
+                            _ => all,
+                        });
+                        self.modifiers = sticky;
+                        // As the window would hear of it in a drag in Edit.
+                        if self.editor.as_ref().is_some_and(|editor| editor.dragging()) {
+                            self.editor_motion();
+                        }
+                        continue;
+                    }
+                    self.modifiers = held | sticky;
                     // `{Move:X,Y}` moves the pointer and `{Click}` clicks.
                     if let Some((x, y)) = name.strip_prefix("Move:").and_then(|to| to.split_once(',')) {
                         // A move asked for is a move, wherever the pointer was.

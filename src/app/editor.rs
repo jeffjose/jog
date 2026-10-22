@@ -112,8 +112,9 @@ pub struct Editor {
     /// The lines what is being moved has come to rest against: across at
     /// these places, and down at these.
     guides: (Vec<f32>, Vec<f32>),
-    /// Escape with something unsaved: the bar that asks what to do.
-    leaving: bool,
+    /// Escape with something unsaved: the box asking what to do, and the
+    /// choice in it that Enter takes.
+    leaving: Option<usize>,
     /// As last drawn: where the picture is, the part of it on show, and
     /// what there is to click.
     place: Place,
@@ -136,7 +137,8 @@ struct Picker {
 /// What a drag is doing.
 #[derive(Clone, Debug)]
 enum EditDrag {
-    Draw,
+    /// A mark being drawn, from where the drag began.
+    Draw { from: Point },
     Move { from: Point, before: Doc, moved: bool, was_selected: bool },
     Marquee { from: Point, to: Point, adding: bool },
     Grip { grip: (i8, i8), frame: [f32; 4], from: Point, before: Doc },
@@ -190,8 +192,9 @@ enum EditHit {
     ApplyCrop,
     ResetCrop,
     Save(SaveAs),
-    Discard,
-    KeepEditing,
+    /// One of the choices on leaving with something unsaved, by its place
+    /// in `LEAVE`.
+    Leave(usize),
     Emoji(usize),
     Inside,
 }
@@ -214,6 +217,10 @@ const EMOJI_DOWN: usize = 7;
 const SNAP: f32 = 6.0;
 /// The shapes a crop can be kept to, by what they are called.
 const ASPECTS: [(&str, Option<f32>); 5] = [("Free", None), ("Orig", Some(0.0)), ("1:1", Some(1.0)), ("4:3", Some(4.0 / 3.0)), ("16:9", Some(16.0 / 9.0))];
+
+/// What can be done on leaving with something unsaved, and the key each
+/// is pressed with.
+const LEAVE: [(&str, &str); 4] = [("Keep editing", "Esc"), ("Discard", "D"), ("Save copy", "C"), ("Overwrite", "S")];
 
 /// The colors chosen lately from beyond the eight, the latest first.
 static RECENT: Mutex<Vec<u32>> = Mutex::new(Vec::new());
@@ -268,7 +275,7 @@ impl Editor {
             picker: None,
             flyout: None,
             guides: (Vec::new(), Vec::new()),
-            leaving: false,
+            leaving: None,
             place: Place::WHOLE,
             stage: [0; 4],
             hits: Vec::new(),
@@ -281,6 +288,10 @@ impl Editor {
 
     pub fn dirty(&self) -> bool {
         self.doc != self.opened
+    }
+
+    pub fn dragging(&self) -> bool {
+        self.drag.is_some()
     }
 
     /// Kept for Undo before a change.
@@ -720,10 +731,13 @@ impl Editor {
     }
 
     /// A side or corner of the crop taken to `p`: the opposite one still,
-    /// kept to its shape if it has one, and inside the picture.
-    fn pull_crop(&mut self, grip: (i8, i8), start: [f32; 4], p: Point) {
+    /// or with `middle` the middle, the other side going out as far; kept
+    /// to its shape if it has one, or with `shift` to the one it had; and
+    /// inside the picture.
+    fn pull_crop(&mut self, grip: (i8, i8), start: [f32; 4], p: Point, shift: bool, middle: bool) {
         let (w, h) = (self.native.0 as f32, self.native.1 as f32);
         let [mut l, mut t, mut r, mut b] = start;
+        let (cx, cy) = ((l + r) / 2.0, (t + b) / 2.0);
         let least = 8.0 / self.place.scale;
         match grip.0 {
             -1 => l = within(p.0, 0.0, r - least),
@@ -735,7 +749,21 @@ impl Editor {
             1 => b = within(p.1, t + least, h),
             _ => {}
         }
-        if let Some(ratio) = self.aspect {
+        if middle {
+            // The other side as far out, as far as the picture lets it.
+            match grip.0 {
+                -1 => r = (2.0 * cx - l).min(w),
+                1 => l = (2.0 * cx - r).max(0.0),
+                _ => {}
+            }
+            match grip.1 {
+                -1 => b = (2.0 * cy - t).min(h),
+                1 => t = (2.0 * cy - b).max(0.0),
+                _ => {}
+            }
+        }
+        let ratio = self.aspect.or(shift.then(|| (start[2] - start[0]) / (start[3] - start[1]).max(1.0)));
+        if let Some(ratio) = ratio {
             // The side dragged says how large; the other follows, from the
             // corner across, or about the middle for a side.
             let (cw, ch) = (r - l, b - t);
@@ -744,15 +772,15 @@ impl Editor {
                 let fit = (w / cw).min(h / ch).min(1.0);
                 (cw * fit, ch * fit)
             };
-            let x = match grip.0 {
-                -1 => r - cw,
-                1 => l,
-                _ => (l + r - cw) / 2.0,
+            let x = match (middle, grip.0) {
+                (true, _) | (_, 0) => (l + r - cw) / 2.0,
+                (_, -1) => r - cw,
+                _ => l,
             };
-            let y = match grip.1 {
-                -1 => b - ch,
-                1 => t,
-                _ => (t + b - ch) / 2.0,
+            let y = match (middle, grip.1) {
+                (true, _) | (_, 0) => (t + b - ch) / 2.0,
+                (_, -1) => b - ch,
+                _ => t,
             };
             let (x, y) = (within(x, 0.0, w - cw), within(y, 0.0, h - ch));
             (l, t, r, b) = (x, y, (x + cw).min(w), (y + ch).min(h));
@@ -827,6 +855,37 @@ impl App {
         let control = self.modifiers.control_key() || self.modifiers.super_key();
         let shift = self.modifiers.shift_key();
         let Some(editor) = &mut self.editor else { return };
+        // The box asking what to do with what is unsaved has every key
+        // while it is up: its own, Tab and the arrows to go through them,
+        // and Enter for the one picked out.
+        if let Some(at) = editor.leaving {
+            let count = LEAVE.len();
+            let choice = match key {
+                Key::Named(NamedKey::Escape) => Some(0),
+                Key::Character("d" | "D") => Some(1),
+                Key::Character("c" | "C") => Some(2),
+                Key::Character("s" | "S") if control && shift => Some(2),
+                Key::Character("s" | "S") => Some(3),
+                Key::Named(NamedKey::Enter | NamedKey::Space) => Some(at),
+                Key::Named(NamedKey::Tab) if shift => {
+                    editor.leaving = Some((at + count - 1) % count);
+                    None
+                }
+                Key::Named(NamedKey::Tab | NamedKey::ArrowRight) => {
+                    editor.leaving = Some((at + 1) % count);
+                    None
+                }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    editor.leaving = Some((at + count - 1) % count);
+                    None
+                }
+                _ => None,
+            };
+            return match choice {
+                Some(choice) => self.leave_with(choice),
+                None => self.redraw(),
+            };
+        }
         // A number being typed takes the keys a number has.
         if let Some((field, typed, fresh)) = &mut editor.editing {
             let field = *field;
@@ -959,9 +1018,6 @@ impl App {
                 }
             }
             _ if control => return,
-            // The bar asking about what is unsaved has keys of its own.
-            Key::Character("d" | "D") if editor.leaving => return self.discard_edit(),
-            Key::Named(NamedKey::Escape) if editor.leaving => editor.leaving = false,
             Key::Named(NamedKey::Escape) => {
                 if editor.flyout.is_some() {
                     editor.flyout = None;
@@ -976,7 +1032,7 @@ impl App {
                 } else if editor.tool != Tool::Select {
                     editor.set_tool(Tool::Select);
                 } else if editor.dirty() {
-                    editor.leaving = true;
+                    editor.leaving = Some(0);
                 } else {
                     return self.close_editor();
                 }
@@ -1162,6 +1218,13 @@ impl App {
         let adding = self.modifiers.shift_key() || self.modifiers.control_key();
         let hit = self.editor.as_ref().and_then(|editor| editor.hit_at(x as i32, y as i32));
         let handle = self.editor.as_ref().and_then(|editor| editor.handle_at(x as i32, y as i32));
+        // While the box about what is unsaved is up, only it takes a click.
+        if self.editor.as_ref().is_some_and(|editor| editor.leaving.is_some()) {
+            return match hit {
+                Some(EditHit::Leave(choice)) => self.leave_with(choice),
+                _ => self.redraw(),
+            };
+        }
         if let Some(editor) = &mut self.editor {
             // A number being typed is taken when anything else is pressed.
             if editor.editing.is_some() && !matches!(hit, Some(EditHit::Field(field)) if Some(field) == editor.editing.as_ref().map(|e| e.0)) {
@@ -1187,7 +1250,6 @@ impl App {
         match (hit, handle) {
             (Some(hit @ (EditHit::Color(_) | EditHit::Filled(_) | EditHit::Heads(_) | EditHit::Dash(_) | EditHit::Face(_) | EditHit::Toggle(_) | EditHit::BadgeLook(_) | EditHit::Lens(_))), _) => self.edit_option(hit),
             (Some(EditHit::Save(way)), _) => return self.save_edit(way),
-            (Some(EditHit::Discard), _) => return self.discard_edit(),
             (Some(hit), _) if hit != EditHit::Inside || handle.is_none() => {
                 if let Some(editor) = &mut self.editor {
                     match hit {
@@ -1221,7 +1283,6 @@ impl App {
                                 editor.doc.crop = None;
                             }
                         }
-                        EditHit::KeepEditing => editor.leaving = false,
                         EditHit::Emoji(which) => editor.place_emoji(which),
                         _ => {}
                     }
@@ -1246,13 +1307,15 @@ impl App {
         let (x, y) = self.mouse;
         let shift = self.modifiers.shift_key();
         let free = self.modifiers.control_key();
+        // Alt, as in Figma: from the middle rather than from a corner.
+        let middle = self.modifiers.alt_key();
         let Some(editor) = &mut self.editor else { return };
         let p = editor.place.to_picture((x as f32, y as f32));
         let (w, h) = (editor.native.0 as f32, editor.native.1 as f32);
         let scale = editor.place.scale;
         let one = editor.one();
         match editor.drag.clone() {
-            Some(EditDrag::Draw) => {
+            Some(EditDrag::Draw { from }) => {
                 if let Some(shape) = editor.doc.shapes.last_mut() {
                     match shape.tool {
                         Tool::Pen | Tool::Marker => {
@@ -1266,27 +1329,56 @@ impl App {
                             shape.points.truncate(1);
                             shape.points.push(p);
                         }
-                        Tool::Arrow | Tool::Line if shift => shape.points[1] = level(shape.points[0], p),
-                        Tool::Rect | Tool::Oval | Tool::Blur | Tool::Spotlight | Tool::Zoom if shift => shape.points[1] = square(shape.points[0], p),
-                        _ => shape.points[1] = p,
+                        // Shift: a square, a circle, a line at one of eight
+                        // angles; Alt: about where the drag began.
+                        tool => {
+                            let to = match (shift, tool.is_line()) {
+                                (true, true) => level(from, p),
+                                (true, false) => square(from, p),
+                                (false, _) => p,
+                            };
+                            let start = if middle { (2.0 * from.0 - to.0, 2.0 * from.1 - to.1) } else { from };
+                            (shape.points[0], shape.points[1]) = (start, to);
+                        }
                     }
                 }
             }
             Some(EditDrag::Move { from, before, was_selected, .. }) => {
-                editor.move_selected(&before, (p.0 - from.0, p.1 - from.1), free);
+                // Shift keeps it to across or down, whichever it has gone
+                // further.
+                let (mut dx, mut dy) = (p.0 - from.0, p.1 - from.1);
+                if shift {
+                    if dx.abs() >= dy.abs() { dy = 0.0 } else { dx = 0.0 }
+                }
+                editor.move_selected(&before, (dx, dy), free);
                 editor.drag = Some(EditDrag::Move { from, before, moved: true, was_selected });
             }
             Some(EditDrag::Marquee { from, adding, .. }) => editor.drag = Some(EditDrag::Marquee { from, to: p, adding }),
             Some(EditDrag::Grip { grip, frame, from, before }) => {
                 let [l, t, r, b] = frame;
                 let size = ((r - l).max(1.0), (b - t).max(1.0));
-                let still = (if grip.0 < 0 { r } else { l }, if grip.1 < 0 { b } else { t });
-                let pull = |g: i8, d: f32, size: f32| if g == 0 { 1.0 } else { (size + f32::from(g) * d) / size };
+                let centre = ((l + r) / 2.0, (t + b) / 2.0);
+                // What stays put: the side or corner across from the one
+                // dragged, or with Alt the middle, the drag then counting
+                // twice as it pulls both sides.
+                let mut still = match middle {
+                    true => centre,
+                    false => (if grip.0 < 0 { r } else { l }, if grip.1 < 0 { b } else { t }),
+                };
+                let reach = if middle { 2.0 } else { 1.0 };
+                let pull = |g: i8, d: f32, size: f32| if g == 0 { 1.0 } else { (size + f32::from(g) * d * reach) / size };
                 let mut times = (pull(grip.0, p.0 - from.0, size.0), pull(grip.1, p.1 - from.1, size.1));
-                // Shift: in proportion.
-                if shift && grip.0 != 0 && grip.1 != 0 {
-                    let both = times.0.abs().max(times.1.abs());
-                    times = (both.copysign(times.0), both.copysign(times.1));
+                // Shift: in proportion; from a side, the other way about
+                // its middle.
+                if shift {
+                    match grip {
+                        (0, _) => (times.0, still.0) = (times.1.abs(), centre.0),
+                        (_, 0) => (times.1, still.1) = (times.0.abs(), centre.1),
+                        _ => {
+                            let both = times.0.abs().max(times.1.abs());
+                            times = (both.copysign(times.0), both.copysign(times.1));
+                        }
+                    }
                 }
                 let keep = |t: f32| if t.abs() < 0.02 { 0.02f32.copysign(t) } else { t };
                 if let Some(at) = one {
@@ -1322,7 +1414,8 @@ impl App {
             }
             Some(EditDrag::Crop { from }) => {
                 let to = (p.0.clamp(0.0, w), p.1.clamp(0.0, h));
-                let to = match editor.aspect {
+                // Shift with no shape chosen: a square.
+                let to = match editor.aspect.or(shift.then_some(1.0)) {
                     // Kept to its shape, from where it was begun.
                     Some(ratio) => {
                         let (dx, dy) = (to.0 - from.0, to.1 - from.1);
@@ -1334,9 +1427,19 @@ impl App {
                     }
                     None => to,
                 };
-                editor.crop_draft = Some([from.0.min(to.0), from.1.min(to.1), from.0.max(to.0), from.1.max(to.1)]);
+                // Alt: about where it was begun, as far as the picture goes.
+                // Both ways shrunk alike, so that a shape it is kept to holds.
+                let draft = if middle {
+                    let (dx, dy) = ((to.0 - from.0).abs(), (to.1 - from.1).abs());
+                    let room = (from.0.min(w - from.0) / dx.max(1e-3)).min(from.1.min(h - from.1) / dy.max(1e-3)).min(1.0);
+                    let (dx, dy) = (dx * room, dy * room);
+                    [from.0 - dx, from.1 - dy, from.0 + dx, from.1 + dy]
+                } else {
+                    [from.0.min(to.0), from.1.min(to.1), from.0.max(to.0), from.1.max(to.1)]
+                };
+                editor.crop_draft = Some(draft);
             }
-            Some(EditDrag::CropGrip { grip, start }) => editor.pull_crop(grip, start, p),
+            Some(EditDrag::CropGrip { grip, start }) => editor.pull_crop(grip, start, p, shift, middle),
             Some(EditDrag::CropMove { from, start }) => {
                 // Moved inside the picture, resting against its edges and
                 // middle when near them.
@@ -1355,6 +1458,15 @@ impl App {
                 editor.drag = Some(EditDrag::Scrub { field, x: from, start, before, moved: true });
             }
             Some(EditDrag::Pick { hue, .. }) => pick_color(editor, hue, (x as i32, y as i32)),
+            // In the box about what is unsaved, the choice under the
+            // pointer is the one Enter would take, as in the delete box.
+            None if editor.leaving.is_some() => {
+                if let Some(EditHit::Leave(choice)) = editor.hit_at(x as i32, y as i32) {
+                    editor.leaving = Some(choice);
+                }
+                self.set_edit_cursor(CursorIcon::Default);
+                return self.redraw();
+            }
             None => {
                 // The pointer says what a press would do, and with the
                 // arrow in hand the mark under it is outlined.
@@ -1398,7 +1510,7 @@ impl App {
         let Some(editor) = &mut self.editor else { return };
         editor.guides = (Vec::new(), Vec::new());
         match editor.drag.take() {
-            Some(EditDrag::Draw) => {
+            Some(EditDrag::Draw { .. }) => {
                 let last = editor.doc.shapes.len() - 1;
                 let shape = &mut editor.doc.shapes[last];
                 // A counter's tail too short to point anywhere goes.
@@ -1485,6 +1597,20 @@ impl App {
         self.close_editor();
     }
 
+    /// One of the choices on leaving with something unsaved, by its place
+    /// in `LEAVE`.
+    fn leave_with(&mut self, choice: usize) {
+        if let Some(editor) = &mut self.editor {
+            editor.leaving = None;
+        }
+        match choice {
+            1 => self.discard_edit(),
+            2 => self.save_edit(SaveAs::Copy),
+            3 => self.save_edit(SaveAs::Overwrite),
+            _ => self.redraw(),
+        }
+    }
+
     /// Saves over the file, or opens the box naming the copy.
     pub(super) fn save_edit(&mut self, way: SaveAs) {
         let Some(editor) = &mut self.editor else { return };
@@ -1567,7 +1693,6 @@ impl App {
             self.editor = Some(editor);
             return;
         }
-        self.edit_last = if over { SaveAs::Overwrite } else { SaveAs::Copy };
         self.edit_stash = Some(editor);
         self.set_edit_cursor(CursorIcon::Default);
         let transform = self.transforms.get(&id).copied().unwrap_or_default();
@@ -1636,7 +1761,6 @@ impl App {
 
     pub(super) fn draw_editor(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
         let frame = self.source();
-        let last = self.edit_last;
         let mouse = (self.mouse.0 as i32, self.mouse.1 as i32);
         let pointed = self
             .editor
@@ -1783,23 +1907,20 @@ impl App {
             x += button;
         }
 
-        // The two saves at the other end, the one used last filled in.
+        // The two saves at the other end, alike: neither is the one to
+        // reach for more than the other.
         let dirty = editor.dirty();
         let mut right = width - side - pad * 2;
         for (way, label, tip) in [(SaveAs::Overwrite, "Overwrite", "Ctrl+S"), (SaveAs::Copy, "Copy", "Ctrl+Shift+S")] {
             let able = dirty && (way == SaveAs::Copy || format.is_some());
             let w = text.width(label, px) + pad * 2;
             let place = [right - w, bar_y, w, bar_h];
-            let primary = way == last && able;
-            let (ground, ink) = match (primary, able) {
-                (true, _) => (accent(), on_accent()),
-                (false, true) => (if inside(place, mouse) { PLACEHOLDER_COLOR } else { MENU_COLOR }, TEXT_COLOR),
-                (false, false) => (MENU_COLOR, DIM_TEXT_COLOR),
+            let (ground, ink) = match able {
+                true => (if inside(place, mouse) { PLACEHOLDER_COLOR } else { MENU_COLOR }, TEXT_COLOR),
+                false => (MENU_COLOR, DIM_TEXT_COLOR),
             };
             canvas.round_fill(place[0], place[1], place[2], place[3], pad / 2, ground, 256);
-            if !primary {
-                canvas.round_outline(place[0], place[1], place[2], place[3], pad / 2, 1, MENU_EDGE_COLOR);
-            }
+            canvas.round_outline(place[0], place[1], place[2], place[3], pad / 2, 1, MENU_EDGE_COLOR);
             text.draw(canvas, place[0] + pad, bar_y + (bar_h - line) / 2, px, ink, label);
             editor.hits.push((EditHit::Save(way), place));
             editor.tips.push((place, tip.to_string()));
@@ -1817,26 +1938,58 @@ impl App {
             draw_picker(editor, canvas, text, emoji_at, bar_y - pad / 2, px, mouse);
         }
 
-        // Escape with something unsaved: what to do with it.
-        if editor.leaving {
-            let choices = [("Overwrite", "Ctrl+S", EditHit::Save(SaveAs::Overwrite)), ("Copy", "Ctrl+Shift+S", EditHit::Save(SaveAs::Copy)), ("Discard", "D", EditHit::Discard), ("Keep editing", "Esc", EditHit::KeepEditing)];
-            let label = "Unsaved";
-            let widths: Vec<i32> = choices.iter().map(|(word, key, _)| text.width(word, small) + text.width(key, small) + pad * 2).collect();
-            let total = text.width(label, small) + pad * 2 + widths.iter().sum::<i32>();
-            let bar = [stage[0] + (stage[2] - total) / 2, top, total, small_line + pad];
-            draw::panel(canvas, bar[0], bar[1], bar[2], bar[3], pad / 2);
-            text.draw(canvas, bar[0] + pad, bar[1] + pad / 2, small, MARK_COLOR, label);
-            let mut x = bar[0] + pad * 2 + text.width(label, small);
-            for ((word, key, hit), w) in choices.into_iter().zip(widths) {
-                let place = [x - pad / 2, bar[1] + pad / 4, w, bar[3] - pad / 2];
-                if inside(place, mouse) {
-                    canvas.round_fill(place[0], place[1], place[2], place[3], pad / 3, PLACEHOLDER_COLOR, 256);
+        // Escape with something unsaved: a box in the middle, over the rest
+        // dimmed, as the one for deleting is. Enter takes the choice picked
+        // out, Keep editing to begin with; each has a key of its own.
+        if let Some(focus) = editor.leaving {
+            canvas.shade(0, 0, width, height, 150);
+            editor.tips.clear();
+            let (sign, sign_px) = (commands::icons::EDIT, px * 3 / 2);
+            let sign_w = text.width(sign, sign_px) + pad;
+            let title = "Unsaved edits";
+            let button_h = line + pad;
+            let widths: Vec<i32> = LEAVE.iter().map(|(word, _)| text.width(word, px) + pad * 2).collect();
+            let buttons_w = widths.iter().sum::<i32>() + pad / 2 * (LEAVE.len() as i32 - 1);
+            let words = text.width(title, px).max(text.width(&name, small));
+            let box_w = ((sign_w + words).max(buttons_w) + pad * 3).min(width);
+            let box_h = line + small_line + button_h + pad * 4;
+            let (bx, by) = ((width - box_w) / 2, (height - box_h) / 2);
+            draw::panel(canvas, bx, by, box_w, box_h, pad);
+            editor.hits.push((EditHit::Inside, [bx, by, box_w, box_h]));
+            text.draw(canvas, bx + pad * 3 / 2, by + pad * 3 / 2, sign_px, MARK_COLOR, sign);
+            let wx = bx + pad * 3 / 2 + sign_w;
+            text.draw(canvas, wx, by + pad * 3 / 2, px, TEXT_COLOR, title);
+            text.draw(canvas, wx, by + pad * 3 / 2 + line, small, DIM_TEXT_COLOR, &name);
+            // The buttons at the right, as the last thing read.
+            let mut x = bx + box_w - pad * 3 / 2 - buttons_w;
+            let y = by + box_h - pad * 3 / 2 - button_h;
+            for (at, ((word, key), w)) in LEAVE.iter().zip(widths).enumerate() {
+                // Over a file jog cannot write, only a copy.
+                let able = at != 3 || format.is_some();
+                let place = [x, y, w, button_h];
+                let on = at == focus && able;
+                let ground = match (on, at) {
+                    (true, 1) => DANGER_COLOR,
+                    (true, _) => accent(),
+                    (false, _) => PLACEHOLDER_COLOR,
+                };
+                canvas.round_fill(x, y, w, button_h, pad / 2, ground, 256);
+                if !on {
+                    canvas.round_outline(x, y, w, button_h, pad / 2, 1, MENU_EDGE_COLOR);
                 }
-                text.draw(canvas, x, bar[1] + pad / 2, small, TEXT_COLOR, word);
-                let ww = text.width(word, small);
-                text.draw(canvas, x + ww + pad / 3, bar[1] + pad / 2, small, DIM_TEXT_COLOR, key);
-                editor.hits.push((hit, place));
-                x += w;
+                let ink = match (on, able) {
+                    (true, _) if at == 1 => 0xFFFFFF,
+                    (true, _) => on_accent(),
+                    (false, true) => TEXT_COLOR,
+                    (false, false) => DIM_TEXT_COLOR,
+                };
+                let ww = text.width(word, px);
+                text.draw(canvas, x + (w - ww) / 2, y + pad / 2, px, ink, word);
+                if able {
+                    editor.hits.push((EditHit::Leave(at), place));
+                    editor.tips.push((place, key.to_string()));
+                }
+                x += w + pad / 2;
             }
         }
 
@@ -2066,7 +2219,7 @@ fn editor_press(editor: &mut Editor, at: Point, adding: bool) {
         editor.finish_typing();
         return;
     }
-    editor.leaving = false;
+    editor.leaving = None;
     editor.finish_typing();
     let p = editor.place.to_picture(at);
     let reach = 6.0 / editor.place.scale;
@@ -2138,7 +2291,7 @@ fn editor_press(editor: &mut Editor, at: Point, adding: bool) {
             editor.snap();
             let shape = editor.fresh(tool, p);
             editor.doc.shapes.push(shape);
-            editor.drag = Some(EditDrag::Draw);
+            editor.drag = Some(EditDrag::Draw { from: p });
             editor.selected.clear();
         }
     }
@@ -2894,7 +3047,7 @@ mod tests {
         let [l, t, r, b] = editor.crop_draft.unwrap();
         assert_eq!((r - l, b - t), (900.0, 900.0));
         // Its corner taken far outside: as large as fits, still square.
-        editor.pull_crop((1, 1), [l, t, r, b], (5000.0, 5000.0));
+        editor.pull_crop((1, 1), [l, t, r, b], (5000.0, 5000.0), false, false);
         let [l, t, r, b] = editor.crop_draft.unwrap();
         assert!((r - l - (b - t)).abs() < 0.5 && r <= 1600.0 && b <= 900.0 && l >= 0.0 && t >= 0.0);
     }

@@ -1366,10 +1366,9 @@ pub struct App {
     /// The tracks editor: a video's streams to keep, order and tag.
     track_editor: Option<track_editor::TrackEditor>,
     /// Edit, while it is open; its marks while a save of them is on its
-    /// way, to go back to if it fails; and which save was used last.
+    /// way, to go back to if it fails.
     editor: Option<editor::Editor>,
     edit_stash: Option<editor::Editor>,
-    edit_last: editor::SaveAs,
     track_memory: Option<HashMap<PathBuf, tracks::TrackChoice>>,
     /// The section marked in each video, by file: still there when the
     /// video is come back to.
@@ -1977,7 +1976,6 @@ impl App {
             track_editor: None,
             editor: None,
             edit_stash: None,
-            edit_last: editor::SaveAs::default(),
             track_memory: None,
             sections: HashMap::new(),
             marked_sections: None,
@@ -4249,7 +4247,15 @@ impl App {
                 }
                 self.redraw();
             }
-            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
+                // Shift or Alt pressed in the middle of a drag in Edit
+                // changes what is being dragged at once, not at the next
+                // move of the pointer.
+                if self.editor.as_ref().is_some_and(|editor| editor.dragging()) {
+                    self.editor_motion();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if !event.state.is_pressed() => self.key_released(event.logical_key.as_ref()),
             WindowEvent::Focused(false) => {
                 // Nothing held is let go where this window can hear of it.
