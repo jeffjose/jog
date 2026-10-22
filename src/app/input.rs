@@ -393,6 +393,7 @@ impl App {
                 match button {
                     MouseButton::Left => self.editor_mouse(pressed),
                     MouseButton::Right if pressed => self.editor_right_click(),
+                    MouseButton::Middle => self.editor_pan(pressed),
                     _ => {}
                 }
             }

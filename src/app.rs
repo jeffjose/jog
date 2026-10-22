@@ -3579,6 +3579,10 @@ impl App {
     }
 
     fn key_released(&mut self, key: Key<&str>) {
+        // In Edit, Space let go: drags draw and pick out again.
+        if let (Some(editor), Key::Named(NamedKey::Space)) = (&mut self.editor, &key) {
+            return editor.let_go_of_space();
+        }
         match key {
             Key::Named(NamedKey::Space) => self.end_hold(true),
             Key::Character("v") if self.loupe.take().is_some() => {

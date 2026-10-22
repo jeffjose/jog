@@ -122,6 +122,14 @@ pub struct Editor {
     /// these places across, and across at these down, for marks and the crop
     /// to rest against.
     edges: (Vec<f32>, Vec<f32>),
+    /// How much larger than fitted the picture is shown, and how far its
+    /// middle is moved from the middle of the room for it, on screen; and
+    /// what fitting it takes, as last drawn.
+    zoom: f32,
+    pan: (f32, f32),
+    fit: f32,
+    /// Space held: a drag moves the picture about, as in Figma.
+    space: bool,
     /// The lines what is being moved has come to rest against: across at
     /// these places, and down at these.
     guides: (Vec<f32>, Vec<f32>),
@@ -159,6 +167,8 @@ enum EditDrag {
     Bend { before: Doc, moved: bool },
     Round { corner: (i8, i8), before: Doc },
     Zoom { rim: bool, before: Doc },
+    /// The picture moved about, from where the pointer was, on screen.
+    Pan { from: Point, start: (f32, f32) },
     /// Picking out letters of the words being typed.
     Caret,
     /// Turning it about `centre`, from the angle the pointer began at.
@@ -299,6 +309,10 @@ impl Editor {
             flyout_at: None,
             tool_menu: None,
             edges: (Vec::new(), Vec::new()),
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+            fit: 1.0,
+            space: false,
             guides: (Vec::new(), Vec::new()),
             leaving: None,
             place: Place::WHOLE,
@@ -317,6 +331,10 @@ impl Editor {
 
     pub fn dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    pub fn let_go_of_space(&mut self) {
+        self.space = false;
     }
 
     /// Kept for Undo before a change.
@@ -775,6 +793,25 @@ impl Editor {
             }
             Field::Hex => {}
         }
+    }
+
+    /// Shown `times` as large, what is at `at` on screen staying there; no
+    /// smaller than a tenth of fitted, no larger than 32 to a pixel.
+    fn zoom_at(&mut self, at: Point, times: f32) {
+        let p = self.place.to_picture(at);
+        let most = (32.0 / self.fit).max(1.0);
+        self.zoom = (self.zoom * times).clamp(0.1, most);
+        let region = self.region();
+        let scale = self.fit * self.zoom;
+        let middle = (self.stage[0] as f32 + self.stage[2] as f32 / 2.0, self.stage[1] as f32 + self.stage[3] as f32 / 2.0);
+        let (rx, ry) = ((region[0] + region[2]) / 2.0, (region[1] + region[3]) / 2.0);
+        self.pan = (at.0 - middle.0 - (p.0 - rx) * scale, at.1 - middle.1 - (p.1 - ry) * scale);
+    }
+
+    /// Zoomed about the middle of the room for the picture.
+    fn zoom_middle(&mut self, times: f32) {
+        let middle = (self.stage[0] as f32 + self.stage[2] as f32 / 2.0, self.stage[1] as f32 + self.stage[3] as f32 / 2.0);
+        self.zoom_at(middle, times);
     }
 
     /// The width of the line, or the size of the words, `times` as large:
@@ -1259,6 +1296,16 @@ impl App {
         }
         match key {
             Key::Character("c") if control => return self.copy_edit(),
+            // Zoom, as Figma has it: fitted, actual size, in and out.
+            Key::Character("0") if control => {
+                (editor.zoom, editor.pan) = (1.0, (0.0, 0.0));
+            }
+            Key::Character("1") if control => {
+                let times = 1.0 / (editor.fit * editor.zoom);
+                editor.zoom_middle(times);
+            }
+            Key::Character("=" | "+") if control => editor.zoom_middle(1.25),
+            Key::Character("-") if control => editor.zoom_middle(0.8),
             Key::Character("s" | "S") if control => {
                 let way = if shift { SaveAs::Copy } else { SaveAs::Overwrite };
                 return self.save_edit(way);
@@ -1347,6 +1394,12 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Enter) if editor.tool == Tool::Crop => editor.apply_crop(),
+            // Held, a drag moves the picture about.
+            Key::Named(NamedKey::Space) => {
+                editor.space = true;
+                self.set_edit_cursor(CursorIcon::Grab);
+                return;
+            }
             // Words picked out: Enter goes back to typing them.
             Key::Named(NamedKey::Enter) => {
                 if let Some(at) = editor.one().filter(|at| matches!(editor.doc.shapes[*at].tool, Tool::Text | Tool::Badge)) {
@@ -1502,6 +1555,24 @@ impl App {
         self.redraw();
     }
 
+    /// The middle button, or Space and the left: the picture taken hold of,
+    /// to move it about, and let go.
+    pub(super) fn editor_pan(&mut self, pressed: bool) {
+        let (x, y) = self.mouse;
+        let Some(editor) = &mut self.editor else { return };
+        match pressed {
+            true => editor.drag = Some(EditDrag::Pan { from: (x as f32, y as f32), start: editor.pan }),
+            false => {
+                if matches!(editor.drag, Some(EditDrag::Pan { .. })) {
+                    editor.drag = None;
+                }
+            }
+        }
+        let icon = if pressed { CursorIcon::Grabbing } else { CursorIcon::Default };
+        self.set_edit_cursor(icon);
+        self.redraw();
+    }
+
     /// A right click, as in hotshot: the colors, under the pointer, for the
     /// mark it is on, which it picks out, or for what is drawn next.
     pub(super) fn editor_right_click(&mut self) {
@@ -1573,12 +1644,16 @@ impl App {
     /// The wheel: through the emoji, while they are up; otherwise, as
     /// hotshot has it, the width of the line or the size of the words.
     pub(super) fn editor_wheel(&mut self, lines: f64) {
+        let control = self.modifiers.control_key();
+        let at = (self.mouse.0 as f32, self.mouse.1 as f32);
         let Some(editor) = &mut self.editor else { return };
         match &mut editor.picker {
             Some(picker) => {
                 let rows = (lines.abs().ceil() as usize).max(1) * 2;
                 picker.scroll = if lines > 0.0 { picker.scroll.saturating_sub(rows) } else { picker.scroll + rows };
             }
+            // Ctrl: zoomed about the pointer, as in Figma.
+            None if control => editor.zoom_at(at, 1.15f32.powf(lines as f32)),
             None => editor.grow(1.15f32.powf(lines as f32)),
         }
         self.redraw();
@@ -1604,6 +1679,10 @@ impl App {
         let adding = self.modifiers.shift_key() || self.modifiers.control_key();
         let hit = self.editor.as_ref().and_then(|editor| editor.hit_at(x as i32, y as i32));
         let handle = self.editor.as_ref().and_then(|editor| editor.handle_at(x as i32, y as i32));
+        // Space held: the press takes hold of the picture, to move it about.
+        if self.editor.as_ref().is_some_and(|editor| editor.space && editor.leaving.is_none()) {
+            return self.editor_pan(true);
+        }
         // While the box about what is unsaved is up, only it takes a click.
         if self.editor.as_ref().is_some_and(|editor| editor.leaving.is_some()) {
             return match hit {
@@ -1904,6 +1983,7 @@ impl App {
                 editor.drag = Some(EditDrag::Scrub { field, x: from, start, before, moved: true });
             }
             Some(EditDrag::Pick { hue, .. }) => pick_color(editor, hue, (x as i32, y as i32)),
+            Some(EditDrag::Pan { from, start }) => editor.pan = (start.0 + x as f32 - from.0, start.1 + y as f32 - from.1),
             Some(EditDrag::Caret) => {
                 if let Some(at) = editor.typing {
                     editor.caret = editor.doc.shapes[at].caret_at(p);
@@ -2038,7 +2118,7 @@ impl App {
                     editor.editing = Some((field, now, true));
                 }
             }
-            Some(EditDrag::Caret) => {}
+            Some(EditDrag::Caret | EditDrag::Pan { .. }) => {}
             Some(EditDrag::Pick { before, .. }) => {
                 remember_color(editor.style.color);
                 editor.settle(before);
@@ -2277,30 +2357,39 @@ impl App {
         editor.stage = stage;
         let region = editor.region();
         let (rw, rh) = (region[2] - region[0], region[3] - region[1]);
-        let scale = (stage[2] as f32 / rw).min(stage[3] as f32 / rh).min(4.0);
-        let (pw, ph) = ((rw * scale).round() as i32, (rh * scale).round() as i32);
-        let (px0, py0) = (stage[0] + (stage[2] - pw) / 2, stage[1] + (stage[3] - ph) / 2);
-        editor.place = Place { x: px0 as f32 - region[0] * scale, y: py0 as f32 - region[1] * scale, scale };
+        // Fitted to what there is room for, then as much larger as it is
+        // zoomed, its middle where it is panned to.
+        let fit = (stage[2] as f32 / rw).min(stage[3] as f32 / rh).min(4.0);
+        editor.fit = fit;
+        let scale = fit * editor.zoom;
+        let middle = (stage[0] as f32 + stage[2] as f32 / 2.0 + editor.pan.0, stage[1] as f32 + stage[3] as f32 / 2.0 + editor.pan.1);
+        editor.place = Place { x: middle.0 - (region[0] + rw / 2.0) * scale, y: middle.1 - (region[1] + rh / 2.0) * scale, scale };
         let place = editor.place;
+        let (pw, ph) = ((rw * scale).round() as i32, (rh * scale).round() as i32);
+        let (px0, py0) = ((middle.0 - rw * scale / 2.0).round() as i32, (middle.1 - rh * scale / 2.0).round() as i32);
+        // What of it is on show: no further than the room for it.
+        let shown = {
+            let (l, t) = (px0.max(stage[0]), py0.max(stage[1]));
+            let (r, b) = ((px0 + pw).min(stage[0] + stage[2]), (py0 + ph).min(stage[1] + stage[3]));
+            [l, t, (r - l).max(0), (b - t).max(0)]
+        };
         let cropping = editor.tool == Tool::Crop;
         let radius = if cropping { 0.0 } else { editor.doc.radius * scale };
-        if let Some(frame) = frame.filter(|_| pw > 0 && ph > 0) {
-            if radius > 0.0 {
-                checker(canvas, [px0, py0, pw, ph]);
-            }
+        if let Some(frame) = frame.filter(|_| shown[2] > 0 && shown[3] > 0) {
             let fx = frame.width as f64 / f64::from(editor.native.0.max(1));
             let fy = frame.height as f64 / f64::from(editor.native.1.max(1));
-            let crop = [f64::from(region[0]) * fx, f64::from(region[1]) * fy, f64::from(rw) * fx, f64::from(rh) * fy];
-            let behind = if radius > 0.0 { canvas.copy(px0, py0, pw, ph) } else { Vec::new() };
-            let _ = render::draw_crop(canvas.all(), width as usize, &frame.pixels, (frame.width, frame.height), crop, [px0, py0, pw, ph]);
-            annotate::paint(&editor.doc.shapes, canvas.all(), width as usize, place, [px0, py0, pw, ph], None);
+            // The part of the picture on show, in the frame's pixels.
+            let (from_x, from_y) = place.to_picture((shown[0] as f32, shown[1] as f32));
+            let crop = [f64::from(from_x) * fx, f64::from(from_y) * fy, f64::from(shown[2] as f32 / scale) * fx, f64::from(shown[3] as f32 / scale) * fy];
+            let _ = render::draw_crop(canvas.all(), width as usize, &frame.pixels, (frame.width, frame.height), crop, shown);
+            annotate::paint(&editor.doc.shapes, canvas.all(), width as usize, place, shown, None);
             if radius > 0.0 {
-                round_corners(canvas, [px0, py0, pw, ph], radius, &behind);
+                round_corners(canvas, [px0, py0, pw, ph], shown, radius);
             }
         }
         // The crop being set: the rest dimmed, its edge, its handles.
         if cropping {
-            draw_crop_box(editor, canvas, text, [px0, py0, pw, ph], small, pad);
+            draw_crop_box(editor, canvas, text, shown, small, pad);
         }
         // The mark under the pointer, faintly; those picked out, outlined,
         // and the one picked out alone with its handles.
@@ -2324,11 +2413,11 @@ impl App {
         // The edges what is moved rests against.
         for x in editor.guides.0.clone() {
             let (sx, _) = place.to_screen((x, 0.0));
-            canvas.fill(sx.round() as i32, py0, 1, ph, accent_soft());
+            canvas.fill(sx.round() as i32, shown[1], 1, shown[3], accent_soft());
         }
         for y in editor.guides.1.clone() {
             let (_, sy) = place.to_screen((0.0, y));
-            canvas.fill(px0, sy.round() as i32, pw, 1, accent_soft());
+            canvas.fill(shown[0], sy.round() as i32, shown[2], 1, accent_soft());
         }
         // A box being dragged out to pick out what it touches.
         if let Some(EditDrag::Marquee { from, to, .. }) = editor.drag {
@@ -2352,7 +2441,9 @@ impl App {
         let kind = format.map_or_else(|| self.files[editor.id].extension().unwrap_or_default().to_string_lossy().to_uppercase(), |format| format.name().to_string());
         let heading = format!("{}  Edit", commands::icons::EDIT);
         text.draw(canvas, pad, pad / 2, px, TEXT_COLOR, &heading);
-        let about = format!("{name}  ·  {ow} × {oh}  ·  {kind}{}", if editor.dirty() { "  ·  unsaved" } else { "" });
+        // Zoomed in or out from the fit, how far, as a share of the picture's own pixels.
+        let zoomed = if (editor.zoom - 1.0).abs() > 1e-3 || editor.pan != (0.0, 0.0) { format!("  ·  {:.0}%", editor.fit * editor.zoom * 100.0) } else { String::new() };
+        let about = format!("{name}  ·  {ow} × {oh}  ·  {kind}{zoomed}{}", if editor.dirty() { "  ·  unsaved" } else { "" });
         let hx = pad + text.width(&heading, px) + pad;
         text.draw(canvas, hx, pad / 2 + (line - small_line) / 2, small, DIM_TEXT_COLOR, &about);
 
@@ -3485,45 +3576,35 @@ fn tool_icon(tool: Tool) -> &'static str {
     }
 }
 
-/// Squares of two grays, where the picture will be clear.
-fn checker(canvas: &mut Canvas, [x, y, w, h]: [i32; 4]) {
-    let cell = 8;
-    canvas.fill(x, y, w, h, 0x2A2E38);
-    for row in (0..h).step_by(cell) {
-        let first = if (row / cell as i32) % 2 == 0 { 0 } else { cell as i32 };
-        for column in (first..w).step_by(cell * 2) {
-            canvas.fill(x + column, y + row, (cell as i32).min(w - column), (cell as i32).min(h - row), 0x353A46);
-        }
-    }
-}
-
-/// The corners of the picture at `at` rounded off, `behind` showing
-/// where they were.
-fn round_corners(canvas: &mut Canvas, at: [i32; 4], radius: f32, behind: &[u32]) {
-    let [x, y, w, h] = at;
-    let r = radius.min(w as f32 / 2.0).min(h as f32 / 2.0);
-    let reach = r.ceil() as i32 + 1;
-    let (width, height) = (canvas.width, canvas.height);
-    let pixels = canvas.all();
-    for (cx, cy) in [(0, 0), (w - reach, 0), (0, h - reach), (w - reach, h - reach)] {
-        for row in cy.max(0)..(cy + reach).min(h) {
-            for column in cx.max(0)..(cx + reach).min(w) {
-                let (sx, sy) = (column as f32 + 0.5 - w as f32 / 2.0, row as f32 + 0.5 - h as f32 / 2.0);
-                let (qx, qy) = (sx.abs() - w as f32 / 2.0 + r, sy.abs() - h as f32 / 2.0 + r);
-                let outside = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r;
-                let keep = (0.5 - outside).clamp(0.0, 1.0);
-                if keep < 1.0 {
-                    let (px, py) = (x + column, y + row);
-                    if px < 0 || py < 0 || px >= width || py >= height {
-                        continue;
-                    }
-                    let at = py as usize * width as usize + px as usize;
-                    let under = behind[(row * w + column) as usize];
-                    pixels[at] = ui::mix(under, pixels[at], (keep * 256.0) as u32);
-                }
+/// What of the picture at `at` falls outside its outline shown as it will
+/// be saved, clear: squares of two grays, in `shown` only. `outside` says
+/// how far a point is outside the outline, measured from the picture's
+/// middle, in pixels on screen.
+fn clear_outside(canvas: &mut Canvas, [x, y, w, h]: [i32; 4], shown: [i32; 4], outside: impl Fn(f32, f32) -> f32 + Sync) {
+    use rayon::prelude::*;
+    let width = canvas.width as usize;
+    let (cx, cy) = (x as f32 + w as f32 / 2.0, y as f32 + h as f32 / 2.0);
+    let rows = canvas.all().par_chunks_mut(width).enumerate().skip(shown[1].max(0) as usize).take(shown[3].max(0) as usize);
+    rows.for_each(|(py, row)| {
+        for px in shown[0].max(0)..(shown[0] + shown[2]).min(width as i32) {
+            let keep = (0.5 - outside(px as f32 + 0.5 - cx, py as f32 + 0.5 - cy)).clamp(0.0, 1.0);
+            if keep < 1.0 {
+                let square = ((px - x).div_euclid(8) + (py as i32 - y).div_euclid(8)) % 2 == 0;
+                let pixel = &mut row[px as usize];
+                *pixel = ui::mix(if square { 0x2A2E38 } else { 0x353A46 }, *pixel, (keep * 256.0) as u32);
             }
         }
-    }
+    });
+}
+
+/// The corners of the picture at `at` rounded off, in `shown`.
+fn round_corners(canvas: &mut Canvas, at: [i32; 4], shown: [i32; 4], radius: f32) {
+    let (hw, hh) = (at[2] as f32 / 2.0, at[3] as f32 / 2.0);
+    let r = radius.min(hw).min(hh);
+    clear_outside(canvas, at, shown, |dx, dy| {
+        let (qx, qy) = (dx.abs() - hw + r, dy.abs() - hh + r);
+        qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
+    });
 }
 
 /// The name a copy is offered under: `-edit` after the name, then
