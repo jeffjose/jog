@@ -92,6 +92,28 @@ pub fn set_clipboard(text: &str) -> bool {
     })
 }
 
+/// Puts a picture on the clipboard, as a PNG, with whichever helper is
+/// installed. The helper stays behind to hand it over when it is pasted.
+pub fn set_clipboard_image(png: &[u8]) -> bool {
+    let helpers: [&[&str]; 2] = [&["xclip", "-selection", "clipboard", "-t", "image/png", "-i"], &["wl-copy", "--type", "image/png"]];
+    helpers.iter().any(|helper| {
+        let child = Command::new(helper[0]).args(&helper[1..]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        let Ok(mut child) = child else { return false };
+        let written = child.stdin.take().is_some_and(|mut stdin| stdin.write_all(png).is_ok());
+        written && child.wait().is_ok_and(|status| status.success())
+    })
+}
+
+/// A picture on the clipboard, as the bytes of a PNG, if there is one.
+pub fn clipboard_image() -> Option<Vec<u8>> {
+    let helpers: [&[&str]; 2] = [&["xclip", "-selection", "clipboard", "-t", "image/png", "-o"], &["wl-paste", "--type", "image/png"]];
+    helpers.iter().find_map(|helper| {
+        let output = Command::new(helper[0]).args(&helper[1..]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+        // A PNG's own first bytes, so that text asked for as a picture is not one.
+        (output.status.success() && output.stdout.starts_with(b"\x89PNG")).then_some(output.stdout)
+    })
+}
+
 /// The text on the clipboard, read with whichever helper is installed.
 pub fn clipboard() -> Option<String> {
     let helpers: [&[&str]; 3] =

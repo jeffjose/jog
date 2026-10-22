@@ -34,6 +34,8 @@ pub enum Tool {
     Crop,
     /// Takes a color from the picture.
     Pipette,
+    /// A picture pasted in, over the one being edited.
+    Image,
 }
 
 impl Tool {
@@ -78,6 +80,7 @@ impl Tool {
             Tool::Zoom => "z",
             Tool::Crop => "x",
             Tool::Pipette => "i",
+            Tool::Image => "",
         }
     }
 
@@ -103,6 +106,7 @@ impl Tool {
             Tool::Zoom => "Zoom",
             Tool::Crop => "Crop",
             Tool::Pipette => "Pick a color",
+            Tool::Image => "Image",
         }
     }
 
@@ -225,6 +229,25 @@ pub struct Shape {
     /// boxes, ovals, words and emoji. Lines and strokes are turned by their
     /// points instead.
     pub angle: f32,
+    /// The picture a pasted one shows, stretched to its box.
+    pub image: Option<Picture>,
+}
+
+/// A picture pasted in. Marks are copied for Undo at every change, so it
+/// is shared, not copied, and two are the same only if they are the one.
+#[derive(Clone)]
+pub struct Picture(pub Arc<RgbaImage>);
+
+impl PartialEq for Picture {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for Picture {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Picture({} × {})", self.0.width(), self.0.height())
+    }
 }
 
 /// Where the picture is drawn: its pixel `(px, py)` lands at
@@ -343,7 +366,7 @@ impl Shape {
     pub fn new(tool: Tool, color: u32, stroke: f32, at: Point) -> Shape {
         let points = if tool.spans() { vec![at, at] } else { vec![at] };
         let heads = [false, tool == Tool::Arrow];
-        Shape { tool, color, opacity: 256, stroke, points, text: String::new(), filled: false, radius: stroke * 1.2, heads, dash: Dash::Solid, dash_length: 0.0, gap: 0.0, bend: None, face: 0, style: 0, look: 0, angle: 0.0 }
+        Shape { tool, color, opacity: 256, stroke, points, text: String::new(), filled: false, radius: stroke * 1.2, heads, dash: Dash::Solid, dash_length: 0.0, gap: 0.0, bend: None, face: 0, style: 0, look: 0, angle: 0.0, image: None }
     }
 
     /// Drawn solid, in dashes or in dots, those as long and as far apart
@@ -495,7 +518,7 @@ impl Shape {
 
     /// Whether it turns by an angle of its own, rather than by its points.
     pub fn turnable(&self) -> bool {
-        matches!(self.tool, Tool::Rect | Tool::Oval | Tool::Text | Tool::Badge | Tool::Emoji)
+        matches!(self.tool, Tool::Rect | Tool::Oval | Tool::Text | Tool::Badge | Tool::Emoji | Tool::Image)
     }
 
     /// Whether it can be turned at all: not a blur, a spotlight or a zoom,
@@ -605,7 +628,7 @@ impl Shape {
             }
             Tool::Arrow | Tool::Line => around(&self.path(), reach + self.head().1),
             Tool::Pen | Tool::Marker => around(&self.points, self.line_width() * 0.5 + 1.0),
-            Tool::Blur | Tool::Spotlight => self.frame(),
+            Tool::Blur | Tool::Spotlight | Tool::Image => self.frame(),
             _ => {
                 let [l, t, r, b] = self.frame();
                 [l - reach, t - reach, r + reach, b + reach]
@@ -680,7 +703,7 @@ impl Shape {
         let p = self.unturn(p);
         let within = |[l, t, r, b]: [f32; 4]| p.0 >= l - reach && p.0 <= r + reach && p.1 >= t - reach && p.1 <= b + reach;
         match self.tool {
-            Tool::Text | Tool::Badge | Tool::Emoji | Tool::Blur | Tool::Spotlight => within(self.local_bounds()),
+            Tool::Text | Tool::Badge | Tool::Emoji | Tool::Blur | Tool::Spotlight | Tool::Image => within(self.local_bounds()),
             Tool::Zoom => within(self.frame()) || within(self.zoomed()),
             Tool::Pen | Tool::Marker => {
                 let half = self.line_width() / 2.0 + reach;
@@ -922,6 +945,7 @@ fn draw_shape(surface: &mut Surface, shape: &Shape, place: Place, number: usize)
         // Words and emoji turned: drawn straight on a sheet of their own,
         // and the sheet laid down turned.
         Tool::Text | Tool::Badge | Tool::Emoji if shape.angle != 0.0 => draw_turned(surface, shape, place, area),
+        Tool::Image => draw_image(surface, shape, place, area),
         Tool::Select | Tool::Crop | Tool::Spotlight | Tool::Pipette => {}
         Tool::Blur => pixelate(surface.pixels, width, place, area, (shape.stroke * 4.0).max(8.0)),
         Tool::Pen | Tool::Marker => {
@@ -953,6 +977,48 @@ fn draw_shape(surface: &mut Surface, shape: &Shape, place: Place, number: usize)
                 let w = lettering::width(Look::default(), &words, px);
                 surface.words((cx - w / 2.0, cy - lettering::line_height(px) / 2.0), px, ink_on(shape.color), shape.opacity, Look::default(), &words);
             }
+        }
+    }
+}
+
+/// A pasted picture, stretched to its box, turned as the box is, its
+/// corners as round as it says, each pixel a blend of the four of the
+/// picture it falls among.
+fn draw_image(surface: &mut Surface, shape: &Shape, place: Place, area: [i32; 4]) {
+    let Some(Picture(image)) = &shape.image else { return };
+    let [l, t, r, b] = shape.frame();
+    let (iw, ih) = (image.width() as i32, image.height() as i32);
+    if iw == 0 || ih == 0 || r - l <= 0.0 || b - t <= 0.0 {
+        return;
+    }
+    let (hw, hh) = ((r - l) / 2.0, (b - t) / 2.0);
+    let radius = shape.radius.min(hw).min(hh).max(0.0);
+    let feather = 1.0 / place.scale;
+    let at = |x: i32, y: i32| image.get_pixel(x.clamp(0, iw - 1) as u32, y.clamp(0, ih - 1) as u32).0;
+    for y in area[1]..area[3] {
+        for x in area[0]..area[2] {
+            let q = shape.unturn(place.to_picture((x as f32 + 0.5, y as f32 + 0.5)));
+            // Inside its box, rounded.
+            let inside = round_box(q.0 - l - hw, q.1 - t - hh, hw, hh, radius);
+            let cover = (0.5 - inside / feather).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                continue;
+            }
+            let (sx, sy) = ((q.0 - l) / (r - l) * iw as f32 - 0.5, (q.1 - t) / (b - t) * ih as f32 - 0.5);
+            let (ax, ay) = (sx.floor() as i32, sy.floor() as i32);
+            let (fx, fy) = (sx - ax as f32, sy - ay as f32);
+            let (mut sum, mut alpha) = ([0f32; 3], 0f32);
+            for (p, weight) in [(at(ax, ay), (1.0 - fx) * (1.0 - fy)), (at(ax + 1, ay), fx * (1.0 - fy)), (at(ax, ay + 1), (1.0 - fx) * fy), (at(ax + 1, ay + 1), fx * fy)] {
+                let a = f32::from(p[3]) * weight;
+                (0..3).for_each(|channel| sum[channel] += f32::from(p[channel]) * a);
+                alpha += a;
+            }
+            if alpha <= 0.0 {
+                continue;
+            }
+            let color = (0..3).fold(0u32, |all, channel| all << 8 | (sum[channel] / alpha).round().min(255.0) as u32);
+            let amount = alpha / 255.0 * cover * shape.opacity as f32;
+            surface.blend(x, y, color, amount.round() as u32);
         }
     }
 }
@@ -1891,6 +1957,27 @@ mod tests {
         line.turn(std::f32::consts::FRAC_PI_2, (50.0, 0.0));
         assert_eq!(line.angle, 0.0);
         assert!((line.points[0].0 - 50.0).abs() < 0.01 && (line.points[0].1 + 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_pasted_picture_is_stretched_to_its_box_and_turned_with_it() {
+        // Left half red, right half blue, stretched from 2 × 1 to 80 × 20.
+        let mut picture = RgbaImage::new(2, 1);
+        picture.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        picture.put_pixel(1, 0, image::Rgba([0, 0, 255, 255]));
+        let mut pasted = Shape::new(Tool::Image, 0, 1.0, (10.0, 20.0));
+        pasted.points = vec![(10.0, 20.0), (90.0, 40.0)];
+        pasted.radius = 0.0;
+        pasted.image = Some(Picture(Arc::new(picture)));
+        let w = 100;
+        let pixels = painted(&[pasted.clone()], w, 100, Place::WHOLE);
+        assert_eq!(pixels[30 * w + 15], 0xFF0000);
+        assert_eq!(pixels[30 * w + 85], 0x0000FF);
+        assert_eq!(pixels[10 * w + 50], 0);
+        // A half turn: blue on the left now.
+        pasted.angle = std::f32::consts::PI;
+        let pixels = painted(&[pasted], w, 100, Place::WHOLE);
+        assert_eq!(pixels[30 * w + 15], 0x0000FF);
     }
 
     #[test]

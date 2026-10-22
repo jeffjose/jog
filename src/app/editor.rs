@@ -211,6 +211,8 @@ enum EditHit {
     ApplyCrop,
     ResetCrop,
     Save(SaveAs),
+    /// The picture as edited, onto the clipboard.
+    Clipboard,
     /// One of the choices on leaving with something unsaved, by its place
     /// in `LEAVE`.
     Leave(usize),
@@ -645,7 +647,7 @@ impl Editor {
     fn subject_box(&self) -> Option<[f32; 4]> {
         let shape = &self.doc.shapes[self.one()?];
         Some(match shape.tool {
-            Tool::Rect | Tool::Oval | Tool::Blur | Tool::Spotlight | Tool::Zoom | Tool::Arrow | Tool::Line => shape.frame(),
+            Tool::Rect | Tool::Oval | Tool::Blur | Tool::Spotlight | Tool::Zoom | Tool::Arrow | Tool::Line | Tool::Image => shape.frame(),
             Tool::Text | Tool::Emoji | Tool::Badge | Tool::Pen | Tool::Marker => shape.bounds(),
             _ => return None,
         })
@@ -1256,6 +1258,7 @@ impl App {
             return self.redraw();
         }
         match key {
+            Key::Character("c") if control => return self.copy_edit(),
             Key::Character("s" | "S") if control => {
                 let way = if shift { SaveAs::Copy } else { SaveAs::Overwrite };
                 return self.save_edit(way);
@@ -1269,13 +1272,19 @@ impl App {
             }
             Key::Character("b") if control => return self.edit_option(EditHit::Toggle(BOLD)),
             Key::Character("i") if control => return self.edit_option(EditHit::Toggle(ITALIC)),
-            // Words from the clipboard, as new words: read off this thread.
+            // What is on the clipboard, read off this thread: a picture, to
+            // lay over this one; or words, as new words.
             Key::Character("v") if control => {
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    if let Some(words) = ops::clipboard() {
-                        let _ = proxy.send_event(Event::EditPaste(words));
-                    }
+                    let picture = ops::clipboard_image().and_then(|png| image::load_from_memory_with_format(&png, image::ImageFormat::Png).ok());
+                    let _ = match picture {
+                        Some(picture) => proxy.send_event(Event::EditPasteImage(picture.to_rgba8())),
+                        None => match ops::clipboard() {
+                            Some(words) => proxy.send_event(Event::EditPaste(words)),
+                            None => Ok(()),
+                        },
+                    };
                 });
             }
             Key::Character("d") if control => {
@@ -1518,6 +1527,30 @@ impl App {
         self.redraw();
     }
 
+    /// A picture from the clipboard, laid over the one being edited in the
+    /// middle of what is on show: as large as it is, or made to fit in most
+    /// of what is on show; picked out, to be moved and sized.
+    pub(super) fn edit_paste_image(&mut self, picture: image::RgbaImage) {
+        let Some(editor) = &mut self.editor else { return };
+        let (w, h) = (picture.width() as f32, picture.height() as f32);
+        if w < 1.0 || h < 1.0 {
+            return;
+        }
+        let [l, t, r, b] = editor.region();
+        let fit = ((r - l) * 0.6 / w).min((b - t) * 0.6 / h).min(1.0);
+        let (pw, ph) = (w * fit, h * fit);
+        let at = ((l + r - pw) / 2.0, (t + b - ph) / 2.0);
+        let mut shape = editor.fresh(Tool::Image, at);
+        shape.points = vec![at, (at.0 + pw, at.1 + ph)];
+        shape.radius = 0.0;
+        shape.image = Some(annotate::Picture(Arc::new(picture)));
+        editor.finish_typing();
+        editor.snap();
+        editor.doc.shapes.push(shape);
+        editor.made(editor.doc.shapes.len() - 1);
+        self.toast(format!("Pasted  ·  {} × {}", w as u32, h as u32));
+    }
+
     /// Text from the clipboard: where the caret is, or as new words in the
     /// middle of what is on show.
     pub(super) fn edit_paste(&mut self, words: String) {
@@ -1606,6 +1639,7 @@ impl App {
         match (hit, handle) {
             (Some(hit @ (EditHit::Color(_) | EditHit::Filled(_) | EditHit::Heads(_) | EditHit::Dash(_) | EditHit::Face(_) | EditHit::Toggle(_) | EditHit::BadgeLook(_) | EditHit::Lens(_))), _) => self.edit_option(hit),
             (Some(EditHit::Save(way)), _) => return self.save_edit(way),
+            (Some(EditHit::Clipboard), _) => return self.copy_edit(),
             (Some(hit), _) if hit != EditHit::Inside || handle.is_none() => {
                 if let Some(editor) = &mut self.editor {
                     match hit {
@@ -2107,6 +2141,36 @@ impl App {
 
     /// Writes the picture as edited on another thread, leaving Edit at
     /// once: the marks are kept until it is known to have worked.
+    /// The picture as edited, onto the clipboard, from another thread; Edit
+    /// stays open, the marks as they are.
+    pub(super) fn copy_edit(&mut self) {
+        let Some(editor) = &mut self.editor else { return };
+        editor.finish_typing();
+        editor.commit_field();
+        if editor.tool == Tool::Crop {
+            editor.apply_crop();
+        }
+        let (id, doc) = (editor.id, editor.doc.clone());
+        let source = self.files[id].clone();
+        let transform = self.transforms.get(&id).copied().unwrap_or_default();
+        // A scripted test run must not replace the user's clipboard.
+        if self.snapshot.is_some() {
+            return self.toast("Copied");
+        }
+        self.toast("Copying…");
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let _ = proxy.send_event(Event::EditCopied(copy_edited(&source, transform, &doc)));
+        });
+    }
+
+    pub(super) fn edit_copied(&mut self, copied: Result<(u32, u32), String>) {
+        match copied {
+            Ok((w, h)) => self.toast(format!("Copied  ·  {w} × {h}")),
+            Err(error) => self.toast(format!("Not copied · {error}")),
+        }
+    }
+
     fn write_edit(&mut self, target: PathBuf, over: bool) {
         let Some(editor) = self.editor.take() else { return };
         let (id, doc) = (editor.id, editor.doc.clone());
@@ -2338,12 +2402,17 @@ impl App {
             x += button;
         }
 
-        // The two saves at the other end, alike: neither is the one to
-        // reach for more than the other.
+        // The ways out at the other end, alike: the two saves, and the
+        // clipboard, which leaves Edit open.
         let dirty = editor.dirty();
         let mut right = width - side - pad * 2;
-        for (way, label, tip) in [(SaveAs::Overwrite, "Overwrite", "Ctrl+S"), (SaveAs::Copy, "Copy", "Ctrl+Shift+S")] {
-            let able = dirty && (way == SaveAs::Copy || format.is_some());
+        let clipboard = format!("{}  Clipboard", commands::icons::CLIPBOARD);
+        let ways = [
+            (EditHit::Save(SaveAs::Overwrite), "Overwrite", "Ctrl+S", dirty && format.is_some()),
+            (EditHit::Save(SaveAs::Copy), "Save copy", "Ctrl+Shift+S", dirty),
+            (EditHit::Clipboard, clipboard.as_str(), "Ctrl+C  ·  as a PNG", true),
+        ];
+        for (hit, label, tip, able) in ways {
             let w = text.width(label, px) + pad * 2;
             let place = [right - w, bar_y, w, bar_h];
             let (ground, ink) = match able {
@@ -2353,7 +2422,7 @@ impl App {
             canvas.round_fill(place[0], place[1], place[2], place[3], pad / 2, ground, 256);
             canvas.round_outline(place[0], place[1], place[2], place[3], pad / 2, 1, MENU_EDGE_COLOR);
             text.draw(canvas, place[0] + pad, bar_y + (bar_h - line) / 2, px, ink, label);
-            editor.hits.push((EditHit::Save(way), place));
+            editor.hits.push((hit, place));
             editor.tips.push((place, tip.to_string()));
             right -= w + pad / 2;
         }
@@ -2888,7 +2957,7 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         }
         y += pad * 2 / 3;
     }
-    let colored = marks && !matches!(kind, Tool::Blur | Tool::Spotlight | Tool::Emoji);
+    let colored = marks && !matches!(kind, Tool::Blur | Tool::Spotlight | Tool::Emoji | Tool::Image);
     if colored {
         heading(canvas, text, y, "Color");
         y += small_line + pad / 3;
@@ -2930,7 +2999,7 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         y += line + pad;
     }
     // The line: how wide, and solid, dashed or dotted, with its dashes'.
-    if marks && !matches!(kind, Tool::Emoji) {
+    if marks && !matches!(kind, Tool::Emoji | Tool::Image) {
         let (label, letter) = match kind {
             Tool::Text | Tool::Badge => ("Text", "Size"),
             Tool::Counter => ("Counter", "Size"),
@@ -2961,7 +3030,7 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         }
         y += pad * 2 / 3;
     }
-    if matches!(kind, Tool::Rect | Tool::Spotlight) && editor.one().is_some() {
+    if matches!(kind, Tool::Rect | Tool::Spotlight | Tool::Image) && editor.one().is_some() {
         heading(canvas, text, y, "Corners");
         y += small_line + pad / 3;
         number(editor, canvas, text, [inner, y, half, line], "R", Field::Radius, small, mouse);
@@ -3412,6 +3481,7 @@ fn tool_icon(tool: Tool) -> &'static str {
         Tool::Zoom => ZOOM_IN,
         Tool::Crop => CROP,
         Tool::Pipette => PIPETTE,
+        Tool::Image => IMAGES,
     }
 }
 
@@ -3477,8 +3547,7 @@ fn copy_name(path: &Path, rounded: bool) -> String {
 /// and where the original went.
 fn write_edited(source: &Path, target: &Path, over: bool, transform: Transform, doc: &Doc, settings: &convert::Settings) -> Result<(u64, Option<PathBuf>), String> {
     let format = Format::of(target).ok_or("not a format jog writes")?;
-    let image = convert::turned(crate::decode::open(source).map_err(|error| error.to_string())?, transform);
-    let out = annotate::render(&image.to_rgba8(), &doc.shapes, doc.crop, doc.radius);
+    let out = render_edited(source, transform, doc)?;
     let encoded = convert::encode(&DynamicImage::ImageRgba8(out), None, format, settings).map_err(|error| error.to_string())?;
     let size = encoded.bytes.len() as u64;
     if !over {
@@ -3500,6 +3569,24 @@ fn write_edited(source: &Path, target: &Path, over: bool, transform: Transform, 
         return Err(error.to_string());
     }
     Ok((size, Some(backup)))
+}
+
+/// The picture as edited, at full size: the file decoded afresh, turned as
+/// it is shown, with the marks drawn on it, cropped and its corners rounded.
+fn render_edited(source: &Path, transform: Transform, doc: &Doc) -> Result<image::RgbaImage, String> {
+    let image = convert::turned(crate::decode::open(source).map_err(|error| error.to_string())?, transform);
+    Ok(annotate::render(&image.to_rgba8(), &doc.shapes, doc.crop, doc.radius))
+}
+
+/// The picture as edited, on the clipboard as a PNG; how large it is.
+fn copy_edited(source: &Path, transform: Transform, doc: &Doc) -> Result<(u32, u32), String> {
+    let out = render_edited(source, transform, doc)?;
+    let size = out.dimensions();
+    let encoded = convert::encode(&DynamicImage::ImageRgba8(out), None, Format::Png, &convert::Settings::default()).map_err(|error| error.to_string())?;
+    if !crate::ops::set_clipboard_image(&encoded.bytes) {
+        return Err("no xclip or wl-copy".to_string());
+    }
+    Ok(size)
 }
 
 /// A hidden name in the same folder, to write to and then move over.

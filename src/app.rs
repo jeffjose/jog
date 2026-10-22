@@ -283,6 +283,10 @@ pub enum Event {
     TracksWritten(Result<PathBuf, String>, bool),
     /// Text from the clipboard, for Edit to paste.
     EditPaste(String),
+    /// A picture from the clipboard, for Edit to lay over the one edited.
+    EditPasteImage(image::RgbaImage),
+    /// Edit's picture put on the clipboard, and how large, or why not.
+    EditCopied(Result<(u32, u32), String>),
     /// The straight edges found in a picture being edited, down and across.
     EditEdges(usize, Vec<f32>, Vec<f32>),
     /// A picture saved from Edit, or why not.
@@ -4118,6 +4122,8 @@ impl App {
             Event::TracksWritten(result, replaced) => self.tracks_written(result, replaced),
             Event::EditSaved(saved) => self.edit_saved(saved),
             Event::EditPaste(words) => self.edit_paste(words),
+            Event::EditPasteImage(picture) => self.edit_paste_image(picture),
+            Event::EditCopied(copied) => self.edit_copied(copied),
             Event::EditEdges(id, down, across) => self.edit_edges(id, down, across),
             Event::FilesDone(done) => self.files_done(done, event_loop),
             Event::Packets(id, packets) => self.packets_read(id, packets),
