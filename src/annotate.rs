@@ -338,7 +338,8 @@ impl Shape {
 
     /// Where a zoom's larger view is: left, top, right, bottom.
     pub fn zoomed(&self) -> [f32; 4] {
-        let (c, d) = (self.points[2], self.points[3]);
+        // Still being dragged out, it shows nothing larger yet.
+        let (Some(c), Some(d)) = (self.points.get(2).copied(), self.points.get(3).copied()) else { return self.frame() };
         [c.0.min(d.0), c.1.min(d.1), c.0.max(d.0), c.1.max(d.1)]
     }
 
@@ -371,6 +372,9 @@ impl Shape {
     /// One of a zoom's handles taken to a point: its middle there, or its
     /// rim under the point, its middle staying.
     pub fn zoom_to(&mut self, rim: bool, to: Point) {
+        if self.points.len() < 4 {
+            return;
+        }
         let [l, t, r, b] = self.zoomed();
         let [ol, ot, or, ob] = self.frame();
         let (mut middle, mut size) = (((l + r) / 2.0, (t + b) / 2.0), (r - l, b - t));
@@ -934,7 +938,11 @@ fn draw_zoom(surface: &mut Surface, shape: &Shape, place: Place) {
     // Lines from what it is of to the view: corner to corner, or the two
     // that touch both rings on either side.
     let middle = |[l, t, r, b]: [f32; 4]| ((l + r) / 2.0, (t + b) / 2.0);
-    let lines: Vec<(Point, Point)> = if round {
+    // Being dragged out, it is only what it is of, ringed.
+    let ready = shape.points.len() >= 4;
+    let lines: Vec<(Point, Point)> = if !ready {
+        Vec::new()
+    } else if round {
         let (from, to) = (middle(of), middle(shown));
         let far = dist(from, to).max(1.0);
         let (nx, ny) = (-(to.1 - from.1) / far, (to.0 - from.0) / far);
@@ -955,8 +963,13 @@ fn draw_zoom(surface: &mut Surface, shape: &Shape, place: Place) {
             blend_mask(surface, area, &mask, color, shape.opacity);
         }
     }
-    magnify(surface, of, shown, round);
-    for rect in [of, shown] {
+    let rings: &[[f32; 4]] = if ready {
+        magnify(surface, of, shown, round);
+        &[of, shown]
+    } else {
+        &[of]
+    };
+    for rect in rings.iter().copied() {
         let grown = [rect[0] - thick / 2.0, rect[1] - thick / 2.0, rect[2] + thick / 2.0, rect[3] + thick / 2.0];
         if round {
             let (cx, cy) = middle(rect);
@@ -1404,6 +1417,22 @@ mod tests {
         paint(&[zoom], &mut pixels, w, Place::WHOLE, [0, 0, w as i32, 100], None);
         assert_eq!(pixels[60 * w + 140], 0xFFFFFF);
         assert_eq!(pixels[30 * w + 110], 0);
+    }
+
+    #[test]
+    fn a_zoom_being_dragged_out_is_drawn_and_sized_without_its_view() {
+        // As it is between the press and the release: two points.
+        let mut zoom = Shape::new(Tool::Zoom, 0xFF0000, 2.0, (10.0, 10.0));
+        zoom.points[1] = (50.0, 40.0);
+        assert_eq!(zoom.zoomed(), zoom.frame());
+        let _ = zoom.bounds();
+        let _ = zoom.zoom_handles();
+        zoom.zoom_to(true, (80.0, 80.0));
+        assert!(zoom.hit((30.0, 10.0), 2.0));
+        let pixels = painted(&[zoom.clone()], 100, 60, Place::WHOLE);
+        assert!(pixels.iter().any(|p| *p != 0));
+        zoom.place_zoom();
+        assert_eq!(zoom.points.len(), 4);
     }
 
     #[test]
