@@ -73,6 +73,8 @@ enum Field {
     Corners,
     CropW,
     CropH,
+    /// How far a mark is turned, in degrees.
+    Angle,
     /// The color, in hex.
     Hex,
 }
@@ -146,6 +148,8 @@ enum EditDrag {
     Bend { before: Doc, moved: bool },
     Round { corner: (i8, i8), before: Doc },
     Zoom { rim: bool, before: Doc },
+    /// Turning it about `centre`, from the angle the pointer began at.
+    Rotate { centre: Point, from: f32, before: Doc },
     Crop { from: Point },
     CropGrip { grip: (i8, i8), start: [f32; 4] },
     CropMove { from: Point, start: [f32; 4] },
@@ -165,6 +169,8 @@ enum Handle {
     Round(i8, i8),
     ZoomMove,
     ZoomRim,
+    /// Just outside a corner: turns it.
+    Rotate,
     Crop(i8, i8),
 }
 
@@ -544,6 +550,12 @@ impl Editor {
             Field::Times => subject?.zoom_times(),
             Field::Corners => self.doc.radius,
             Field::CropW => crop[2] - crop[0],
+            Field::Angle => {
+                let shape = subject.filter(|shape| shape.turnable())?;
+                // Shown from -180 to 180, as Figma shows it.
+                let degrees = shape.angle.to_degrees();
+                if degrees > 180.0 { degrees - 360.0 } else { degrees }
+            }
             Field::CropH => crop[3] - crop[1],
             Field::Hex => return None,
         })
@@ -634,6 +646,13 @@ impl Editor {
                 let (cw, ch) = (within(cw, 8.0, w - l), within(ch, 8.0, h - t));
                 self.crop_draft = Some([l, t, l + cw, t + ch]);
             }
+            Field::Angle => {
+                for at in targets {
+                    if self.doc.shapes[at].turnable() {
+                        self.doc.shapes[at].angle = value.to_radians().rem_euclid(std::f32::consts::TAU);
+                    }
+                }
+            }
             Field::Hex => {}
         }
     }
@@ -642,7 +661,7 @@ impl Editor {
     fn step(&self, field: Field) -> f32 {
         let per_pixel = 1.0 / self.place.scale;
         match field {
-            Field::Opacity => 1.0,
+            Field::Opacity | Field::Angle => 1.0,
             Field::Times => 0.02,
             Field::Stroke | Field::DashLength | Field::Gap => per_pixel * 0.25,
             _ => per_pixel,
@@ -900,7 +919,7 @@ impl App {
                     let typed_now = typed.trim_end_matches('%').parse::<f32>().ok();
                     let now = typed_now.or(editor.field(field)).unwrap_or(0.0);
                     if let Some((_, typed, fresh)) = &mut editor.editing {
-                        *typed = shown((now + by).max(0.0));
+                        *typed = shown(if field == Field::Angle { now + by } else { (now + by).max(0.0) });
                         *fresh = false;
                     }
                     let before = editor.doc.clone();
@@ -908,7 +927,7 @@ impl App {
                     editor.settle(before);
                 }
                 Key::Character(c) => {
-                    let fits = |c: char| if field == Field::Hex { c.is_ascii_hexdigit() || c == '#' } else { c.is_ascii_digit() || c == '.' };
+                    let fits = |c: char| if field == Field::Hex { c.is_ascii_hexdigit() || c == '#' } else { c.is_ascii_digit() || c == '.' || (c == '-' && field == Field::Angle) };
                     if c.chars().all(fits) {
                         if std::mem::take(fresh) {
                             typed.clear();
@@ -1355,6 +1374,12 @@ impl App {
             }
             Some(EditDrag::Marquee { from, adding, .. }) => editor.drag = Some(EditDrag::Marquee { from, to: p, adding }),
             Some(EditDrag::Grip { grip, frame, from, before }) => {
+                // Turned, the drag is taken as along its own sides.
+                let turned = one.map(|at| before.shapes[at].clone());
+                let (p, from) = match &turned {
+                    Some(shape) => (shape.unturn(p), shape.unturn(from)),
+                    None => (p, from),
+                };
                 let [l, t, r, b] = frame;
                 let size = ((r - l).max(1.0), (b - t).max(1.0));
                 let centre = ((l + r) / 2.0, (t + b) / 2.0);
@@ -1381,9 +1406,27 @@ impl App {
                     }
                 }
                 let keep = |t: f32| if t.abs() < 0.02 { 0.02f32.copysign(t) } else { t };
+                if let (Some(at), Some(was)) = (one, turned) {
+                    let mut shape = was.clone();
+                    shape.scale(still, (keep(times.0), keep(times.1)));
+                    // Its middle moves as it is sized, and it turns about
+                    // that: put back where what stays put was on screen.
+                    let (want, now) = (was.returned(still), shape.returned(still));
+                    shape.translate(want.0 - now.0, want.1 - now.1);
+                    editor.doc.shapes[at] = shape;
+                }
+            }
+            Some(EditDrag::Rotate { centre, from, before }) => {
+                let by = (p.1 - centre.1).atan2(p.0 - centre.0) - from;
                 if let Some(at) = one {
                     let mut shape = before.shapes[at].clone();
-                    shape.scale(still, (keep(times.0), keep(times.1)));
+                    // Shift: to a whole fifteen degrees.
+                    let step = 15f32.to_radians();
+                    let by = match shift {
+                        true => ((shape.angle + by) / step).round() * step - shape.angle,
+                        false => by,
+                    };
+                    shape.turn(by, centre);
                     editor.doc.shapes[at] = shape;
                 }
             }
@@ -1490,6 +1533,8 @@ impl App {
                             (a, b) if a == b => CursorIcon::NwseResize,
                             _ => CursorIcon::NeswResize,
                         },
+                        // No cursor says turn; a hand to take it by is nearest.
+                        Some(Handle::Rotate) => CursorIcon::Grab,
                         _ => CursorIcon::Pointer,
                     },
                     (false, _) => CursorIcon::Default,
@@ -1541,7 +1586,7 @@ impl App {
                 }
             }
             Some(EditDrag::Marquee { from, to, adding }) => editor.pick_within(from, to, adding),
-            Some(EditDrag::Grip { before, .. } | EditDrag::Round { before, .. } | EditDrag::Zoom { before, .. }) => editor.settle(before),
+            Some(EditDrag::Grip { before, .. } | EditDrag::Round { before, .. } | EditDrag::Zoom { before, .. } | EditDrag::Rotate { before, .. }) => editor.settle(before),
             Some(EditDrag::End { end, before, moved }) => {
                 if moved {
                     editor.settle(before);
@@ -2160,24 +2205,47 @@ fn draw_handles(editor: &mut Editor, canvas: &mut Canvas, shape: &Shape, pad: i3
             editor.handles.push((Handle::ZoomMove, screen(middle)));
             editor.handles.push((Handle::ZoomRim, screen(rim)));
         }
-        Tool::Badge => canvas.round_outline(x, y, w, h, 2, 1, accent()),
         _ => {
-            canvas.round_outline(x, y, w, h, 2, 1, accent());
+            // Its box, turned as it is, a little larger than it: where each
+            // grip of it is on screen.
+            let more = 3.0 / place.scale;
+            let [l, t, r, b] = shape.local_bounds();
+            let (l, t, r, b) = (l - more, t - more, r + more, b + more);
+            let at = |gx: i8, gy: i8| screen(shape.returned((l + (r - l) * f32::from(gx + 1) / 2.0, t + (b - t) * f32::from(gy + 1) / 2.0)));
+            let corners = [at(-1, -1), at(1, -1), at(1, 1), at(-1, 1)];
+            for side in 0..4 {
+                line(canvas, corners[side], corners[(side + 1) % 4], accent());
+            }
             if editor.typing.is_some() {
                 return;
             }
-            for (gx, gy) in [(-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0)] {
-                // Words keep their proportions: their corners only.
-                if shape.tool.lettered() && (gx == 0 || gy == 0) {
-                    continue;
+            // A badge is as large as its words: no grips.
+            if shape.tool != Tool::Badge {
+                for (gx, gy) in [(-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0)] {
+                    // Words keep their proportions: their corners only.
+                    if shape.tool.lettered() && (gx == 0 || gy == 0) {
+                        continue;
+                    }
+                    let spot = at(gx, gy);
+                    canvas.fill(spot.0 - grip - 1, spot.1 - grip - 1, (grip + 1) * 2, (grip + 1) * 2, accent());
+                    canvas.fill(spot.0 - grip + 1, spot.1 - grip + 1, (grip - 1) * 2, (grip - 1) * 2, 0xFFFFFF);
+                    editor.handles.push((Handle::Grip(gx, gy), spot));
                 }
-                let at = (x + w * (gx + 1) / 2, y + h * (gy + 1) / 2);
-                canvas.fill(at.0 - grip - 1, at.1 - grip - 1, (grip + 1) * 2, (grip + 1) * 2, accent());
-                canvas.fill(at.0 - grip + 1, at.1 - grip + 1, (grip - 1) * 2, (grip - 1) * 2, 0xFFFFFF);
-                editor.handles.push((Handle::Grip(gx as i8, gy as i8), at));
             }
-            // Corners to round, where there is room for them.
-            if matches!(shape.tool, Tool::Rect | Tool::Spotlight) && w.min(h) >= pad * 3 {
+            // Just outside each corner, as in Figma, a place to take it by
+            // and turn it; after the grips, which win where they meet.
+            if shape.turns() {
+                let (cx, cy) = screen(shape.centre());
+                for corner in corners {
+                    let (dx, dy) = ((corner.0 - cx) as f32, (corner.1 - cy) as f32);
+                    let far = dx.hypot(dy).max(1.0);
+                    let out = pad as f32 * 0.9;
+                    editor.handles.push((Handle::Rotate, (corner.0 + (dx / far * out) as i32, corner.1 + (dy / far * out) as i32)));
+                }
+            }
+            // Corners to round, where there is room for them, on a box that
+            // is square to the picture.
+            if matches!(shape.tool, Tool::Rect | Tool::Spotlight) && shape.angle == 0.0 && w.min(h) >= pad * 3 {
                 let [l, t, r, b] = shape.frame();
                 let inset = (shape.radius * place.scale).max(pad as f32).min(w.min(h) as f32 / 2.0 - 2.0);
                 for (cx, cy) in [(-1i8, -1i8), (1, -1), (1, 1), (-1, 1)] {
@@ -2188,6 +2256,16 @@ fn draw_handles(editor: &mut Editor, canvas: &mut Canvas, shape: &Shape, pad: i3
                 }
             }
         }
+    }
+}
+
+/// A line a pixel wide from `a` to `b`.
+fn line(canvas: &mut Canvas, a: (i32, i32), b: (i32, i32), color: u32) {
+    let steps = (b.0 - a.0).abs().max((b.1 - a.1).abs()).max(1);
+    for step in 0..=steps {
+        let x = a.0 + (b.0 - a.0) * step / steps;
+        let y = a.1 + (b.1 - a.1) * step / steps;
+        canvas.fill(x, y, 1, 1, color);
     }
 }
 
@@ -2202,7 +2280,11 @@ fn grab(editor: &mut Editor, handle: Handle, at: Point) {
     let p = editor.place.to_picture(at);
     let before = editor.doc.clone();
     editor.drag = Some(match handle {
-        Handle::Grip(gx, gy) => EditDrag::Grip { grip: (gx, gy), frame: editor.doc.shapes[index].bounds(), from: p, before },
+        Handle::Grip(gx, gy) => EditDrag::Grip { grip: (gx, gy), frame: editor.doc.shapes[index].local_bounds(), from: p, before },
+        Handle::Rotate => {
+            let centre = editor.doc.shapes[index].centre();
+            EditDrag::Rotate { centre, from: (p.1 - centre.1).atan2(p.0 - centre.0), before }
+        }
         Handle::End(end) => EditDrag::End { end, before, moved: false },
         Handle::Bend => EditDrag::Bend { before, moved: false },
         Handle::Round(cx, cy) => EditDrag::Round { corner: (cx, cy), before },
@@ -2351,7 +2433,14 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         pair(editor, canvas, text, y, ("X", Field::X), ("Y", Field::Y));
         y += line + pad / 3;
         pair(editor, canvas, text, y, ("W", Field::W), ("H", Field::H));
-        y += line + pad;
+        y += line + pad / 3;
+        // How far it is turned, for those that turn by an angle.
+        if subject.as_ref().is_some_and(Shape::turnable) {
+            number(editor, canvas, text, [inner, y, half, line], commands::icons::ROTATE_CW, Field::Angle, small, mouse);
+            editor.tips.push(([inner, y, half, line], "Turn  ·  or drag just outside a corner".to_string()));
+            y += line + pad / 3;
+        }
+        y += pad * 2 / 3;
     }
     let colored = marks && !matches!(kind, Tool::Blur | Tool::Spotlight | Tool::Emoji);
     if colored {
