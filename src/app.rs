@@ -287,6 +287,10 @@ pub enum Event {
     EditPasteImage(image::RgbaImage),
     /// Edit's picture put on the clipboard, and how large, or why not.
     EditCopied(Result<(u32, u32), String>),
+    /// The words read in a box of the picture being edited, or why not.
+    EditScanned(Result<String, String>),
+    /// Where a picture being edited says what is not for every eye, or why not found.
+    EditRedact(usize, Result<Vec<[f32; 4]>, String>),
     /// The straight edges found in a picture being edited, down and across.
     EditEdges(usize, Vec<f32>, Vec<f32>),
     /// A picture saved from Edit, or why not.
@@ -4128,6 +4132,8 @@ impl App {
             Event::EditPaste(words) => self.edit_paste(words),
             Event::EditPasteImage(picture) => self.edit_paste_image(picture),
             Event::EditCopied(copied) => self.edit_copied(copied),
+            Event::EditScanned(words) => self.edit_scanned(words),
+            Event::EditRedact(id, found) => self.edit_redact(id, found),
             Event::EditEdges(id, down, across) => self.edit_edges(id, down, across),
             Event::FilesDone(done) => self.files_done(done, event_loop),
             Event::Packets(id, packets) => self.packets_read(id, packets),

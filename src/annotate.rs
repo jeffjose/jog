@@ -29,6 +29,8 @@ pub enum Tool {
     Badge,
     Emoji,
     Blur,
+    /// Wipes out what is under it, filled from what is around it.
+    Erase,
     Spotlight,
     Zoom,
     Crop,
@@ -36,11 +38,13 @@ pub enum Tool {
     Pipette,
     /// A picture pasted in, over the one being edited.
     Image,
+    /// Reads the words in a box and puts them on the clipboard.
+    Scan,
 }
 
 impl Tool {
     /// The tools in the order of the bar, a `None` where a gap parts them.
-    pub const BAR: [Option<Tool>; 18] = [
+    pub const BAR: [Option<Tool>; 20] = [
         Some(Tool::Select),
         None,
         Some(Tool::Rect),
@@ -55,10 +59,12 @@ impl Tool {
         Some(Tool::Emoji),
         None,
         Some(Tool::Blur),
+        Some(Tool::Erase),
         Some(Tool::Spotlight),
         Some(Tool::Zoom),
         None,
         Some(Tool::Crop),
+        Some(Tool::Scan),
     ];
 
     /// The key that picks it, as hotshot has them.
@@ -76,9 +82,11 @@ impl Tool {
             Tool::Badge => "j",
             Tool::Emoji => "e",
             Tool::Blur => "b",
+            Tool::Erase => "w",
             Tool::Spotlight => "s",
             Tool::Zoom => "z",
             Tool::Crop => "x",
+            Tool::Scan => "y",
             Tool::Pipette => "i",
             Tool::Image => "",
         }
@@ -102,9 +110,11 @@ impl Tool {
             Tool::Badge => "Badge",
             Tool::Emoji => "Emoji",
             Tool::Blur => "Blur",
+            Tool::Erase => "Erase",
             Tool::Spotlight => "Spotlight",
             Tool::Zoom => "Zoom",
             Tool::Crop => "Crop",
+            Tool::Scan => "Copy text",
             Tool::Pipette => "Pick a color",
             Tool::Image => "Image",
         }
@@ -112,7 +122,7 @@ impl Tool {
 
     /// Whether it is drawn by dragging out from one point to another.
     pub fn spans(self) -> bool {
-        matches!(self, Tool::Rect | Tool::Oval | Tool::Arrow | Tool::Line | Tool::Blur | Tool::Spotlight | Tool::Zoom)
+        matches!(self, Tool::Rect | Tool::Oval | Tool::Arrow | Tool::Line | Tool::Blur | Tool::Erase | Tool::Spotlight | Tool::Zoom)
     }
 
     /// Whether its size is that of its letters, kept in proportion.
@@ -628,7 +638,7 @@ impl Shape {
             }
             Tool::Arrow | Tool::Line => around(&self.path(), reach + self.head().1),
             Tool::Pen | Tool::Marker => around(&self.points, self.line_width() * 0.5 + 1.0),
-            Tool::Blur | Tool::Spotlight | Tool::Image => self.frame(),
+            Tool::Blur | Tool::Erase | Tool::Spotlight | Tool::Image => self.frame(),
             _ => {
                 let [l, t, r, b] = self.frame();
                 [l - reach, t - reach, r + reach, b + reach]
@@ -703,7 +713,7 @@ impl Shape {
         let p = self.unturn(p);
         let within = |[l, t, r, b]: [f32; 4]| p.0 >= l - reach && p.0 <= r + reach && p.1 >= t - reach && p.1 <= b + reach;
         match self.tool {
-            Tool::Text | Tool::Badge | Tool::Emoji | Tool::Blur | Tool::Spotlight | Tool::Image => within(self.local_bounds()),
+            Tool::Text | Tool::Badge | Tool::Emoji | Tool::Blur | Tool::Erase | Tool::Spotlight | Tool::Image => within(self.local_bounds()),
             Tool::Zoom => within(self.frame()) || within(self.zoomed()),
             Tool::Pen | Tool::Marker => {
                 let half = self.line_width() / 2.0 + reach;
@@ -946,8 +956,15 @@ fn draw_shape(surface: &mut Surface, shape: &Shape, place: Place, number: usize)
         // and the sheet laid down turned.
         Tool::Text | Tool::Badge | Tool::Emoji if shape.angle != 0.0 => draw_turned(surface, shape, place, area),
         Tool::Image => draw_image(surface, shape, place, area),
-        Tool::Select | Tool::Crop | Tool::Spotlight | Tool::Pipette => {}
+        Tool::Select | Tool::Crop | Tool::Scan | Tool::Spotlight | Tool::Pipette => {}
         Tool::Blur => pixelate(surface.pixels, width, place, area, (shape.stroke * 4.0).max(8.0)),
+        Tool::Erase => {
+            let [l, t, r, b] = shape.frame();
+            let (sl, st) = place.to_screen((l, t));
+            let (sr, sb) = place.to_screen((r, b));
+            let inside = [sl.round() as i32, st.round() as i32, sr.round() as i32, sb.round() as i32];
+            fill_from_around(surface.pixels, width, clip, inside);
+        }
         Tool::Pen | Tool::Marker => {
             let half = shape.line_width() / 2.0 * scale;
             let points: Vec<Point> = shape.points.iter().map(|p| place.to_screen(*p)).collect();
@@ -1718,6 +1735,85 @@ fn pixelate(pixels: &mut [u32], width: usize, place: Place, area: [i32; 4], cell
     }
 }
 
+/// Fills `inside` (left, top, right, bottom) from the pixels just outside
+/// it: each pixel the four nearest on the rim, the nearer weighing more.
+/// On the plain ground of a screenshot what was there goes without a trace.
+/// A side outside `clip` is left out; with none left, nothing is done.
+fn fill_from_around(pixels: &mut [u32], width: usize, clip: [i32; 4], inside: [i32; 4]) {
+    let [l, t, r, b] = inside;
+    let area = [l.max(clip[0]), t.max(clip[1]), r.min(clip[2]), b.min(clip[3])];
+    if area[2] <= area[0] || area[3] <= area[1] {
+        return;
+    }
+    let (left, top, right, bottom) = (l > clip[0], t > clip[1], r < clip[2], b < clip[3]);
+    if !(left || top || right || bottom) {
+        return;
+    }
+    // The rim, a little smoothed along itself so that one odd pixel on it
+    // does not draw a streak across.
+    let at = |x: i32, y: i32| pixels[y as usize * width + x as usize];
+    let smooth = |samples: Vec<u32>| -> Vec<[f32; 3]> {
+        (0..samples.len())
+            .map(|i| {
+                let near = &samples[i.saturating_sub(1)..(i + 2).min(samples.len())];
+                let mut sum = [0.0; 3];
+                for p in near {
+                    sum[0] += (p >> 16 & 255) as f32;
+                    sum[1] += (p >> 8 & 255) as f32;
+                    sum[2] += (p & 255) as f32;
+                }
+                sum.map(|v| v / near.len() as f32)
+            })
+            .collect()
+    };
+    let column = |x: i32| smooth((area[1]..area[3]).map(|y| at(x, y)).collect());
+    let row = |y: i32| smooth((area[0]..area[2]).map(|x| at(x, y)).collect());
+    let mut west = left.then(|| column(l - 1));
+    let mut east = right.then(|| column(r));
+    let mut north = top.then(|| row(t - 1));
+    let mut south = bottom.then(|| row(b));
+    // Where the rim cuts through a letter, the ground the rest of it is on
+    // stands in: a sample far from the rim's middle color, as the rim goes,
+    // is taken to be the letter. A rim that changes slowly, as a gradient
+    // does, is far spread and keeps all of its own.
+    let mut rim: Vec<[f32; 3]> = [&west, &east, &north, &south].into_iter().flatten().flatten().copied().collect();
+    let middle: [f32; 3] = std::array::from_fn(|c| {
+        rim.sort_by(|a, b| a[c].total_cmp(&b[c]));
+        rim[rim.len() / 2][c]
+    });
+    let far = |p: &[f32; 3]| (0..3).map(|c| (p[c] - middle[c]).abs()).fold(0.0, f32::max);
+    let mut spread: Vec<f32> = rim.iter().map(far).collect();
+    spread.sort_by(f32::total_cmp);
+    let limit = spread[spread.len() / 2] * 4.0 + 12.0;
+    for side in [&mut west, &mut east, &mut north, &mut south].into_iter().flatten() {
+        for p in side.iter_mut() {
+            if far(p) > limit {
+                *p = middle;
+            }
+        }
+    }
+    for y in area[1]..area[3] {
+        let j = (y - area[1]) as usize;
+        for x in area[0]..area[2] {
+            let i = (x - area[0]) as usize;
+            let mut sum = [0.0f32; 3];
+            let mut weight = 0.0;
+            let sides = [(&west, j, x - l + 1), (&east, j, r - x), (&north, i, y - t + 1), (&south, i, b - y)];
+            for (side, k, distance) in sides {
+                if let Some(side) = side {
+                    let w = 1.0 / (distance as f32 * distance as f32);
+                    for c in 0..3 {
+                        sum[c] += side[k][c] * w;
+                    }
+                    weight += w;
+                }
+            }
+            let [red, green, blue] = sum.map(|v| (v / weight).round().clamp(0.0, 255.0) as u32);
+            pixels[y as usize * width + x as usize] = red << 16 | green << 8 | blue;
+        }
+    }
+}
+
 /// Darkens everything in `clip` outside the rectangles of `lit`, each with
 /// corners as round as it says.
 fn spotlight(pixels: &mut [u32], width: usize, place: Place, clip: [i32; 4], lit: &[([f32; 4], f32)]) {
@@ -2056,6 +2152,30 @@ mod tests {
         spotlight(&mut pixels, w, Place::WHOLE, [0, 0, 40, 40], &[([10.0, 10.0, 30.0, 30.0], 0.0)]);
         assert_eq!(pixels[20 * w + 20], 0xFFFFFF);
         assert!(pixels[2 * w + 2] < 0xFFFFFF);
+    }
+
+    #[test]
+    fn erased_is_filled_from_around_it() {
+        // Plain ground with a dark bar across it, the box cutting the bar:
+        // the box is the ground, the bar's ends on its rim notwithstanding.
+        let w = 60usize;
+        let mut pixels = vec![0xF4F6FAu32; w * w];
+        for x in 5..55 {
+            for y in 28..32 {
+                pixels[y * w + x] = 0x1F2937;
+            }
+        }
+        let erase = Shape { tool: Tool::Erase, ..rect((20.0, 20.0), (40.0, 40.0)) };
+        paint(&[erase], &mut pixels, w, Place::WHOLE, [0, 0, w as i32, w as i32], None);
+        assert!((20..40).all(|y| (20..40).all(|x| pixels[y * w + x] == 0xF4F6FA)));
+        assert_eq!(pixels[30 * w + 10], 0x1F2937);
+        // A ramp from left to right goes on across.
+        let mut ramp: Vec<u32> = (0..w * w).map(|at| (at % w * 4) as u32 * 0x010101).collect();
+        let erase = Shape { tool: Tool::Erase, ..rect((20.0, 20.0), (40.0, 40.0)) };
+        paint(&[erase], &mut ramp, w, Place::WHOLE, [0, 0, w as i32, w as i32], None);
+        let gray = |p: u32| (p & 255) as i32;
+        assert!((gray(ramp[30 * w + 30]) - 120).abs() <= 6, "{}", gray(ramp[30 * w + 30]));
+        assert!(gray(ramp[30 * w + 22]) < gray(ramp[30 * w + 38]));
     }
 
     #[test]

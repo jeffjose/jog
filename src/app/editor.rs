@@ -162,6 +162,8 @@ enum EditDrag {
     Draw { from: Point },
     Move { from: Point, before: Doc, moved: bool, was_selected: bool },
     Marquee { from: Point, to: Point, adding: bool },
+    /// A box being dragged out to read the words in.
+    Scan { from: Point, to: Point },
     Grip { grip: (i8, i8), frame: [f32; 4], from: Point, before: Doc },
     End { end: usize, before: Doc, moved: bool },
     Bend { before: Doc, moved: bool },
@@ -220,6 +222,8 @@ enum EditHit {
     Aspect(Option<f32>),
     ApplyCrop,
     ResetCrop,
+    /// What the picture says that is not for every eye, blacked out.
+    Redact,
     Save(SaveAs),
     /// The picture as edited, onto the clipboard.
     Clipboard,
@@ -665,7 +669,7 @@ impl Editor {
     fn subject_box(&self) -> Option<[f32; 4]> {
         let shape = &self.doc.shapes[self.one()?];
         Some(match shape.tool {
-            Tool::Rect | Tool::Oval | Tool::Blur | Tool::Spotlight | Tool::Zoom | Tool::Arrow | Tool::Line | Tool::Image => shape.frame(),
+            Tool::Rect | Tool::Oval | Tool::Blur | Tool::Erase | Tool::Spotlight | Tool::Zoom | Tool::Arrow | Tool::Line | Tool::Image => shape.frame(),
             Tool::Text | Tool::Emoji | Tool::Badge | Tool::Pen | Tool::Marker => shape.bounds(),
             _ => return None,
         })
@@ -1719,6 +1723,7 @@ impl App {
             (Some(hit @ (EditHit::Color(_) | EditHit::Filled(_) | EditHit::Heads(_) | EditHit::Dash(_) | EditHit::Face(_) | EditHit::Toggle(_) | EditHit::BadgeLook(_) | EditHit::Lens(_))), _) => self.edit_option(hit),
             (Some(EditHit::Save(way)), _) => return self.save_edit(way),
             (Some(EditHit::Clipboard), _) => return self.copy_edit(),
+            (Some(EditHit::Redact), _) => return self.redact_edit(),
             (Some(hit), _) if hit != EditHit::Inside || handle.is_none() => {
                 if let Some(editor) = &mut self.editor {
                     match hit {
@@ -1847,6 +1852,7 @@ impl App {
                 editor.drag = Some(EditDrag::Move { from, before, moved: true, was_selected });
             }
             Some(EditDrag::Marquee { from, adding, .. }) => editor.drag = Some(EditDrag::Marquee { from, to: p, adding }),
+            Some(EditDrag::Scan { from, .. }) => editor.drag = Some(EditDrag::Scan { from, to: p }),
             Some(EditDrag::Grip { grip, frame, from, before }) => {
                 // Square to the picture, the side taken rests on an edge.
                 let upright = one.is_some_and(|at| before.shapes[at].angle == 0.0);
@@ -2076,6 +2082,7 @@ impl App {
                 }
             }
             Some(EditDrag::Marquee { from, to, adding }) => editor.pick_within(from, to, adding),
+            Some(EditDrag::Scan { from, to }) => return self.scan_edit(from, to),
             Some(EditDrag::Grip { before, .. } | EditDrag::Round { before, .. } | EditDrag::Zoom { before, .. } | EditDrag::Rotate { before, .. }) => editor.settle(before),
             Some(EditDrag::End { end, before, moved }) => {
                 if moved {
@@ -2251,6 +2258,98 @@ impl App {
         }
     }
 
+    /// The words in the box from `from` to `to`, read off this thread from
+    /// the picture at full size, marks and all, onto the clipboard.
+    fn scan_edit(&mut self, from: Point, to: Point) {
+        let Some(editor) = &mut self.editor else { return };
+        let [_, _, w, h] = editor.whole();
+        let rect = [from.0.min(to.0).max(0.0), from.1.min(to.1).max(0.0), from.0.max(to.0).min(w), from.1.max(to.1).min(h)];
+        // A click, or a box too small to hold a letter, reads nothing.
+        if (rect[2] - rect[0]) * editor.place.scale < 6.0 || (rect[3] - rect[1]) * editor.place.scale < 6.0 {
+            return self.redraw();
+        }
+        let (id, shapes) = (editor.id, editor.doc.shapes.clone());
+        let source = self.files[id].clone();
+        let transform = self.transforms.get(&id).copied().unwrap_or_default();
+        let keep = self.snapshot.is_none();
+        self.toast("Reading…");
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let words = crate::decode::open(&source).map_err(|error| error.to_string()).and_then(|image| {
+                let image = convert::turned(image, transform).to_rgba8();
+                let part = annotate::render(&image, &shapes, Some(rect), 0.0);
+                let words = read_words(&part)?;
+                // A scripted test run must not replace the user's clipboard.
+                if keep && !words.is_empty() && !crate::ops::set_clipboard(&words) {
+                    return Err("no xclip, xsel or wl-copy".to_string());
+                }
+                Ok(words)
+            });
+            let _ = proxy.send_event(Event::EditScanned(words));
+        });
+        self.redraw();
+    }
+
+    pub(super) fn edit_scanned(&mut self, words: Result<String, String>) {
+        match words {
+            Ok(words) if words.is_empty() => self.toast("No text found"),
+            Ok(words) => {
+                let count = words.split_whitespace().count();
+                let first: String = words.split_whitespace().take(6).collect::<Vec<_>>().join(" ");
+                let more = if count > 6 { " …" } else { "" };
+                self.toast(format!("Copied  ·  {first}{more}"));
+            }
+            Err(error) => self.toast(format!("Not read · {error}")),
+        }
+    }
+
+    /// The words of the whole picture read off this thread, and those not
+    /// for every eye found among them, to be blacked out.
+    fn redact_edit(&mut self) {
+        let Some(editor) = &mut self.editor else { return };
+        editor.finish_typing();
+        let (id, shapes) = (editor.id, editor.doc.shapes.clone());
+        let source = self.files[id].clone();
+        let transform = self.transforms.get(&id).copied().unwrap_or_default();
+        self.toast("Reading…");
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let found = crate::decode::open(&source).map_err(|error| error.to_string()).and_then(|image| {
+                let image = convert::turned(image, transform).to_rgba8();
+                let painted = annotate::render(&image, &shapes, None, 0.0);
+                let (tsv, times) = tesseract(&painted, &["tsv"])?;
+                Ok(sensitive(&words_in(&tsv, times)))
+            });
+            let _ = proxy.send_event(Event::EditRedact(id, found));
+        });
+        self.redraw();
+    }
+
+    /// Black boxes over what was found, picked out to be looked over.
+    pub(super) fn edit_redact(&mut self, id: usize, found: Result<Vec<[f32; 4]>, String>) {
+        let Some(editor) = self.editor.as_mut().filter(|editor| editor.id == id) else { return };
+        match found {
+            Ok(found) if found.is_empty() => self.toast("Nothing to redact"),
+            Ok(found) => {
+                editor.finish_typing();
+                editor.snap();
+                let first = editor.doc.shapes.len();
+                for [l, t, r, b] in &found {
+                    let mut shape = Shape::new(Tool::Rect, 0x000000, 2.0, (*l, *t));
+                    shape.points[1] = (*r, *b);
+                    (shape.filled, shape.radius) = (true, 0.0);
+                    editor.doc.shapes.push(shape);
+                }
+                editor.selected = (first..editor.doc.shapes.len()).collect();
+                editor.tool = Tool::Select;
+                let count = found.len();
+                self.toast(format!("Redacted  ·  {count}"));
+            }
+            Err(error) => self.toast(format!("Not read · {error}")),
+        }
+        self.redraw();
+    }
+
     fn write_edit(&mut self, target: PathBuf, over: bool) {
         let Some(editor) = self.editor.take() else { return };
         let (id, doc) = (editor.id, editor.doc.clone());
@@ -2420,7 +2519,7 @@ impl App {
             canvas.fill(shown[0], sy.round() as i32, shown[2], 1, accent_soft());
         }
         // A box being dragged out to pick out what it touches.
-        if let Some(EditDrag::Marquee { from, to, .. }) = editor.drag {
+        if let Some(EditDrag::Marquee { from, to, .. } | EditDrag::Scan { from, to }) = editor.drag {
             let rect = [from.0.min(to.0), from.1.min(to.1), from.0.max(to.0), from.1.max(to.1)];
             let [x, y, w, h] = on_screen(place, rect, 0);
             canvas.round_fill(x, y, w, h, 0, accent(), 40);
@@ -2975,6 +3074,7 @@ fn editor_press(editor: &mut Editor, at: Point, adding: bool) {
             }
         }
         Tool::Pipette => {}
+        Tool::Scan => editor.drag = Some(EditDrag::Scan { from: p, to: p }),
         tool => {
             editor.snap();
             let shape = editor.fresh(tool, p);
@@ -3020,7 +3120,7 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
     let subject = editor.subject().map(|at| editor.doc.shapes[at].clone());
     let kind = subject.as_ref().map_or(editor.tool, |shape| shape.tool);
     let heading = |canvas: &mut Canvas, text: &mut Text, y: i32, words: &str| text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, words);
-    let marks = !matches!(kind, Tool::Select | Tool::Crop) || editor.selected.len() > 1;
+    let marks = !matches!(kind, Tool::Select | Tool::Crop | Tool::Scan) || editor.selected.len() > 1;
     let words = matches!(kind, Tool::Text | Tool::Badge);
     let mut color_row = None;
     // A row of two numbers side by side.
@@ -3048,7 +3148,7 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         }
         y += pad * 2 / 3;
     }
-    let colored = marks && !matches!(kind, Tool::Blur | Tool::Spotlight | Tool::Emoji | Tool::Image);
+    let colored = marks && !matches!(kind, Tool::Blur | Tool::Erase | Tool::Spotlight | Tool::Emoji | Tool::Image);
     if colored {
         heading(canvas, text, y, "Color");
         y += small_line + pad / 3;
@@ -3090,7 +3190,7 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         y += line + pad;
     }
     // The line: how wide, and solid, dashed or dotted, with its dashes'.
-    if marks && !matches!(kind, Tool::Emoji | Tool::Image) {
+    if marks && !matches!(kind, Tool::Emoji | Tool::Image | Tool::Erase) {
         let (label, letter) = match kind {
             Tool::Text | Tool::Badge => ("Text", "Size"),
             Tool::Counter => ("Counter", "Size"),
@@ -3217,6 +3317,14 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         y += line + pad;
     }
 
+    if kind == Tool::Scan {
+        text.draw(canvas, inner, y, px, TEXT_COLOR, "Copy text");
+        y += line;
+        text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, "Drag over words  →  clipboard");
+        y += small_line + pad;
+        canvas.fill(inner, y, inner_w, 1, MENU_EDGE_COLOR);
+        y += pad;
+    }
     // The picture's own: its crop and its corners.
     if marks {
         canvas.fill(inner, y, inner_w, 1, MENU_EDGE_COLOR);
@@ -3277,6 +3385,18 @@ fn draw_panel(editor: &mut Editor, canvas: &mut Canvas, text: &mut Text, [ix, to
         y += small_line;
         text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, "Overwrite → white  ·  Copy → PNG");
         y += small_line;
+    }
+    // What is not for every eye, found in the words and blacked out.
+    if kind != Tool::Crop {
+        y += pad / 2;
+        let label = format!("{}  Redact", commands::icons::REDACT);
+        let place = [inner, y, half, line];
+        canvas.round_fill(inner, y, half, line, line / 4, if inside(place, mouse) { PLACEHOLDER_COLOR } else { 0x161616 }, 256);
+        let lw = text.width(&label, small);
+        text.draw(canvas, inner + (half - lw) / 2, y + (line - small_line) / 2, small, TEXT_COLOR, &label);
+        editor.hits.push((EditHit::Redact, place));
+        editor.tips.push((place, "Black out emails, keys, cards, phones".to_string()));
+        y += line + pad / 2;
     }
     let keys = [("Drag a number", "or click to type"), ("Shift+click", "pick out more"), ("Ctrl+D", "duplicate  ·  Del remove"), ("c d f g", "color, dash, fill, font")];
     let key_w = keys.iter().map(|(key, _)| text.width(key, small)).max().unwrap_or(0) + pad / 2;
@@ -3568,9 +3688,11 @@ fn tool_icon(tool: Tool) -> &'static str {
         Tool::Badge => BADGE,
         Tool::Emoji => STICKER,
         Tool::Blur => BLUR,
+        Tool::Erase => ERASER,
         Tool::Spotlight => SPOTLIGHT,
         Tool::Zoom => ZOOM_IN,
         Tool::Crop => CROP,
+        Tool::Scan => TEXT_SCAN,
         Tool::Pipette => PIPETTE,
         Tool::Image => IMAGES,
     }
@@ -3668,6 +3790,126 @@ fn copy_edited(source: &Path, transform: Transform, doc: &Doc) -> Result<(u32, u
         return Err("no xclip or wl-copy".to_string());
     }
     Ok(size)
+}
+
+/// What tesseract makes of a picture, `how` being what it is to print
+/// (nothing for the words, `tsv` for each word and where it is). Small
+/// letters, as a screenshot has them, are read better made larger first.
+fn tesseract(picture: &image::RgbaImage, how: &[&str]) -> Result<(String, f32), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let gray = DynamicImage::ImageRgba8(picture.clone()).to_luma8();
+    let times = if gray.height() < 1200 && gray.width() < 3000 { 2 } else { 1 };
+    let gray = if times > 1 { image::imageops::resize(&gray, gray.width() * times, gray.height() * times, image::imageops::FilterType::CatmullRom) } else { gray };
+    let mut png = Vec::new();
+    DynamicImage::ImageLuma8(gray).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).map_err(|error| error.to_string())?;
+    let mut child = Command::new("tesseract").args(["stdin", "stdout"]).args(how).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|_| "no tesseract".to_string())?;
+    let written = child.stdin.take().is_some_and(|mut stdin| stdin.write_all(&png).is_ok());
+    let output = child.wait_with_output().map_err(|error| error.to_string())?;
+    if !written || !output.status.success() {
+        return Err("tesseract failed".to_string());
+    }
+    Ok((String::from_utf8_lossy(&output.stdout).into_owned(), times as f32))
+}
+
+/// The words in a picture, line by line, as tesseract reads them.
+fn read_words(picture: &image::RgbaImage) -> Result<String, String> {
+    let (words, _) = tesseract(picture, &[])?;
+    let lines: Vec<&str> = words.lines().map(str::trim_end).collect();
+    Ok(lines.join("\n").trim_matches(|c: char| c.is_whitespace() || c == '\u{c}').to_string())
+}
+
+/// A word tesseract read: what it says, the line it is on, and its box in
+/// the picture (left, top, right, bottom).
+struct Word {
+    text: String,
+    line: (u32, u32, u32),
+    rect: [f32; 4],
+}
+
+/// The words of tesseract's `tsv`, their boxes in the picture as it was
+/// before it was made `times` larger to be read.
+fn words_in(tsv: &str, times: f32) -> Vec<Word> {
+    tsv.lines()
+        .skip(1)
+        .filter_map(|row| {
+            let cells: Vec<&str> = row.split('\t').collect();
+            let [level, _, block, par, line, _, left, top, width, height, _, text] = cells.as_slice() else { return None };
+            if *level != "5" || text.trim().is_empty() {
+                return None;
+            }
+            let number = |cell: &str| cell.parse::<f32>().ok();
+            let (l, t, w, h) = (number(left)?, number(top)?, number(width)?, number(height)?);
+            let line = (block.parse().ok()?, par.parse().ok()?, line.parse().ok()?);
+            Some(Word { text: text.trim().to_string(), line, rect: [l / times, t / times, (l + w) / times, (t + h) / times] })
+        })
+        .collect()
+}
+
+/// The boxes, each a little larger than what it covers, of what is not for
+/// every eye: email addresses, IP addresses, keys and tokens, what follows
+/// a word such as "password:", and numbers long enough to be a card's, a
+/// phone's or an account's, however they are spaced.
+fn sensitive(words: &[Word]) -> Vec<[f32; 4]> {
+    let bare = |word: &str| word.trim_matches(|c: char| matches!(c, ',' | ';' | '.' | ':' | '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>')).to_string();
+    let email = |word: &str| word.split_once('@').is_some_and(|(name, place)| !name.is_empty() && place.contains('.') && !place.starts_with('.'));
+    let ip = |word: &str| {
+        let parts: Vec<&str> = word.split('.').collect();
+        parts.len() == 4 && parts.iter().all(|part| !part.is_empty() && part.len() <= 3 && part.parse::<u16>().is_ok_and(|n| n <= 255))
+    };
+    let key = |word: &str| {
+        let known = ["sk-", "sk_", "pk_", "ghp_", "gho_", "github_pat_", "xox", "AKIA", "AIza", "eyJ", "glpat-"].iter().any(|start| word.starts_with(start));
+        let letters = word.chars().filter(char::is_ascii_alphabetic).count();
+        let digits = word.chars().filter(char::is_ascii_digit).count();
+        let plain = word.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '+' | '='));
+        (known && word.len() >= 10) || (plain && word.len() >= 20 && letters >= 4 && digits >= 4)
+    };
+    let label = |word: &str| {
+        let word = word.to_lowercase();
+        let word = word.trim_end_matches(':');
+        ["password", "passcode", "passwd", "pin", "secret", "token", "otp", "ssn", "iban"].contains(&word)
+    };
+    // Of digits and the marks a number is spaced or framed with.
+    let numberish = |word: &str| word.chars().any(|c| c.is_ascii_digit()) && word.chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | '.' | '(' | ')' | '+' | '/' | ','));
+    let digits = |word: &str| word.chars().filter(char::is_ascii_digit).count();
+    let grow = |[l, t, r, b]: [f32; 4]| {
+        let pad = ((b - t) * 0.15).max(2.0);
+        [l - pad, t - pad, r + pad, b + pad]
+    };
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < words.len() {
+        let word = &words[at];
+        let clean = bare(&word.text);
+        // A run of numbers on one line, counted together.
+        if numberish(&word.text) {
+            let mut end = at;
+            while end + 1 < words.len() && words[end + 1].line == word.line && numberish(&words[end + 1].text) {
+                end += 1;
+            }
+            if words[at..=end].iter().map(|word| digits(&word.text)).sum::<usize>() >= 9 && !ip(&clean) {
+                let [l, t, _, _] = words[at].rect;
+                let [_, _, r, b] = words[end].rect;
+                let top = words[at..=end].iter().map(|word| word.rect[1]).fold(t, f32::min);
+                let bottom = words[at..=end].iter().map(|word| word.rect[3]).fold(b, f32::max);
+                found.push(grow([l, top, r, bottom]));
+                at = end + 1;
+                continue;
+            }
+        }
+        if email(&clean) || ip(&clean) || key(&clean) {
+            found.push(grow(word.rect));
+        } else if label(&clean) {
+            // What follows the label on its line.
+            if let Some(next) = words.get(at + 1).filter(|next| next.line == word.line) {
+                found.push(grow(next.rect));
+                at += 2;
+                continue;
+            }
+        }
+        at += 1;
+    }
+    found
 }
 
 /// A hidden name in the same folder, to write to and then move over.
@@ -3887,5 +4129,31 @@ mod tests {
         for color in COLORS.iter().chain(PALETTE.iter()) {
             assert_eq!(annotate::from_hsv(annotate::to_hsv(*color)), *color, "{color:06X}");
         }
+    }
+
+    #[test]
+    fn what_is_not_for_every_eye_is_found_in_the_words() {
+        // Each line's words, ten pixels wide with gaps, as tesseract's tsv has them.
+        let lines = [
+            "Mail me at jeff@example.com today",
+            "Call +1 (415) 555-0134 or 4242 4242 4242 4242",
+            "Key sk-live-9fA3kQ28xZpL0mNvB7cT and 192.168.1.42",
+            "Password: hunter2",
+            "Version 2.4.1 on 2026-10-21, page 12 of 300",
+        ];
+        let mut tsv = String::from("level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n");
+        for (row, words) in lines.iter().enumerate() {
+            for (at, word) in words.split(' ').enumerate() {
+                tsv += &format!("5\t1\t1\t1\t{}\t{}\t{}\t{}\t10\t10\t90\t{word}\n", row + 1, at + 1, at * 20, row * 20);
+            }
+        }
+        let words = words_in(&tsv, 2.0);
+        assert_eq!(words[0].rect, [0.0, 0.0, 5.0, 5.0]);
+        let found = sensitive(&words);
+        // Where each box begins: word and line, in the picture made half the size.
+        let starts: Vec<(f32, f32)> = found.iter().map(|[l, t, ..]| ((l + 2.0) / 10.0, (t + 2.0) / 10.0)).collect();
+        assert_eq!(starts, [(3.0, 0.0), (1.0, 1.0), (5.0, 1.0), (1.0, 2.0), (3.0, 2.0), (1.0, 3.0)]);
+        // A number run is one box, from its first word to its last.
+        assert_eq!(found[1][2], 3.0 * 10.0 + 5.0 + 2.0);
     }
 }
