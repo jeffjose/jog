@@ -341,7 +341,9 @@ impl App {
             let mut done = Converted { created: Vec::new(), failed: 0, what, before: 0, after: 0, how: None, error: None, saving: true };
             match result {
                 Ok(made) => {
-                    println!("[section] {} {:.3}-{:.3} -> {}", path.display(), a, b, made.display());
+                    // In full, to be found from anywhere.
+                    let shown = std::path::absolute(&made).unwrap_or_else(|_| made.clone());
+                    println!("[section] {} {} – {} -> {}", path.display(), clock(a), clock(b), shown.display());
                     done.created.push(made);
                 }
                 Err(error) => {
