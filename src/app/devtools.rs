@@ -253,7 +253,9 @@ impl App {
     /// The files that crashed a player, each to be forgotten and tried on
     /// the GPU again.
     pub(super) fn crash_actions(&self) -> Vec<(String, Vec<Action>)> {
-        let crashes = crate::mpv::all_crashes();
+        // Only those of this run's list, not every file that ever crashed one.
+        let ours = self.ours(crate::mpv::all_crashes().into_iter().map(|(path, _)| path).collect());
+        let crashes: Vec<_> = crate::mpv::all_crashes().into_iter().filter(|(path, _)| ours.contains(path)).collect();
         if crashes.is_empty() {
             return Vec::new();
         }

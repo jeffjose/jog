@@ -142,7 +142,9 @@ impl App {
     /// commands: a few, the latest first.
     pub(super) fn recent_files(&mut self) -> Vec<(String, &'static str, Command)> {
         let current = self.list.get(self.pos).map(|&id| self.full_path(id));
-        let paths = self.recent_paths();
+        // Only those of this run's list: opening one file is not to show what
+        // was viewed elsewhere, or before.
+        let paths = self.ours(self.recent_paths());
         let others = paths.into_iter().filter(|path| Some(path) != current.as_ref() && path.exists());
         self.recent_shown = others.take(6).collect();
         // Named by the file, and by its folder too when it is another's.
@@ -155,6 +157,19 @@ impl App {
             }
         };
         self.recent_shown.iter().enumerate().map(|(at, path)| (said(path), "", Command::OpenRecent(at))).collect()
+    }
+
+    /// Of `paths`, in the order given, those this run has in its list:
+    /// what was viewed, or went wrong, in other folders or other runs is
+    /// not for whoever is looking at this one to see.
+    pub(super) fn ours(&self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let listed: HashSet<PathBuf> = {
+            // By name first, so that few of a long list are made absolute.
+            let names: HashSet<&std::ffi::OsStr> = paths.iter().filter_map(|path| path.file_name()).collect();
+            let named = self.files.iter().filter(|file| file.file_name().is_some_and(|name| names.contains(name)));
+            named.map(|file| std::path::absolute(file).unwrap_or_else(|_| file.clone())).collect()
+        };
+        paths.into_iter().filter(|path| listed.contains(path)).collect()
     }
 
     pub(super) fn full_path(&self, id: usize) -> PathBuf {
