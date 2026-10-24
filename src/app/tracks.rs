@@ -480,7 +480,9 @@ impl App {
         let width = (px as i32 * 30).min(canvas.width - 2 * pad);
         let audio_rows = picker.rows.iter().filter(|row| matches!(row, Row::Audio(_))).count() as i32;
         let other_rows = picker.rows.len() as i32 - audio_rows;
-        let height = pad + heading_h + audio_rows.max(1) * row_h + pad / 2 + 1 + pad / 2 + heading_h + other_rows * row_h + pad / 2 + small_line + pad;
+        // The keys along the foot, on as many lines as they take.
+        let hints = wrap_hints(text, "↑↓ pick  ·  Enter use  ·  Shift+↑↓ timing ±0.1 s  ·  e edit tracks  ·  Esc close", small, width - 2 * pad);
+        let height = pad + heading_h + audio_rows.max(1) * row_h + pad / 2 + 1 + pad / 2 + heading_h + other_rows * row_h + pad / 2 + small_line * hints.len() as i32 + pad;
         let (left, top) = (canvas.width - width - pad, (canvas.height - height - pad * 6).max(pad));
         picker.place = [left, top, width, height];
         panel(canvas, left, top, width, height, pad * 2 / 3);
@@ -489,7 +491,7 @@ impl App {
         let mut y = top + pad;
         picker.drawn.clear();
         let heading = |canvas: &mut Canvas, text: &mut Text, y: i32, title: &str, keys: &str| {
-            text.draw(canvas, inner, y, px, TEXT_COLOR, title);
+            text.draw_strong(canvas, inner, y, px, TEXT_COLOR, title);
             let kw = text.width(keys, small);
             text.draw(canvas, inner + inner_w - kw, y + (line - small_line) / 2, small, DIM_TEXT_COLOR, keys);
         };
@@ -581,7 +583,10 @@ impl App {
             y += row_h;
         }
         y += pad / 2;
-        text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, "↑↓ pick  ·  Enter use  ·  Shift+↑↓ timing ±0.1 s  ·  e edit tracks  ·  Esc close");
+        for hint in &hints {
+            text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, hint);
+            y += small_line;
+        }
     }
 }
 

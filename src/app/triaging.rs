@@ -221,7 +221,7 @@ impl App {
             let over = (left..left + button_width).contains(&pointer.0) && (buttons_top..buttons_top + button_height).contains(&pointer.1);
             let lit = on || over;
             canvas.round_fill(left, buttons_top, button_width, button_height, pad / 3, if lit { accent() } else { PLACEHOLDER_COLOR }, 256);
-            canvas.round_outline(left, buttons_top, button_width, button_height, pad / 3, 1, if lit { accent() } else { MENU_EDGE_COLOR });
+            canvas.round_outline(left, buttons_top, button_width, button_height, pad / 3, 1, if lit { accent() } else { KEY_EDGE_COLOR });
             let words_top = buttons_top + (button_height - Text::line_height(small)) / 2;
             text.draw(canvas, left + pad / 2, words_top, small, if lit { on_accent() } else { TEXT_COLOR }, label);
             drawn.push(Button { x: left, y: buttons_top, width: button_width, height: button_height, command });
@@ -323,7 +323,7 @@ impl App {
                 let button_width = text.width(label, small) + pad;
                 let over = (left..left + button_width).contains(&pointer.0) && (top..top + button_height).contains(&pointer.1);
                 canvas.round_fill(left, top, button_width, button_height, pad / 3, if over { accent() } else { PLACEHOLDER_COLOR }, 256);
-                canvas.round_outline(left, top, button_width, button_height, pad / 3, 1, if over { accent() } else { MENU_EDGE_COLOR });
+                canvas.round_outline(left, top, button_width, button_height, pad / 3, 1, if over { accent() } else { KEY_EDGE_COLOR });
                 text.draw(canvas, left + pad / 2, top + (button_height - Text::line_height(small)) / 2, small, if over { on_accent() } else { TEXT_COLOR }, label);
                 drawn.push(Button { x: left, y: top, width: button_width, height: button_height, command: Command::HdrHeadroom(up) });
                 left += button_width + pad / 3;

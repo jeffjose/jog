@@ -159,9 +159,11 @@ impl App {
             };
             // The scene playing is ringed brightly, the one under the
             // pointer quietly.
-            let ring = if index == playing { Some(TEXT_COLOR) } else { (over == Some(index)).then_some(accent_soft()) };
+            let ring = if index == playing { Some(accent()) } else { (over == Some(index)).then_some(accent_soft()) };
             if let Some(color) = ring {
-                canvas.round_outline(x - edge, y - edge, w + 2 * edge, h + 2 * edge, round + edge, edge, color);
+                // With a little gap between it and the picture, as the grid's.
+                let gap = edge * 2;
+                canvas.round_outline(x - gap, y - gap, w + 2 * gap, h + 2 * gap, round + gap, edge, color);
             }
         }
     }

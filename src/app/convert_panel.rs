@@ -639,7 +639,8 @@ impl App {
 
         let pad = px as i32;
         let line = Text::line_height(px);
-        let small = (px * 5 / 6).max(11);
+        // Read closely, not glanced at: hardly smaller than the rest.
+        let small = (px * 11 / 12).max(12);
         let small_line = Text::line_height(small);
         let width = (canvas.width * 3 / 4).clamp((px as i32 * 40).min(canvas.width - 2 * pad), canvas.width - 2 * pad);
         let height = (canvas.height * 7 / 8).min(canvas.height - 2 * pad);
@@ -651,9 +652,9 @@ impl App {
         let mut y = top + pad;
 
         // The heading: what the panel is, the file, and a way out.
-        text.draw(canvas, inner, y, px, TEXT_COLOR, &format!("{}  Convert", commands::icons::REPLACE));
+        text.draw_strong(canvas, inner, y, px, TEXT_COLOR, &format!("{}  Convert", commands::icons::REPLACE));
         let about = format!("{name} · {}", meta::human_size(file_size));
-        let heading_w = text.width(&format!("{}  Convert", commands::icons::REPLACE), px);
+        let heading_w = text.width_strong(&format!("{}  Convert", commands::icons::REPLACE), px);
         text.draw(canvas, inner + heading_w + pad, y + (line - small_line) / 2, small, DIM_TEXT_COLOR, &about);
         // The round close every panel has.
         let close = pad * 3 / 2;
@@ -680,7 +681,7 @@ impl App {
                 None if panel.source.is_some() => ("…".to_string(), None),
                 None => (String::new(), None),
             };
-            let w = text.width(label, px).max(text.width(&size, small)) + 2 * pad;
+            let w = text.width_strong(label, px).max(text.width(&size, small)) + 2 * pad;
             let chosen = format == panel.format;
             let hovered = in_rect(mouse, [x, y, w, tab_h]);
             canvas.round_fill(x, y, w, tab_h, pad / 2, if chosen { accent() } else if hovered { PLACEHOLDER_COLOR } else { 0x161616 }, 256);
@@ -688,7 +689,7 @@ impl App {
                 canvas.round_outline(x - 2, y - 2, w + 4, tab_h + 4, pad / 2 + 2, 2, accent_soft());
             }
             let text_y = y + (tab_h - line - small_line) / 2;
-            text.draw(canvas, x + pad, text_y, px, if chosen { on_accent() } else { TEXT_COLOR }, label);
+            text.draw_strong(canvas, x + pad, text_y, px, if chosen { on_accent() } else { TEXT_COLOR }, label);
             // Smaller in green, larger in red; on the chosen one, as its words.
             let color = match change {
                 _ if chosen => on_accent(),

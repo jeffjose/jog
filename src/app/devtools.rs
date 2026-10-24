@@ -935,7 +935,10 @@ impl App {
                     let on = *at == current;
                     let hovered = (x - gap / 2..x + w + gap / 2).contains(&mouse.0) && (top..top + row_h).contains(&mouse.1);
                     let color = if on || hovered { TEXT_COLOR } else { DIM_TEXT_COLOR };
-                    text.draw(canvas, x, top + (row_h - line) / 2, small, color, name);
+                    match on {
+                        true => text.draw_strong(canvas, x, top + (row_h - line) / 2, small, color, name),
+                        false => text.draw(canvas, x, top + (row_h - line) / 2, small, color, name),
+                    }
                     if on {
                         canvas.fill(x, top + row_h - 2, *w, 2, accent());
                     }
@@ -1022,7 +1025,7 @@ pub(super) const HEAD_COLOR: u32 = 0xC4C6D0;
 #[allow(clippy::too_many_arguments)]
 pub(super) fn section_head(sub: &mut Canvas, text: &mut Text, px: u32, x: i32, y: i32, width: i32, title: &str) -> i32 {
     let pad = px as i32;
-    text.draw(sub, x, y, px, HEAD_COLOR, &sentence(title));
+    text.draw_strong(sub, x, y, px, HEAD_COLOR, &sentence(title));
     let y = y + Text::line_height(px) + pad / 4;
     sub.fill(x, y, width, 1, MENU_EDGE_COLOR);
     y + pad / 3
@@ -1144,7 +1147,7 @@ impl App {
             },
         };
         let headline = clipped(text, &headline, width, big);
-        text.draw(sub, x, y, big, TEXT_COLOR, &headline);
+        text.draw_strong(sub, x, y, big, TEXT_COLOR, &headline);
         let mut ty = y + Text::line_height(big) + pad / 4;
         { let shown = clipped(text, &under, width, px); text.draw(sub, x, ty, px, DIM_TEXT_COLOR, &shown); }
         ty += Text::line_height(px) + pad / 2;
@@ -1168,7 +1171,7 @@ impl App {
         let big = px * 3 / 2;
         let x = flow_x();
         let headline = info.badges().join(" · ");
-        { let shown = clipped(text, &headline, width, big); text.draw(sub, x, y, big, TEXT_COLOR, &shown); }
+        { let shown = clipped(text, &headline, width, big); text.draw_strong(sub, x, y, big, TEXT_COLOR, &shown); }
         let curve = match info.transfer {
             Some(crate::hdrmeta::Transfer::Pq) => "PQ",
             Some(crate::hdrmeta::Transfer::Hlg) => "HLG",
@@ -1193,7 +1196,7 @@ impl App {
             1 => "1 issue".to_string(),
             n => format!("{n} issues"),
         };
-        text.draw(sub, x, y, big, if issues.is_empty() { 0x3DD68C } else { TEXT_COLOR }, &headline);
+        text.draw_strong(sub, x, y, big, if issues.is_empty() { 0x3DD68C } else { TEXT_COLOR }, &headline);
         let mut ty = y + Text::line_height(big) + pad;
         let small_line = Text::line_height(small);
         for (severity, words, fix) in issues {

@@ -855,7 +855,7 @@ impl App {
         // round buttons from the right: close, pin, copy as JSON.
         let side = pad * 3 / 2;
         let heading = format!("{}  Inspect", commands::icons::EYE);
-        text.draw(canvas, inner, top + pad * 3 / 4, px, TEXT_COLOR, &heading);
+        text.draw_strong(canvas, inner, top + pad * 3 / 4, px, TEXT_COLOR, &heading);
         // Popped out, the pin has nothing to do; the pop-out button, lit,
         // puts it back.
         let mut buttons = vec![(Hit::Close, commands::icons::X, false)];
@@ -876,7 +876,7 @@ impl App {
             draw::round_button(canvas, text, &place, icon, px, hovered, on, false);
             inspector.drawn.push((hit, [place.x, place.y, side, side]));
         }
-        let name_x = inner + text.width(&heading, px) + pad / 2;
+        let name_x = inner + text.width_strong(&heading, px) + pad / 2;
         let name = clipped(text, &self.name_of(inspector.id), button_left - name_x - pad / 2, small);
         text.draw(canvas, name_x, top + pad * 3 / 4 + (line - small_line) / 2, small, DIM_TEXT_COLOR, &name);
         let mut y = top + pad / 2 + side + pad / 2;

@@ -283,7 +283,8 @@ impl App {
 
         let pad = px as i32;
         let line = Text::line_height(px);
-        let small = (px * 5 / 6).max(11);
+        // Read closely, not glanced at: hardly smaller than the rest.
+        let small = (px * 11 / 12).max(12);
         let small_line = Text::line_height(small);
         let width = (canvas.width * 3 / 4).clamp((px as i32 * 40).min(canvas.width - 2 * pad), canvas.width - 2 * pad);
         let height = (canvas.height * 7 / 8).min(canvas.height - 2 * pad);
@@ -295,7 +296,7 @@ impl App {
 
         // The heading: what the window is, the file, and a way out.
         let heading = format!("{}  Convert", commands::icons::REPLACE);
-        text.draw(canvas, inner, y, px, TEXT_COLOR, &heading);
+        text.draw_strong(canvas, inner, y, px, TEXT_COLOR, &heading);
         let length = panel.facts.as_ref().map(|facts| facts.seconds);
         let mut about_it = vec![self.name_of(id), meta::human_size(panel.bytes)];
         if let Some(seconds) = length {
@@ -307,7 +308,7 @@ impl App {
         if panel.facts.as_ref().is_some_and(|facts| facts.hdr) {
             about_it.push("HDR".to_string());
         }
-        let heading_w = text.width(&heading, px);
+        let heading_w = text.width_strong(&heading, px);
         text.draw(canvas, inner + heading_w + pad, y + (line - small_line) / 2, small, DIM_TEXT_COLOR, &about_it.join(" · "));
         let close = pad * 3 / 2;
         let (close_x, close_y) = (inner + inner_w - close, y + (line - close) / 2);
@@ -341,12 +342,12 @@ impl App {
                 _ if !allowed => ("not in WebM".to_string(), None),
                 _ => ("…".to_string(), None),
             };
-            let w = text.width(codec.name(), px).max(text.width(&said, small)) + 2 * pad;
+            let w = text.width_strong(codec.name(), px).max(text.width(&said, small)) + 2 * pad;
             let chosen = codec == target.codec;
             let hovered = allowed && in_rect(mouse, [x, y, w, tab_h]);
             canvas.round_fill(x, y, w, tab_h, pad / 2, if chosen { accent() } else if hovered { PLACEHOLDER_COLOR } else { 0x161616 }, 256);
             let text_y = y + (tab_h - line - small_line) / 2;
-            text.draw(canvas, x + pad, text_y, px, if chosen { on_accent() } else if allowed { TEXT_COLOR } else { DIM_TEXT_COLOR }, codec.name());
+            text.draw_strong(canvas, x + pad, text_y, px, if chosen { on_accent() } else if allowed { TEXT_COLOR } else { DIM_TEXT_COLOR }, codec.name());
             let color = match change {
                 _ if chosen => on_accent(),
                 Some(change) if change.abs() < 0.5 => DIM_TEXT_COLOR,

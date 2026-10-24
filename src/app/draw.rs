@@ -470,7 +470,7 @@ impl App {
             // The name is there to be clicked, which copies it; the folder
             // before it, dimmer, copies the whole path.
             let folder = self.files[self.id()].parent().filter(|dir| !dir.as_os_str().is_empty()).map(short_dir);
-            let mut line = vec![(format!("{LINK}{}", self.name()), TEXT_COLOR), (format!("   {} / {}", self.pos + 1, self.list.len()), soft)];
+            let mut line = vec![(format!("{LINK}{STRONG}{}", self.name()), TEXT_COLOR), (format!("   {} / {}", self.pos + 1, self.list.len()), soft)];
             if let Some(folder) = folder {
                 line.insert(0, (format!("{LINK}{}/", folder.trim_end_matches('/')), dim));
             }
@@ -917,13 +917,11 @@ impl App {
         if let Some((center, bottom, words)) = &bar_tip {
             let small = (px * 5 / 6).max(11);
             let pad = px as i32 / 2;
-            let (w, h) = (text.width(words, small) + pad * 2, Text::line_height(small) + pad);
+            let (w, h) = (text.width(words, small) + pad * 5 / 2, Text::line_height(small) + pad);
             let x = (center - w / 2).clamp(pad, (width - w - pad).max(pad));
             let y = bottom - h;
-            canvas.round_fill(x + 2, y + 3, w, h, pad, 0x000000, 96);
-            canvas.round_fill(x, y, w, h, pad, 0x24252C, 256);
-            canvas.round_outline(x, y, w, h, pad, 1, MENU_EDGE_COLOR);
-            text.draw(canvas, x + pad, y + pad / 2, small, TEXT_COLOR, words);
+            draw::panel(canvas, x, y, w, h, pad);
+            text.draw(canvas, x + pad * 5 / 4, y + pad / 2, small, TEXT_COLOR, words);
         }
         if let Some(behind) = &behind {
             canvas.dissolve(0, band_top, width, height - band_top, behind, 256);
@@ -1162,7 +1160,7 @@ impl App {
                 self.glide(&self.ring[side], to, EASE).round() as i32
             });
             let gap = edge * 2;
-            canvas.round_outline(x - gap, y - gap, w + 2 * gap, h + 2 * gap, radius + gap, edge, TEXT_COLOR);
+            canvas.round_outline(x - gap, y - gap, w + 2 * gap, h + 2 * gap, radius + gap, edge, accent());
         }
     }
 
@@ -1717,9 +1715,11 @@ impl App {
             }
             // The file on view is ringed brightly, the one under the
             // pointer quietly.
-            let ring = if pos == self.pos { Some(TEXT_COLOR) } else { (self.strip_over == Some(pos)).then_some(accent_soft()) };
+            let ring = if pos == self.pos { Some(accent()) } else { (self.strip_over == Some(pos)).then_some(accent_soft()) };
             if let Some(color) = ring {
-                canvas.round_outline(x - edge, y - edge, w + 2 * edge, h + 2 * edge, round + edge, edge, color);
+                // With a little gap between it and the picture, as the grid's.
+                let gap = edge * 2;
+                canvas.round_outline(x - gap, y - gap, w + 2 * gap, h + 2 * gap, round + gap, edge, color);
             }
         }
     }
@@ -2098,7 +2098,7 @@ impl App {
             None => {
                 let heading = format!("{} files", self.list.len());
                 let heading = clipped(text, &heading, panel.width - px as i32 * 10, px);
-                text.draw(canvas, pad * 2, panel.head + px as i32 * 3 / 4, px, TEXT_COLOR, &heading);
+                text.draw_strong(canvas, pad * 2, panel.head + px as i32 * 3 / 4, px, TEXT_COLOR, &heading);
             }
         }
         canvas.fill(pad, panel.top - pad / 2, panel.width - 2 * pad, 1, MENU_EDGE_COLOR);
@@ -2125,7 +2125,7 @@ impl App {
             }
             let lit = over || on;
             canvas.round_fill(button.x, button.y, button.width, button.height, button.height / 2, if lit { accent() } else { PLACEHOLDER_COLOR }, if over && !on { 200 } else { 256 });
-            canvas.round_outline(button.x, button.y, button.width, button.height, button.height / 2, 1, if lit { accent() } else { MENU_EDGE_COLOR });
+            canvas.round_outline(button.x, button.y, button.width, button.height, button.height / 2, 1, if lit { accent() } else { KEY_EDGE_COLOR });
             let (icon, word) = match button.command {
                 Command::SortBy(Sort::Newest) => (commands::icons::CLOCK, "Newest"),
                 Command::SortBy(Sort::Smallest) => (commands::icons::WEIGHT, "Size"),
@@ -2153,22 +2153,27 @@ impl App {
             let (current, hovered) = (pos == self.pos, self.list_hover == Some(pos));
             // The row the arrows have picked out in a search is ringed and
             // lit, plainly enough to be found at a glance.
-            let picked = self.list_cursor == Some(pos) || self.row_target == Some(pos);
+            let picked = self.list_cursor == Some(pos);
+            // The row a menu is open for, filled softly.
+            let targeted = self.row_target == Some(pos) && !picked;
             if current {
-                canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, accent(), 256);
+                canvas.round_fill(pad * 3 / 4, top + 1, panel.width - pad * 3 / 2, panel.row_height - 2, pad * 3 / 4, accent(), 256);
             } else if hovered {
                 // It lights up over a moment rather than at once.
                 if self.row_faded.replace(Some(pos)) != Some(pos) {
                     self.row_fade.set(Glide::at(0.0));
                 }
                 let lit = self.glide(&self.row_fade, 1.0, EASE);
-                canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, TEXT_COLOR, (28.0 * lit) as u32);
+                canvas.round_fill(pad * 3 / 4, top + 1, panel.width - pad * 3 / 2, panel.row_height - 2, pad * 3 / 4, TEXT_COLOR, (28.0 * lit) as u32);
+            }
+            if targeted && !current {
+                canvas.round_fill(pad * 3 / 4, top + 1, panel.width - pad * 3 / 2, panel.row_height - 2, pad * 3 / 4, TEXT_COLOR, 34);
             }
             if picked {
                 if !current {
-                    canvas.round_fill(pad / 2, top, panel.width - pad, panel.row_height, pad, TEXT_COLOR, 56);
+                    canvas.round_fill(pad * 3 / 4, top + 1, panel.width - pad * 3 / 2, panel.row_height - 2, pad * 3 / 4, TEXT_COLOR, 56);
                 }
-                canvas.round_outline(pad / 2, top, panel.width - pad, panel.row_height, pad, 2, if current { TEXT_COLOR } else { accent_soft() });
+                canvas.round_outline(pad * 3 / 4, top + 1, panel.width - pad * 3 / 2, panel.row_height - 2, pad * 3 / 4, 2, if current { TEXT_COLOR } else { accent_soft() });
             }
             let line = top + (panel.row_height - Text::line_height(px)) / 2;
             let (main, dim) = row_text(current);
@@ -2234,14 +2239,17 @@ impl App {
             text.draw(canvas, number_left, line, px, dim, &number);
             let name_left = pad * 2 + numbers + pad;
             let name = clipped(text, &self.name_of(id), panel.width - star_room - length_width - name_left - pad, px);
-            text.draw(canvas, name_left, line, px, main, &name);
+            match current {
+                true => text.draw_strong(canvas, name_left, line, px, main, &name),
+                false => text.draw(canvas, name_left, line, px, main, &name),
+            }
         }
     }
 
     pub(super) fn draw_menu(&self, canvas: &mut Canvas, text: &mut Text, menu: &Menu) {
         let px = menu.px;
         let pad = px as i32 / 2;
-        panel(canvas, menu.x, menu.y, menu.width, menu.height, pad);
+        panel(canvas, menu.x, menu.y, menu.width, menu.height, px as i32 * 2 / 3);
         if let Some(title) = &menu.title {
             text.draw(canvas, menu.x + pad, menu.y + pad, px, DIM_TEXT_COLOR, title);
         }
@@ -2263,7 +2271,11 @@ impl App {
             let gutter = px as i32 * 2;
             let sign_left = menu.x + pad + (gutter - pad - text.width(sign, px)) / 2;
             text.draw(canvas, sign_left, line, px, color, sign);
-            text.draw(canvas, menu.x + pad + gutter, line, px, main, &self.menu_label(item));
+            // The row picked, a weight up.
+            match menu.selected == Some(index) {
+                true => text.draw_strong(canvas, menu.x + pad + gutter, line, px, main, &self.menu_label(item)),
+                false => text.draw(canvas, menu.x + pad + gutter, line, px, main, &self.menu_label(item)),
+            }
             let keys_left = menu.x + menu.width - pad - text.width(item.keys, px);
             text.draw(canvas, keys_left, line, px, dim, item.keys);
         }
@@ -2271,6 +2283,19 @@ impl App {
             self.draw_menu(canvas, text, sub);
         }
     }
+}
+
+/// A line of hints, as `↑↓ pick  ·  Esc close`, broken between them into
+/// as many lines as it takes to fit `width`.
+pub(super) fn wrap_hints(text: &mut Text, hints: &str, px: u32, width: i32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for hint in hints.split("  ·  ") {
+        match lines.last_mut() {
+            Some(last) if text.width(&format!("{last}  ·  {hint}"), px) <= width => *last = format!("{last}  ·  {hint}"),
+            _ => lines.push(hint.to_string()),
+        }
+    }
+    lines
 }
 
 /// `line`, cut short with an ellipsis if it is wider than `width`.
@@ -2288,8 +2313,6 @@ pub(super) fn clipped(text: &mut Text, line: &str, width: i32, px: u32) -> Strin
     }
 }
 
-/// The background of a menu or box: a dark panel with rounded corners and
-/// a thin edge.
 /// How wide a panel down the side is: the file list and the inspector
 /// alike, `units` lines of text (thirty unless dragged), at most half the
 /// window.
@@ -2315,9 +2338,13 @@ pub(super) fn round_button(canvas: &mut Canvas, text: &mut Text, place: &Button,
     text.draw(canvas, place.x + inset.0, place.y + inset.1, small, if lit { on_accent() } else { TEXT_COLOR }, icon);
 }
 
+/// The ground of a menu, a box or a window: a soft shadow under it, a
+/// fine edge, and a light along the top, as though lit from above.
 pub(super) fn panel(canvas: &mut Canvas, x: i32, y: i32, width: i32, height: i32, radius: i32) {
+    canvas.soft_shadow(x, y, width, height, radius, (radius * 3 / 2).clamp(6, 16));
     canvas.round_fill(x, y, width, height, radius, MENU_COLOR, 256);
     canvas.round_outline(x, y, width, height, radius, 1, MENU_EDGE_COLOR);
+    canvas.round_fill(x + radius, y + 1, (width - 2 * radius).max(0), 1, 0, 0xFFFFFF, 18);
 }
 
 /// Begins a run of words that is drawn as a badge: small, on a rounded
@@ -2331,6 +2358,8 @@ pub(super) const CHOSEN: char = '\u{3}';
 /// Begins a run drawn as it is, but there to be clicked: the file's name
 /// in the info overlay, which copies it.
 pub(super) const LINK: char = '\u{4}';
+/// Begins a run a weight up; after `LINK`, one there to be clicked too.
+pub(super) const STRONG: char = '\u{5}';
 
 /// The color of a badge for what a picture or video is.
 pub(super) fn badge_color(name: &str) -> u32 {
@@ -2354,6 +2383,10 @@ pub(super) fn badge(name: &str) -> (String, u32) {
 /// How wide a run is drawn: a badge or a choice with its ground and the
 /// gap after it.
 pub(super) fn run_width(text: &mut Text, run: &str, px: u32) -> i32 {
+    let run = run.strip_prefix(LINK).map_or(run, |words| words);
+    if let Some(words) = run.strip_prefix(STRONG) {
+        return text.width_strong(words, px);
+    }
     if let Some(words) = run.strip_prefix(LINK) {
         return text.width(words, px);
     }
@@ -2366,6 +2399,15 @@ pub(super) fn run_width(text: &mut Text, run: &str, px: u32) -> i32 {
 /// Draws a run, a badge or a choice as one; gives back how wide it was
 /// and, for a choice, where its button is.
 pub(super) fn draw_run(canvas: &mut Canvas, text: &mut Text, x: i32, y: i32, px: u32, color: u32, run: &str) -> (i32, Option<[i32; 4]>) {
+    if let Some(words) = run.strip_prefix(LINK).and_then(|words| words.strip_prefix(STRONG)) {
+        text.draw_strong(canvas, x, y, px, color, words);
+        let width = text.width_strong(words, px);
+        return (width, Some([x, y, width, Text::line_height(px)]));
+    }
+    if let Some(words) = run.strip_prefix(STRONG) {
+        text.draw_strong(canvas, x, y, px, color, words);
+        return (text.width_strong(words, px), None);
+    }
     if let Some(words) = run.strip_prefix(LINK) {
         text.draw(canvas, x, y, px, color, words);
         let width = text.width(words, px);
@@ -2450,14 +2492,17 @@ pub(super) fn rich_block(canvas: &mut Canvas, text: &mut Text, lines: &[Vec<(Str
     let widths: Vec<i32> = lines.iter().map(|line| line.iter().map(|(run, _)| run_width(text, run, px)).sum()).collect();
     let width = widths.into_iter().max().unwrap_or(0) + 3 * pad;
     let height = line_height * lines.len() as i32 + 2 * pad;
+    // See-through over the picture, with the panels' fine edge and light.
     canvas.round_fill(at.0, at.1, width, height, pad, 0x000000, 176);
+    canvas.round_ring(at.0, at.1, width, height, pad, 1, 0xFFFFFF, 22);
+    canvas.round_fill(at.0 + pad, at.1 + 1, (width - 2 * pad).max(0), 1, 0, 0xFFFFFF, 18);
     let mut choices = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         let mut x = at.0 + 3 * pad / 2;
         for (run, color) in line {
             let (wide, place) = draw_run(canvas, text, x, at.1 + pad + index as i32 * line_height, px, *color, run);
             if let Some(place) = place {
-                choices.push((run.chars().skip(1).collect(), place));
+                choices.push((run.chars().skip(1).filter(|c| *c != STRONG).collect(), place));
             }
             x += wide;
         }
@@ -2549,12 +2594,15 @@ pub(super) fn text_block(canvas: &mut Canvas, text: &mut Text, lines: &[String],
     }
     let pad = px as i32 / 2;
     let line_height = Text::line_height(px);
-    let width = lines.iter().map(|line| text.width(line, px)).max().unwrap_or(0) + 2 * pad;
+    // One line is a pill, a little wider for its round ends.
+    let single = lines.len() == 1;
+    let side = if single { pad * 3 / 2 } else { pad };
+    let width = lines.iter().map(|line| text.width(line, px)).max().unwrap_or(0) + 2 * side;
     let height = line_height * lines.len() as i32 + 2 * pad;
     let (x, y) = place(width, height);
-    canvas.round_fill(x, y, width, height, pad, 0x000000, 176);
+    panel(canvas, x, y, width, height, if single { height / 2 } else { pad });
     for (index, line) in lines.iter().enumerate() {
-        text.draw(canvas, x + pad, y + pad + index as i32 * line_height, px, TEXT_COLOR, line);
+        text.draw(canvas, x + side, y + pad + index as i32 * line_height, px, TEXT_COLOR, line);
     }
 }
 
@@ -2579,7 +2627,7 @@ pub(super) fn draw_confirm(canvas: &mut Canvas, text: &mut Text, confirm: &Confi
     panel(canvas, left, top, width, height, pad);
     let words_left = left + 3 * pad / 2 + sign_width;
     text.draw(canvas, left + 3 * pad / 2, top + 3 * pad / 2, sign_px, DANGER_COLOR, sign);
-    text.draw(canvas, words_left, top + 3 * pad / 2, px, TEXT_COLOR, &confirm.question);
+    text.draw_strong(canvas, words_left, top + 3 * pad / 2, px, TEXT_COLOR, &confirm.question);
     text.draw(canvas, words_left, top + 3 * pad / 2 + line_height, px, DIM_TEXT_COLOR, note);
 
     // The buttons sit at the right, as the last thing read.
@@ -2596,7 +2644,14 @@ pub(super) fn draw_confirm(canvas: &mut Canvas, text: &mut Text, confirm: &Confi
             canvas.round_outline(button_left, buttons_top, button_width, button_height, round, 1, MENU_EDGE_COLOR);
         }
         let label_left = button_left + (button_width - text.width(label, px)) / 2;
-        text.draw(canvas, label_left, buttons_top + pad / 2, px, if selected && index == 0 { on_accent() } else { TEXT_COLOR }, label);
+        // Delete says what it does in red, even when it is not the one
+        // Enter would press.
+        let color = match (selected, index) {
+            (true, 0) => on_accent(),
+            (false, 1) => DANGER_COLOR,
+            _ => TEXT_COLOR,
+        };
+        text.draw_strong(canvas, label_left, buttons_top + pad / 2, px, color, label);
         drawn[index] = [button_left, buttons_top, button_width, button_height];
     }
     drawn
@@ -2632,12 +2687,14 @@ pub(super) fn draw_prompt(canvas: &mut Canvas, text: &mut Text, icon: &str, titl
     let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
 
     panel(canvas, left, top, width, height, pad);
-    text.draw(canvas, left + 3 * pad / 2, top + pad, px, TEXT_COLOR, &heading);
+    text.draw_strong(canvas, left + 3 * pad / 2, top + pad, px, TEXT_COLOR, &heading);
 
     // The field: darker than the panel, edged in the accent as the thing
     // that has the keyboard.
     let (field_left, field_top, field_width) = (left + 3 * pad / 2, top + pad + line_height + pad / 2, width - 3 * pad);
-    canvas.round_fill(field_left, field_top, field_width, field_height, pad / 2, 0x111111, 256);
+    canvas.round_fill(field_left, field_top, field_width, field_height, pad / 2, 0x141518, 256);
+    // Set into the panel: a shadow along its inside top.
+    canvas.round_fill(field_left + pad / 2, field_top + 2, field_width - pad, 1, 0, 0x000000, 120);
     canvas.round_outline(field_left, field_top, field_width, field_height, pad / 2, 2, accent());
     let (text_left, text_top) = (field_left + pad / 2, field_top + pad / 2);
     draw_selection(canvas, text, field, text_left, text_top, px);
@@ -2671,7 +2728,8 @@ pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &
     };
     let found: usize = commands::HELP.iter().flat_map(|sections| sections.iter()).map(|(title, entries)| entries.iter().filter(|(keys, label)| matches(title, keys, label)).count()).sum();
     let small = (px * 5 / 6).max(11);
-    let row = Text::line_height(px) + px as i32 / 3;
+    // As close as it was before lines got their air: it all has to fit.
+    let row = Text::line_height(px) + px as i32 / 6;
     let (pad, gap, between) = (px as i32 * 3 / 2, px as i32, px as i32 / 3);
     let keys_width = |text: &mut Text, keys: &str| -> i32 {
         let parts = help_keys(text, keys, small);
@@ -2726,7 +2784,7 @@ pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &
         let mut y = top + pad + head;
         for (title, entries) in sections.iter() {
             let any = entries.iter().any(|(keys, label)| matches(title, keys, label));
-            text.draw(canvas, x, y, px, if any { accent_soft() } else { MENU_EDGE_COLOR }, title);
+            text.draw_strong(canvas, x, y, px, if any { accent_soft() } else { FAINT_TEXT_COLOR }, title);
             canvas.fill(x, y + row - row / 5, keys_width + gap + labels_width, 1, MENU_EDGE_COLOR);
             y += row;
             for (keys, label) in entries.iter() {
@@ -2739,11 +2797,11 @@ pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &
                     let key_top = y + (row - Text::line_height(small)) / 2;
                     if !lit {
                         let inset = if cap { (width - text.width(key, small)) / 2 } else { 0 };
-                        text.draw(canvas, key_x + inset, key_top, small, MENU_EDGE_COLOR, key);
+                        text.draw(canvas, key_x + inset, key_top, small, FAINT_TEXT_COLOR, key);
                     } else if cap {
                         let (cap_top, cap_height) = (y + row / 10, row - row / 5);
                         canvas.round_fill(key_x, cap_top, width, cap_height, px as i32 / 4, PLACEHOLDER_COLOR, 256);
-                        canvas.round_outline(key_x, cap_top, width, cap_height, px as i32 / 4, 1, MENU_EDGE_COLOR);
+                        canvas.round_outline(key_x, cap_top, width, cap_height, px as i32 / 4, 1, KEY_EDGE_COLOR);
                         let inset = (width - text.width(key, small)) / 2;
                         text.draw(canvas, key_x + inset, key_top, small, TEXT_COLOR, key);
                     } else {
@@ -2752,7 +2810,7 @@ pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &
                     key_x += width + between;
                 }
                 let label_top = y + (row - Text::line_height(px)) / 2;
-                text.draw(canvas, x + keys_width + gap, label_top, px, if lit { TEXT_COLOR } else { MENU_EDGE_COLOR }, label);
+                text.draw(canvas, x + keys_width + gap, label_top, px, if lit { TEXT_COLOR } else { FAINT_TEXT_COLOR }, label);
                 y += row;
             }
             y += row;

@@ -141,16 +141,16 @@ impl App {
         // The title, cut short to fit its room: the name, not the episode
         // or the year after it.
         let mut title = info.title.clone();
-        if text.width(&title, px) > info.room {
+        if text.width_strong(&title, px) > info.room {
             let split = title.rfind(" · ").or_else(|| title.rfind(" (")).unwrap_or(title.len());
             let (mut head, tail) = (title[..split].to_string(), title[split..].to_string());
-            while !head.is_empty() && text.width(&format!("{}…{tail}", head.trim_end()), px) > info.room {
+            while !head.is_empty() && text.width_strong(&format!("{}…{tail}", head.trim_end()), px) > info.room {
                 head.pop();
             }
             title = format!("{}…{tail}", head.trim_end());
         }
-        let place = [info.left, info.top, text.width(&title, px), Text::line_height(px)];
-        text.draw(canvas, info.left, info.top, px, if over(place) { TEXT_COLOR } else { 0xF2F3F5 }, &title);
+        let place = [info.left, info.top, text.width_strong(&title, px), Text::line_height(px)];
+        text.draw_strong(canvas, info.left, info.top, px, if over(place) { TEXT_COLOR } else { 0xF2F3F5 }, &title);
         hits.push((place, Command::CopyBarTitle));
         let time_top = info.top + Text::line_height(px);
         let place = [info.left, time_top, text.width(&info.time, small), Text::line_height(small)];
@@ -171,7 +171,7 @@ impl App {
         let details = if under_tools { &[][..] } else { &info.details[..] };
         for (index, (detail, w)) in details.iter().zip(&widths).enumerate() {
             if index > 0 {
-                text.draw(canvas, x, details_top, small, MENU_EDGE_COLOR, gap);
+                text.draw(canvas, x, details_top, small, FAINT_TEXT_COLOR, gap);
                 x += gap_w;
             }
             let place = [x, details_top, *w, Text::line_height(small)];

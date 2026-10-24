@@ -304,9 +304,7 @@ pub(super) fn draw_tip(sub: &mut Canvas, text: &mut Text, px: u32, tips: &[Tip],
     if y + height > sub.height - pad / 2 {
         y = (pointer.1 - pad - height).max(pad / 2);
     }
-    sub.round_fill(x + 2, y + 3, width, height, pad / 2, 0x000000, 96);
-    sub.round_fill(x, y, width, height, pad / 2, 0x24252C, 256);
-    sub.round_outline(x, y, width, height, pad / 2, 1, MENU_EDGE_COLOR);
+    super::draw::panel(sub, x, y, width, height, pad / 2);
     let mut ty = y + pad * 2 / 3;
     for (at, (words, size, color)) in rows.iter().enumerate() {
         // A little room before each term.

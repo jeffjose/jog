@@ -265,7 +265,7 @@ impl App {
         };
 
         // The heading, Clear and the way out.
-        text.draw(canvas, inner, y, px, TEXT_COLOR, "Activity");
+        text.draw_strong(canvas, inner, y, px, TEXT_COLOR, "Activity");
         let close = pad * 3 / 2;
         let (close_x, close_y) = (inner + inner_w - close, y + (line - close) / 2);
         let button = Button { x: close_x, y: close_y, width: close, height: close, command: Command::Activity };
@@ -286,12 +286,19 @@ impl App {
         let fits = |y: i32, h: i32| y >= content_top && y + h <= bottom;
         let heading = |canvas: &mut Canvas, text: &mut Text, y: &mut i32, words: &str| {
             if fits(*y, small_line) {
-                text.draw(canvas, inner, *y, small, DIM_TEXT_COLOR, words);
+                text.draw_strong(canvas, inner, *y, small, DIM_TEXT_COLOR, words);
             }
             *y += small_line + pad / 3;
         };
 
-        if self.activity.jobs.is_empty() {
+        if self.activity.jobs.is_empty() && self.messages.is_empty() {
+            // Nothing at all: said in the middle, quietly.
+            let middle = top + height / 2 - line;
+            for (at, (words, color)) in [("Nothing yet", TEXT_COLOR), ("Conversions and saves show here", DIM_TEXT_COLOR)].into_iter().enumerate() {
+                let w = text.width(words, small);
+                text.draw(canvas, inner + (inner_w - w) / 2, middle + at as i32 * small_line, small, color, words);
+            }
+        } else if self.activity.jobs.is_empty() {
             if fits(y, line) {
                 text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, "Nothing yet  ·  conversions and saves show here");
             }

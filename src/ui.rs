@@ -236,6 +236,26 @@ impl<'a> Canvas<'a> {
     /// that of its outer edge.
     #[allow(clippy::too_many_arguments)]
     pub fn round_outline(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, thickness: i32, color: u32) {
+        self.round_ring(x, y, w, h, radius, thickness, color, 256);
+    }
+
+    /// A soft shadow under a rounded rectangle, `depth` pixels deep and
+    /// falling a little below it: rings of black, fainter outwards, drawn
+    /// only around it, as what is drawn over it hides the rest.
+    #[allow(clippy::too_many_arguments)]
+    pub fn soft_shadow(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, depth: i32) {
+        let drop = depth / 3;
+        let depth = depth.max(1);
+        // From as far in as it falls, so that it meets the edge it falls from.
+        for out in 1 - drop..=depth {
+            let amount = 44 * (depth + 1 - out.max(1)) / (depth + 1);
+            self.round_ring(x - out, y - out + drop, w + 2 * out, h + 2 * out, radius + out, 1, 0x000000, amount as u32);
+        }
+    }
+
+    /// `round_outline`, `amount`/256 opaque.
+    #[allow(clippy::too_many_arguments)]
+    pub fn round_ring(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, thickness: i32, color: u32, amount: u32) {
         let band = radius.max(thickness);
         let only = self.band.clone();
         for py in (y..y + h).filter(|py| only.as_ref().is_none_or(|rows| rows.contains(py))) {
@@ -245,7 +265,7 @@ impl<'a> Canvas<'a> {
             for (from, to) in spans {
                 for px in from..to {
                     let ring = rounded_cover(px, py, x, y, w, h, radius, 0.0) - rounded_cover(px, py, x, y, w, h, radius, f64::from(thickness));
-                    self.cover(px, py, color, (ring * 256.0) as u32);
+                    self.cover(px, py, color, (ring * f64::from(amount)) as u32);
                 }
             }
         }
@@ -560,7 +580,11 @@ pub struct Text {
     loading: Option<mpsc::Receiver<Option<fontdue::Font>>>,
     /// Letters a font has been looked for, so each is only asked about once.
     sought: HashSet<char>,
-    glyphs: HashMap<(char, u32), (fontdue::Metrics, Vec<u8>)>,
+    /// The interface font a weight up, for titles and what is chosen;
+    /// and whether that is what is being drawn now.
+    medium: Option<fontdue::Font>,
+    strong: bool,
+    glyphs: HashMap<(char, u32, bool), (fontdue::Metrics, Vec<u8>)>,
 }
 
 impl Text {
@@ -577,11 +601,15 @@ impl Text {
             eprintln!("jog: no usable font found, text will not be drawn (set JOG_FONT to a .ttf file)");
         }
         let icons = load(include_bytes!("../assets/solar.ttf").to_vec());
-        Text { font, icons, others: Vec::new(), loading: None, sought: HashSet::new(), glyphs: HashMap::new() }
+        // Only with the font carried along: another named has no such weight.
+        let medium = std::env::var_os("JOG_FONT").is_none().then(|| load(include_bytes!("../assets/Geist-Medium.ttf").to_vec())).flatten();
+        Text { font, icons, medium, strong: false, others: Vec::new(), loading: None, sought: HashSet::new(), glyphs: HashMap::new() }
     }
 
+    /// A line of text and the air around it: rows of menus and lists are
+    /// this tall, and lines of writing this far apart.
     pub fn line_height(px: u32) -> i32 {
-        (px * 4 / 3) as i32
+        (px * 3 / 2) as i32
     }
 
     /// Whether a font is still on its way, after which text drawn in the
@@ -620,6 +648,7 @@ impl Text {
 
     fn font(&self, which: usize) -> Option<&fontdue::Font> {
         match which {
+            0 if self.strong => self.medium.as_ref().or(self.font.as_ref()),
             0 => self.font.as_ref(),
             ICONS => self.icons.as_ref(),
             other => self.others.get(other - 1),
@@ -641,6 +670,21 @@ impl Text {
         width.ceil() as i32
     }
 
+    /// As wide as `text` is a weight up, as `draw_strong` draws it.
+    pub fn width_strong(&mut self, text: &str, px: u32) -> i32 {
+        self.strong = true;
+        let width = self.width(text, px);
+        self.strong = false;
+        width
+    }
+
+    /// Draws a line a weight up: a title, a heading, the row chosen.
+    pub fn draw_strong(&mut self, canvas: &mut Canvas, x: i32, y: i32, px: u32, color: u32, text: &str) {
+        self.strong = true;
+        self.draw(canvas, x, y, px, color, text);
+        self.strong = false;
+    }
+
     /// Draws one line of text whose line box has its top-left at `(x, y)`.
     pub fn draw(&mut self, canvas: &mut Canvas, x: i32, y: i32, px: u32, color: u32, text: &str) {
         let Some(font) = &self.font else { return };
@@ -651,13 +695,14 @@ impl Text {
 
         let mut pen = x as f32;
         for c in text.chars() {
-            if !self.glyphs.contains_key(&(c, px)) {
+            let key = (c, px, self.strong);
+            if !self.glyphs.contains_key(&key) {
                 let which = self.font_with(c);
                 let Some(font) = self.font(which) else { continue };
                 let glyph = font.rasterize(c, Self::size(which, px));
-                self.glyphs.insert((c, px), glyph);
+                self.glyphs.insert(key, glyph);
             }
-            let (metrics, coverage) = &self.glyphs[&(c, px)];
+            let (metrics, coverage) = &self.glyphs[&key];
             let left = pen.round() as i32 + metrics.xmin;
             // An icon sits in the middle of the line, whatever its font
             // takes for a baseline; letters stand on the text's.

@@ -186,9 +186,15 @@ const SUBTITLE_MARGIN: i32 = 40;
 const VIDEO_STATS_EVERY: Duration = Duration::from_millis(250);
 
 const TEXT_COLOR: u32 = 0xEEEEEE;
-const DIM_TEXT_COLOR: u32 = 0x9A9A9A;
-const MENU_COLOR: u32 = 0x1E1E1E;
-const MENU_EDGE_COLOR: u32 = 0x555555;
+const DIM_TEXT_COLOR: u32 = 0x8E9199;
+const MENU_COLOR: u32 = 0x1C1D21;
+/// The edge of a panel, a chip or a key cap, and the rules between rows.
+const MENU_EDGE_COLOR: u32 = 0x3A3C43;
+/// Words meant to recede the most: the dots between details, keys that
+/// do not match a search.
+const FAINT_TEXT_COLOR: u32 = 0x5C5F67;
+/// The edge of what is there to be pressed: a key cap, a chip.
+const KEY_EDGE_COLOR: u32 = 0x4A4D55;
 /// The color of what is picked out, as `--accent` set it. It is read all
 /// over the drawing code, which has no other tie to the options.
 static ACCENT: AtomicU32 = AtomicU32::new(0x3E63DD);

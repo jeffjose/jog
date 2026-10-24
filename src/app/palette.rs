@@ -479,12 +479,12 @@ impl App {
         let buttons = self.palette_buttons();
         for (at, (end, label)) in buttons.iter().enumerate().rev() {
             let focused = palette.focus == at + 1;
-            let (button_w, button_h) = (text.width(label, px) + pad, line + pad / 2);
+            let (button_w, button_h) = (text.width(label, px) + pad * 3 / 2, line + pad / 4);
             let (button_x, button_y) = (right - button_w, y - pad / 4);
             let fill = if focused { accent() } else { PLACEHOLDER_COLOR };
-            canvas.round_fill(button_x, button_y, button_w, button_h, pad / 3, fill, 256);
-            canvas.round_outline(button_x, button_y, button_w, button_h, pad / 3, 1, if focused { TEXT_COLOR } else { MENU_EDGE_COLOR });
-            text.draw(canvas, button_x + pad / 2, y, px, if focused { on_accent() } else { TEXT_COLOR }, label);
+            canvas.round_fill(button_x, button_y, button_w, button_h, button_h / 2, fill, 256);
+            canvas.round_outline(button_x, button_y, button_w, button_h, button_h / 2, 1, if focused { TEXT_COLOR } else { KEY_EDGE_COLOR });
+            text.draw(canvas, button_x + pad * 3 / 4, y - pad / 8, px, if focused { on_accent() } else { TEXT_COLOR }, label);
             drawn.push((*end, [button_x, button_y, button_w, button_h]));
             right = button_x - pad / 2;
         }
@@ -497,7 +497,7 @@ impl App {
             let at = layout.first + row;
             let top = layout.top + layout.head + row as i32 * layout.row_height;
             if at == palette.selected {
-                canvas.round_fill(layout.left + pad / 3, top, layout.width - 2 * (pad / 3), layout.row_height, pad / 2, accent(), 256);
+                canvas.round_fill(layout.left + pad / 2, top + 1, layout.width - pad, layout.row_height - 2, pad * 3 / 4, accent(), 256);
             }
             // Words on the row picked out are in colors that read on it.
             let (main, dim) = row_text(at == palette.selected);
@@ -508,7 +508,10 @@ impl App {
                     let mark = pad / 2;
                     canvas.round_fill(layout.left + pad, top + (layout.row_height - mark) / 2, mark, mark, mark / 4, main, 256);
                 }
-                text.draw(canvas, layout.left + 2 * pad, text_top, px, main, name);
+                match at == palette.selected {
+                    true => text.draw_strong(canvas, layout.left + 2 * pad, text_top, px, main, name),
+                    false => text.draw(canvas, layout.left + 2 * pad, text_top, px, main, name),
+                }
                 let keys_left = layout.left + layout.width - pad - text.width(keys, px);
                 text.draw(canvas, keys_left, text_top, px, dim, keys);
                 continue;
@@ -518,9 +521,9 @@ impl App {
             match self.loader.thumb(id) {
                 Some(frame) => {
                     let (w, h) = fit_size((frame.width, frame.height), (thumb.0 as u32, thumb.1 as u32), true);
-                    canvas.image(&frame, cell_left + (thumb.0 - w as i32) / 2, cell_top + (thumb.1 - h as i32) / 2, w as i32, h as i32);
+                    canvas.image_rounded(&frame, cell_left + (thumb.0 - w as i32) / 2, cell_top + (thumb.1 - h as i32) / 2, w as i32, h as i32, pad / 3);
                 }
-                None => canvas.fill(cell_left, cell_top, thumb.0, thumb.1, PLACEHOLDER_COLOR),
+                None => canvas.round_fill(cell_left, cell_top, thumb.0, thumb.1, pad / 3, PLACEHOLDER_COLOR, 256),
             }
             let text_top = top + (layout.row_height - line) / 2;
             let length = self.durations.get(&id).copied().flatten().map(clock).unwrap_or_default();
@@ -531,7 +534,10 @@ impl App {
             let room = right - length_width - pad - name_left;
             let name = clipped(text, &self.name_of(id), room, px);
             let color = if self.marks.contains(&id) && at != palette.selected { MARK_COLOR } else { main };
-            text.draw(canvas, name_left, text_top, px, color, &name);
+            match at == palette.selected {
+                true => text.draw_strong(canvas, name_left, text_top, px, color, &name),
+                false => text.draw(canvas, name_left, text_top, px, color, &name),
+            }
             // The folder it is in, below the one opened, if it is in one:
             // among many alike names, which one is which.
             let folder = self.folder_within(self.files[id].parent().unwrap_or(Path::new("")));

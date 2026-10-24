@@ -64,7 +64,14 @@ impl App {
 
         let output = self.options.output_dir.as_deref().map(short_dir);
         let text = self.text.get_or_insert_with(Text::load);
-        let (row_height, separator_height, pad) = (px as i32 * 9 / 5, px as i32 * 3 / 5, px as i32 / 2);
+        let (mut row_height, mut separator_height, pad) = (px as i32 * 2, px as i32 * 4 / 5, px as i32 / 2);
+        // Rows with room around them, unless that would not fit the window:
+        // then closer together.
+        let (items, separators) = (entries.iter().flatten().count() as i32, entries.iter().filter(|entry| entry.is_none()).count() as i32);
+        let rows_count = items + i32::from(title.is_some());
+        if rows_count * row_height + separators * separator_height + 2 * pad > height as i32 {
+            (row_height, separator_height) = (px as i32 * 9 / 5, px as i32 * 3 / 5);
+        }
 
         let items = entries.iter().flatten();
         let label_width = items.clone().map(|i| text.width(&Self::label_for(i, output.as_deref()), px)).max().unwrap_or(0);

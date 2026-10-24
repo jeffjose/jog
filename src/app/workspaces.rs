@@ -348,8 +348,8 @@ impl App {
         let heading = format!("{}  {what}", commands::icons::FOLDERS);
         let big = px * 3 / 2;
         let first_top = cards.iter().map(|card| card[1]).min().unwrap_or(0);
-        let heading_left = (canvas.width - text.width(&heading, big)) / 2;
-        text.draw(canvas, heading_left, (first_top - Text::line_height(big) - 2 * pad).max(pad), big, TEXT_COLOR, &heading);
+        let heading_left = (canvas.width - text.width_strong(&heading, big)) / 2;
+        text.draw_strong(canvas, heading_left, (first_top - Text::line_height(big) - 2 * pad).max(pad), big, TEXT_COLOR, &heading);
 
         for (which, &[left, top, width, height]) in cards.iter().enumerate() {
             let ids = self.space_ids(which).to_vec();
@@ -389,8 +389,8 @@ impl App {
             let space = &self.spaces[which];
             let name = clipped(text, &space.name, width, px * 5 / 4);
             let name_top = top + height + pad / 2;
-            let name_left = left + (width - text.width(&name, px * 5 / 4)) / 2;
-            text.draw(canvas, name_left, name_top, px * 5 / 4, if which == cursor { TEXT_COLOR } else { DIM_TEXT_COLOR }, &name);
+            let name_left = left + (width - text.width_strong(&name, px * 5 / 4)) / 2;
+            text.draw_strong(canvas, name_left, name_top, px * 5 / 4, if which == cursor { TEXT_COLOR } else { DIM_TEXT_COLOR }, &name);
             let files = match ids.len() {
                 0 if which != self.space => "listing\u{2026}".to_string(),
                 1 => "1 file".to_string(),
