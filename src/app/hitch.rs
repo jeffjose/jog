@@ -156,7 +156,8 @@ impl Hitches {
         // Back to the start, a loop going round, or on far ahead, a seek:
         // not a frame following the one before. The time along, as last
         // reported, may not have moved since: the frame is new all the same.
-        if moved < -0.05 || moved > wall * 4.0 + 0.5 {
+        // So is a long while with the video hardly on, a pause.
+        if moved < -0.05 || moved > wall * 4.0 + 0.5 || (wall > 0.25 && moved < wall * 0.4) {
             self.settling = Some(now + SETTLE);
             return None;
         }
