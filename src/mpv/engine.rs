@@ -265,6 +265,12 @@ impl Engine {
             let on_gpu = super::gpu_video() && matches!(role, Role::Playback { gpu: true, .. });
             if on_gpu {
                 extra.extend_from_slice(&[("vo", "gpu"), ("force-window", "no"), ("input-cursor", "no"), ("input-vo-keyboard", "no"), ("cursor-autohide", "no"), ("osd-level", "0")]);
+                // Without NVIDIA's driver, its decoder cannot be had, and
+                // looking for it says "Cannot load libcuda.so.1" on the
+                // terminal: VA-API only, which Intel and AMD decode with.
+                if !std::path::Path::new("/proc/driver/nvidia").exists() {
+                    extra.push(("gpu-hwdec-interop", "vaapi"));
+                }
             }
             match role {
                 Role::Playback { silent, gpu } => {
