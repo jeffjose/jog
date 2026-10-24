@@ -4353,6 +4353,12 @@ impl App {
             }
             WindowEvent::CursorMoved { position, .. } => self.mouse_moved(position.x, position.y),
             WindowEvent::CursorLeft { .. } => {
+                // Into the window a video is drawn in on the GPU, which is inside
+                // this one, the pointer has not left.
+                let within = self.video_window_shown() && self.window.as_ref().and_then(|window| x11::pointer_over(window)) == Some(true);
+                if within {
+                    return;
+                }
                 self.pointer_found = input::Arrival::Coming;
                 self.set_strip_hover(false);
                 if self.hover.take().is_some() {

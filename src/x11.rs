@@ -349,3 +349,23 @@ impl Drop for VideoWindow {
         }
     }
 }
+
+/// Whether the pointer is over `window`, as the X server has it now: a
+/// window inside it, as a video's is, is still over it. `None` where that
+/// cannot be asked.
+pub fn pointer_over(window: &Window) -> Option<bool> {
+    let (display, id) = xlib(window)?;
+    // SAFETY: as in `mark_fullscreen`; every pointer the call writes to
+    // is to a local of the type it writes.
+    unsafe {
+        let x11 = Library::new("libX11.so.6").ok()?;
+        type Query = unsafe extern "C" fn(Display, c_ulong, *mut c_ulong, *mut c_ulong, *mut c_int, *mut c_int, *mut c_int, *mut c_int, *mut c_uint) -> c_int;
+        let query: Query = *x11.get(b"XQueryPointer\0").ok()?;
+        let (mut root, mut child, mut root_x, mut root_y, mut x, mut y, mut mask) = (0, 0, 0, 0, 0, 0, 0);
+        if query(display, id, &mut root, &mut child, &mut root_x, &mut root_y, &mut x, &mut y, &mut mask) == 0 {
+            return Some(false);
+        }
+        let size = window.inner_size();
+        Some(x >= 0 && y >= 0 && (x as u32) < size.width && (y as u32) < size.height)
+    }
+}
