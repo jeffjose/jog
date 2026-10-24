@@ -1005,47 +1005,40 @@ impl SectionTool {
 }
 
 impl App {
-    /// The buttons over the section on `bar`, and where, while the pointer
-    /// is on the section or on them: none while it is elsewhere, so that
-    /// they are not over the picture the whole time the bar is up.
-    pub(super) fn section_tools(&self, bar: &SeekBar) -> Vec<(SectionTool, [i32; 4])> {
-        let tools = self.section_tools_place(bar);
-        let (Some(first), Some(last), Some((a, b)), Some((_, length))) = (tools.first(), tools.last(), self.section().and_then(|section| section.span()), self.video_time()) else { return Vec::new() };
-        let x_of = |at: f64| f64::from(bar.x) + f64::from(bar.width) * at / length.max(1e-9);
-        let grip = f64::from(bar.unit);
-        let left = f64::from(first.1[0]).min(x_of(a) - grip);
-        let right = f64::from(last.1[0] + last.1[2]).max(x_of(b) + grip);
-        let (top, bottom) = (f64::from(first.1[1] - bar.unit / 2), f64::from(bar.middle + bar.unit));
+    /// The section whose buttons are up: the one under the pointer, or the
+    /// one whose buttons it is on, the one in use before the others. With
+    /// it, `None` for the one in use, else its place among the others; and
+    /// its letters. Pointing at one changes nothing of how the video plays:
+    /// a button on it puts it in use first.
+    fn tools_target(&self, bar: &SeekBar) -> Option<(Option<usize>, Section, (String, String))> {
+        self.hover?;
+        let video = self.video.as_ref()?;
+        let (_, length) = self.video_time().filter(|(_, length)| *length > 0.0)?;
+        let others = self.other_sections.get(&video.id).into_iter().flatten().enumerate().map(|(n, section)| (Some(n), *section));
+        let x_of = |at: f64| f64::from(bar.x) + f64::from(bar.width) * at / length;
         let (x, y) = self.mouse;
-        let on = x >= left && x <= right && y >= top && y <= bottom;
-        if on { tools } else { Vec::new() }
+        let (which, section) = self.section().map(|section| (None, section)).into_iter().chain(others).find(|(_, section)| {
+            let Some((a, b)) = section.span() else { return false };
+            let tools = tools_place(bar, a, b, length);
+            let (Some(first), Some(last)) = (tools.first(), tools.last()) else { return false };
+            let left = f64::from(first.1[0]).min(x_of(a) - grip(bar));
+            let right = f64::from(last.1[0] + last.1[2]).max(x_of(b) + grip(bar));
+            let (top, bottom) = (f64::from(first.1[1] - bar.unit / 2), f64::from(bar.middle + bar.unit));
+            x >= left && x <= right && y >= top && y <= bottom
+        })?;
+        let letters = self.all_sections().into_iter().find(|(other, active, _)| other.span() == section.span() && *active == which.is_none()).map_or_else(|| letters(0), |(_, _, letters)| letters);
+        Some((which, section, letters))
     }
 
-    /// Where the buttons over the section go: in a row above
-    /// its letters, centered on it, within the bar's length.
-    fn section_tools_place(&self, bar: &SeekBar) -> Vec<(SectionTool, [i32; 4])> {
-        let Some((a, b)) = self.section().and_then(|section| section.span()) else { return Vec::new() };
-        let Some((_, length)) = self.video_time().filter(|(_, length)| *length > 0.0) else { return Vec::new() };
-        let unit = bar.unit;
-        let line = Text::line_height(unit as u32);
-        let (side, narrow, gap) = (unit * 2, unit * 5 / 4, unit / 4);
-        let tools = [(SectionTool::Play, side), (SectionTool::Convert, side), (SectionTool::Save, side), (SectionTool::SaveAs, narrow), (SectionTool::Keep, side), (SectionTool::Loop, side), (SectionTool::Clear, side)];
-        let total = tools.iter().map(|(_, w)| w).sum::<i32>() + gap * (tools.len() as i32 - 1);
-        let x_of = |at: f64| bar.x + (f64::from(bar.width) * at / length) as i32;
-        let middle = (x_of(a) + x_of(b)) / 2;
-        let mut x = (middle - total / 2).clamp(bar.x, (bar.x + bar.width - total).max(bar.x));
-        // Where the letters A and B stand, over their flags; the row above.
-        let letters = bar.middle - unit - line;
-        let top = letters - unit / 4 - side;
-        tools
-            .iter()
-            .map(|(tool, w)| {
-                let place = [x, top, *w, side];
-                x += w + gap;
-                (*tool, place)
-            })
-            .collect()
+    /// The buttons over the section pointed at on `bar`, and where: none
+    /// while the pointer is elsewhere, so that they are not over the
+    /// picture the whole time the bar is up.
+    pub(super) fn section_tools(&self, bar: &SeekBar) -> Vec<(SectionTool, [i32; 4])> {
+        let Some((_, length)) = self.video_time() else { return Vec::new() };
+        let Some((a, b)) = self.tools_target(bar).and_then(|(_, section, _)| section.span()) else { return Vec::new() };
+        tools_place(bar, a, b, length)
     }
+
 
     /// The button over the section under a point, while the bar is up.
     pub(super) fn section_tool_at(&self, x: f64, y: f64) -> Option<SectionTool> {
@@ -1069,6 +1062,10 @@ impl App {
     }
 
     pub(super) fn section_tool(&mut self, tool: SectionTool) {
+        // A section not in use, pointed at: in use from now on.
+        if let Some((Some(n), ..)) = self.tools_target(&self.seek_bar()) {
+            self.activate_section(n);
+        }
         match tool {
             SectionTool::Play => self.play_section(),
             SectionTool::Convert => {
@@ -1087,9 +1084,10 @@ impl App {
         }
     }
 
-    /// Whether the section marked is one kept.
+    /// Whether the section whose buttons are up, else the one in use, is
+    /// one kept.
     pub(super) fn section_kept(&mut self) -> bool {
-        let (Some(video), Some((a, b))) = (&self.video, self.section().and_then(|section| section.span())) else { return false };
+        let (Some(video), Some((a, b))) = (&self.video, self.tools_target(&self.seek_bar()).map(|(_, section, _)| section).or_else(|| self.section()).and_then(|section| section.span())) else { return false };
         let path = self.files[video.id].clone();
         let kept = self.kept_sections.get_or_insert_with(read_kept);
         kept.get(&path).is_some_and(|list| list.iter().any(|kept| kept.is(a, b)))
@@ -1101,8 +1099,9 @@ impl App {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_section_tools(&self, canvas: &mut Canvas, tools: &[(SectionTool, [i32; 4])], kept: bool, buttons: &mut Vec<(i32, i32, &'static str, u32)>, tip: &mut Option<(i32, i32, String)>, px: u32) {
         let (Some(first), Some(last)) = (tools.first(), tools.last()) else { return };
-        let looping = self.section().is_some_and(|section| !section.through);
-        let letters = self.active_letters();
+        let target = self.tools_target(&self.seek_bar());
+        let looping = target.as_ref().is_some_and(|(which, section, _)| which.is_none() && !section.through);
+        let letters = target.map_or_else(|| self.active_letters(), |(_, _, letters)| letters);
         let line = Text::line_height(px);
         let side = first.1[3];
         let gap = (side / 6).max(2);
@@ -1174,4 +1173,28 @@ impl App {
         let Some(a) = self.section().and_then(|section| section.a) else { return };
         self.play_from(a);
     }
+}
+
+/// Where the buttons over a section from `a` to `b` go: in a row above its
+/// letters, centered on it, within the bar's length.
+fn tools_place(bar: &SeekBar, a: f64, b: f64, length: f64) -> Vec<(SectionTool, [i32; 4])> {
+    let unit = bar.unit;
+    let line = Text::line_height(unit as u32);
+    let (side, narrow, gap) = (unit * 2, unit * 5 / 4, unit / 4);
+    let tools = [(SectionTool::Play, side), (SectionTool::Convert, side), (SectionTool::Save, side), (SectionTool::SaveAs, narrow), (SectionTool::Keep, side), (SectionTool::Loop, side), (SectionTool::Clear, side)];
+    let total = tools.iter().map(|(_, w)| w).sum::<i32>() + gap * (tools.len() as i32 - 1);
+    let x_of = |at: f64| bar.x + (f64::from(bar.width) * at / length) as i32;
+    let middle = (x_of(a) + x_of(b)) / 2;
+    let mut x = (middle - total / 2).clamp(bar.x, (bar.x + bar.width - total).max(bar.x));
+    // Where the letters A and B stand, over their flags; the row above.
+    let letters = bar.middle - unit - line;
+    let top = letters - unit / 4 - side;
+    tools
+        .iter()
+        .map(|(tool, w)| {
+            let place = [x, top, *w, side];
+            x += w + gap;
+            (*tool, place)
+        })
+        .collect()
 }

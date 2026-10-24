@@ -215,7 +215,10 @@ impl App {
         let options = vec![
             (format!("Whole · {}", clock(facts.seconds)), self.video_convert.whole || span.is_none(), Some(Knob::Whole(true))),
             match span {
-                Some((a, b)) => (format!("A–B · {}–{}", clock(a), clock(b)), !self.video_convert.whole, Some(Knob::Whole(false))),
+                Some((a, b)) => {
+                    let (first, second) = self.active_letters();
+                    (format!("{first}–{second} · {}–{}", clock(a), clock(b)), !self.video_convert.whole, Some(Knob::Whole(false)))
+                }
                 None => ("A–B · none marked".to_string(), false, None),
             },
         ];

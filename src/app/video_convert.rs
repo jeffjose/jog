@@ -432,8 +432,9 @@ impl App {
             row(canvas, text, &mut drawn, &mut y, "Audio", audios.to_vec());
         }
         if let Some((a, b)) = span {
+            let (first, second) = self.active_letters();
             let whole = length.map_or("Whole".to_string(), |seconds| format!("Whole · {}", clock(seconds)));
-            row(canvas, text, &mut drawn, &mut y, "Range", vec![pick(state.whole, &whole, Hit::Whole(true)), pick(!state.whole, &format!("A–B · {}–{}", clock(a), clock(b)), Hit::Whole(false))]);
+            row(canvas, text, &mut drawn, &mut y, "Range", vec![pick(state.whole, &whole, Hit::Whole(true)), pick(!state.whole, &format!("{first}–{second} · {}–{}", clock(a), clock(b)), Hit::Whole(false))]);
         }
         y += pad / 2;
 
@@ -534,7 +535,14 @@ impl App {
             let w = button(canvas, text, x, "Cancel converting", false);
             drawn.push((Hit::Cancel, [x, y, w, footer_h]));
         }
-        let go = if converting.is_some() { "Convert A–B  ⏎" } else { "Convert  ⏎" };
+        let go = match converting {
+            Some(_) => {
+                let (first, second) = self.active_letters();
+                format!("Convert {first}–{second}  ⏎")
+            }
+            None => "Convert  ⏎".to_string(),
+        };
+        let go = go.as_str();
         let go_w = text.width(go, px) + 2 * pad;
         let go_x = inner + inner_w - go_w;
         button(canvas, text, go_x, go, true);
