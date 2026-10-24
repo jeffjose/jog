@@ -452,7 +452,9 @@ impl Engine {
     fn apply_filter(&self) {
         let view = self.view_filter.borrow();
         let hdr = match self.hdr.get() {
-            Some("hlg") => Some("format=gamma=bt.1886"),
+            // And as light for a display, not of the scene: left as HLG, the
+            // GPU renderer still applies HLG's system gamma, and darkens it.
+            Some("hlg") => Some("format=gamma=bt.1886:light=display"),
             Some(_) => Some(PQ_TO_SDR),
             None => None,
         };
