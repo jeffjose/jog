@@ -55,6 +55,22 @@ pub(super) struct Hitches {
     total: usize,
     worst: Duration,
     causes: HashMap<String, usize>,
+    /// Every steady frame, for `JOG_FRAMESTATS`: measuring playback.
+    stats: FrameStats,
+}
+
+/// Steady playback, frame by frame, said on quitting with
+/// `JOG_FRAMESTATS=1`: for comparing one way of playing with another.
+#[derive(Default)]
+struct FrameStats {
+    /// Gaps between frames shown, in ms.
+    gaps: Vec<f64>,
+    /// Drawing each, in ms.
+    draws: Vec<f64>,
+    /// Frames the gaps say were never shown.
+    missed: f64,
+    /// mpv's own drops: decoder, output.
+    dropped: (f64, f64),
 }
 
 impl Hitches {
@@ -73,6 +89,7 @@ impl Hitches {
             total: 0,
             worst: Duration::ZERO,
             causes: HashMap::new(),
+            stats: FrameStats::default(),
         }
     }
 
@@ -126,6 +143,7 @@ impl Hitches {
     fn frame(&mut self, now: Instant, pos: f64, period: Duration, drops: (f64, f64)) -> Option<(Option<(Duration, Duration)>, f64, Option<(Duration, String)>)> {
         let before = self.last_frame.replace((now, pos));
         let busiest = self.busiest.take();
+        let before_drops = self.drops;
         let dropped = self.drops.replace(drops).map_or(0.0, |(late, lost)| (drops.0 - late).max(0.0) + (drops.1 - lost).max(0.0));
         let Some((then, was)) = before else {
             self.settling = Some(now + SETTLE);
@@ -144,6 +162,12 @@ impl Hitches {
             return None;
         }
         self.settling = None;
+        self.stats.gaps.push(wall * 1000.0);
+        self.stats.missed += (wall / period.as_secs_f64()).round().max(1.0) - 1.0;
+        if let Some((late, lost)) = before_drops {
+            self.stats.dropped.0 += (drops.0 - late).max(0.0);
+            self.stats.dropped.1 += (drops.1 - lost).max(0.0);
+        }
         let late = gap > period.mul_f64(LATE).max(LEAST);
         (late || dropped > 0.0).then_some((late.then_some((gap, period)), dropped, busiest))
     }
@@ -174,6 +198,9 @@ impl Hitches {
     /// The line on quitting, when there was more than one.
     pub(super) fn summary(&mut self) {
         self.flush(None);
+        if std::env::var_os("JOG_FRAMESTATS").is_some() {
+            eprintln!("{}", self.stats.line());
+        }
         if self.total < 2 {
             return;
         }
@@ -186,6 +213,32 @@ impl Hitches {
         }
         eprintln!("{line}");
         self.total = 0;
+    }
+}
+
+impl FrameStats {
+    fn line(&self) -> String {
+        let pct = |values: &[f64], p: f64| {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            sorted.get(((sorted.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or(0.0)
+        };
+        let shown = self.gaps.len() as f64;
+        let wall: f64 = self.gaps.iter().sum::<f64>() / 1000.0;
+        format!(
+            "FRAMESTATS shown={} missed={:.0} missed_pct={:.1} fps={:.1} gap_p50={:.1} gap_p99={:.1} gap_max={:.1} dec_drop={:.0} vo_drop={:.0} draw_p50={:.1} draw_p95={:.1}",
+            self.gaps.len(),
+            self.missed,
+            100.0 * self.missed / (shown + self.missed).max(1.0),
+            shown / wall.max(1e-9),
+            pct(&self.gaps, 0.5),
+            pct(&self.gaps, 0.99),
+            pct(&self.gaps, 1.0),
+            self.dropped.0,
+            self.dropped.1,
+            pct(&self.draws, 0.5),
+            pct(&self.draws, 0.95),
+        )
     }
 }
 
@@ -372,6 +425,7 @@ impl App {
         let count = |property| player.number(property).unwrap_or(0.0);
         let drops = (count("frame-drop-count"), count("vo-drop-frame-count"));
         let now = Instant::now();
+        self.hitches.stats.draws.push((drawing + overlays).as_secs_f64() * 1000.0);
         let Some((gap, dropped, busiest)) = self.hitches.frame(now, pos, Duration::from_secs_f64(1.0 / fps), drops) else {
             // Decoding frames before a pause, while the video plays on,
             // takes from it: it should have stopped when playing began.
