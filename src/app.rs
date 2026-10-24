@@ -1086,7 +1086,7 @@ pub struct App {
     /// done with, and whether the window has had the focus yet, which
     /// is the window manager done putting it up.
     backdrop: Option<(x11::Backdrop, Instant)>,
-    /// Where the players draw videos on the GPU, with `JOG_VIDEO_GPU=1`: one
+    /// Where the players draw videos on the GPU (`mpv::gpu_video`): one
     /// for each, by the index the player is known by, the playing one's shown.
     video_windows: [Option<x11::VideoWindow>; 2],
     /// What is drawn over the video in that window, handed to the player.
@@ -1746,6 +1746,8 @@ impl App {
         ACCENT.store(options.accent, atomic::Ordering::Relaxed);
         crate::mpv::DEBUG.store(options.debug, atomic::Ordering::Relaxed);
         crate::mpv::HWDEC.store(options.hwdec, atomic::Ordering::Relaxed);
+        // Videos drawn on the GPU where they can be, unless asked not to.
+        crate::mpv::choose_gpu_video(options.gpu_video, std::env::var_os("JOG_SNAPSHOT").is_some());
         // The workspaces of the config file; and unless one of them was
         // asked for by name, what was opened by its path as one more.
         // With sessions to choose from, they are the workspaces, and those

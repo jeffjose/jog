@@ -37,11 +37,22 @@ pub const PLAYER_ARG: &str = "--player";
 /// Whether videos are drawn by the player on the GPU, into a window of
 /// their own inside jog's, as mpv draws its own: decoded and scaled on the
 /// GPU, nothing copied back. Otherwise the player draws each frame in
-/// software for jog to copy into its window. `JOG_VIDEO_GPU=1` for now;
-/// the player processes inherit it.
+/// software for jog to copy into its window. Set once, at the start: by
+/// jog from its options and the display it has, and in a player process
+/// from what jog told it.
+static GPU_VIDEO: AtomicBool = AtomicBool::new(false);
+
 pub fn gpu_video() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("JOG_VIDEO_GPU").is_ok_and(|value| value == "1"))
+    GPU_VIDEO.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// jog's side: drawn on the GPU when asked, on an X11 display, which has
+/// windows inside windows to draw into; never on Wayland, nor in a
+/// scripted run, whose pictures are of jog's window alone.
+pub fn choose_gpu_video(wanted: bool, scripted: bool) {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty()) && std::env::var("WINIT_UNIX_BACKEND").map_or(true, |backend| backend != "x11");
+    let x11 = std::env::var_os("DISPLAY").is_some_and(|display| !display.is_empty());
+    GPU_VIDEO.store(wanted && x11 && !wayland && !scripted, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// How a playing video is decoded on the GPU: left there to be drawn, or

@@ -177,6 +177,20 @@ impl App {
     pub(super) fn paint(&mut self, pixels: &mut [u32], window: (u32, u32)) {
         // Drawing waits on nothing: see `mpv::drawing`.
         let _drawing = crate::mpv::drawing();
+        let playing = self.grid.is_none() && self.video.as_ref().is_some_and(|video| video.showing);
+        // Drawn on the GPU, the video is in its own window over this one,
+        // shown while a video plays and over where it goes.
+        let (left, (stage_w, stage_h)) = self.stage();
+        // Not while a frame from before a pause is shown: jog draws those.
+        let stepped_back = self.back_shown().is_some();
+        // With the grid up, a video playing on in its cell, or in the small
+        // picture under the grid, has its window there.
+        let showing = self.video.as_ref().is_some_and(|video| video.showing);
+        let pip = (self.grid.is_some() && showing).then(|| self.pip_place(window).or_else(|| self.pip_small(window))).flatten();
+        let full = (playing && !stepped_back).then_some([left, 0, stage_w as i32, stage_h as i32]);
+        // Over the workspaces or in Edit, nothing of a video is shown.
+        let elsewhere = self.overview.is_some() || self.editor.is_some();
+        self.show_video_windows(full.or(pip).filter(|_| !elsewhere));
         // The overview of workspaces takes the whole window.
         if self.overview.is_some() {
             self.scene_live = false;
@@ -199,11 +213,7 @@ impl App {
             }
         }
         let playing = self.grid.is_none() && self.video.as_ref().is_some_and(|video| video.showing);
-        // Drawn on the GPU, the video is in its own window over this one,
-        // shown while a video plays and over where it goes.
-        let (left, (stage_w, stage_h)) = self.stage();
-        self.show_video_windows(playing.then_some([left, 0, stage_w as i32, stage_h as i32]));
-        if self.video_window_shown() {
+        if self.video_window_shown() && full.is_some() {
             return self.paint_over_video(pixels, window);
         }
         self.clear_video_layer();

@@ -56,6 +56,7 @@ pub fn main(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
     DEBUG.store(args.get(2).is_some_and(|debug| debug == "1"), Ordering::Relaxed);
+    super::GPU_VIDEO.store(args.get(3).is_some_and(|on| on == "1"), Ordering::Relaxed);
     let say = |notice: Notice| {
         if wire::send(socket.as_fd(), &notice.encode(), None).is_err() {
             leave(0);

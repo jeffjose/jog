@@ -258,7 +258,8 @@ impl Engine {
             // before a file is opened): mpv's own way of drawing, as when
             // it has a window of its own. The pointer and the keys stay
             // jog's: its window, not mpv's inside it, takes them.
-            let on_gpu = super::gpu_video() && matches!(role, Role::Playback { .. });
+            // Not the player stepping back, which draws frames for jog to keep.
+            let on_gpu = super::gpu_video() && matches!(role, Role::Playback { gpu: true, .. });
             if on_gpu {
                 extra.extend_from_slice(&[("vo", "gpu"), ("force-window", "no"), ("input-cursor", "no"), ("input-vo-keyboard", "no"), ("cursor-autohide", "no"), ("osd-level", "0")]);
             }

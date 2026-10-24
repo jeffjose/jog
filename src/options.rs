@@ -113,6 +113,8 @@ where they were left unless --no-positions is given.
       --no-hwdec             decode videos on the CPU, not the GPU: the first
                              video starts a little sooner, but 4K plays less
                              smoothly on few cores (config: hwdec = false)
+      --no-gpu-video         draw videos in software, not on the GPU; always
+                             so on Wayland (config: gpu-video = false)
       --no-positions         start videos from the beginning, and do not
                              remember where they were left (config:
                              positions = false)
@@ -384,6 +386,8 @@ pub struct Options {
     pub hitches: bool,
     /// Whether videos are decoded by the GPU, where one can.
     pub hwdec: bool,
+    /// Whether videos are drawn on the GPU by the player, where they can be.
+    pub gpu_video: bool,
     pub watch: bool,
     /// Whether the first picture opens in Edit.
     pub edit: bool,
@@ -600,7 +604,7 @@ fn is_switch(name: &str) -> bool {
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "random",
         "newest", "oldest", "videos", "video", "images", "image", "pictures", "picture",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
-        "debug", "verbose", "watch", "edit", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "hitches", "no-hitches", "hwdec", "no-hwdec", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
+        "debug", "verbose", "watch", "edit", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "hitches", "no-hitches", "hwdec", "no-hwdec", "gpu-video", "no-gpu-video", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
     switches.contains(&name)
 }
@@ -659,6 +663,7 @@ fn parse_with(
         verbose: false,
         hitches: true,
         hwdec: true,
+        gpu_video: true,
         watch: false,
         edit: false,
         filter: None,
@@ -888,6 +893,8 @@ fn apply(
         "no-hitches" => options.hitches = false,
         "hwdec" => options.hwdec = true,
         "no-hwdec" => options.hwdec = false,
+        "gpu-video" => options.gpu_video = true,
+        "no-gpu-video" => options.gpu_video = false,
         "verbose" => options.verbose = true,
         "watch" => options.watch = true,
         "edit" => options.edit = true,
@@ -973,6 +980,7 @@ fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>
                 "animations" => ("no-animations", None),
                 "hitches" => ("no-hitches", None),
                 "hwdec" => ("no-hwdec", None),
+                "gpu-video" => ("no-gpu-video", None),
                 "seen" => ("no-seen", None),
                 "subtitles" => ("no-subtitles", None),
                 "grid-titles" => ("no-grid-titles", None),
