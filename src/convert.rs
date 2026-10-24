@@ -22,7 +22,7 @@ use crate::frame::Transform;
 /// JPEG has no transparency, so transparent areas become this color.
 const JPEG_BACKGROUND: u32 = 0xFFFFFF;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Format {
     Jxl,
     Avif,

@@ -63,6 +63,17 @@ pub struct ConvertPanel {
     asked: u64,
     trial: Option<(u64, Format, Result<Trial, String>)>,
     jobs: mpsc::Sender<(u64, Format, Settings)>,
+    /// How large each format comes out with its settings as they are, as
+    /// those were described when it was found: shown on its button.
+    sizes: HashMap<Format, (String, Result<u64, String>)>,
+    /// The formats to be sized, on a thread of their own once the picture
+    /// is read.
+    sizer: Option<mpsc::Sender<(Format, Settings)>>,
+    /// What each format is being sized with now, not to be asked twice.
+    sizing: HashMap<Format, String>,
+    /// The parts of the original (0) and of a try (by number) last cut to be
+    /// drawn, and where from: the same again is not cut again.
+    cuts: std::cell::RefCell<Vec<(u64, [f64; 4], Arc<Frame>)>>,
     /// How the comparison is shown: 0 the whole picture, else that many
     /// screen pixels to one of the picture's; and where, as shares of
     /// the picture's width and height.
@@ -319,7 +330,12 @@ impl App {
             asked: 0,
             trial: None,
             jobs,
-            zoom: 1,
+            sizes: HashMap::new(),
+            sizer: None,
+            sizing: HashMap::new(),
+            cuts: Default::default(),
+            // The whole picture, as large as the room for it.
+            zoom: 0,
             center: (0.5, 0.5),
             drawn: Vec::new(),
         });
@@ -332,7 +348,31 @@ impl App {
         let Some(panel) = self.convert_panel.as_mut().filter(|panel| panel.id == id) else { return };
         match source {
             Ok(source) => {
-                panel.source = Some(source);
+                panel.source = Some(source.clone());
+                // The other formats sized meanwhile, each as it would be
+                // written, one after another off this thread.
+                let (sizer, inbox) = mpsc::channel::<(Format, Settings)>();
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    while let Ok(first) = inbox.recv() {
+                        // The latest asked of each format, in the panel's order.
+                        let mut asked = vec![first];
+                        asked.extend(inbox.try_iter());
+                        let mut latest: Vec<(Format, Settings)> = Vec::new();
+                        for (format, settings) in asked {
+                            latest.retain(|(had, _)| *had != format);
+                            latest.push((format, settings));
+                        }
+                        for (format, settings) in latest {
+                            let bytes = Some(&source.bytes).filter(|bytes| !bytes.is_empty()).map(Vec::as_slice);
+                            let size = convert::encode(&source.image, bytes, format, &settings).map(|encoded| encoded.bytes.len() as u64).map_err(|error| error.to_string());
+                            if proxy.send_event(Event::ConvertSize(id, format, settings.describe(format), size)).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                });
+                panel.sizer = Some(sizer);
                 self.try_settings();
             }
             Err(error) => panel.failed = Some(error),
@@ -344,10 +384,29 @@ impl App {
         let Some(panel) = &mut self.convert_panel else { return };
         // An older try is still better than nothing to show, until the
         // latest comes.
+        // The latest is of the settings as they are: its size goes on the
+        // format's button too.
+        if asked == panel.asked {
+            let size = trial.as_ref().map(|trial| trial.size as u64).map_err(Clone::clone);
+            panel.sizes.insert(format, (panel.settings.describe(format), size));
+        }
         if panel.trial.as_ref().is_none_or(|(had, ..)| *had <= asked) {
             panel.trial = Some((asked, format, trial));
         }
         self.redraw();
+    }
+
+    /// How large a format other than the one chosen came out.
+    pub(super) fn convert_size(&mut self, id: usize, format: Format, said: String, size: Result<u64, String>) {
+        let Some(panel) = self.convert_panel.as_mut().filter(|panel| panel.id == id) else { return };
+        if panel.sizing.get(&format) == Some(&said) {
+            panel.sizing.remove(&format);
+        }
+        // Only if its settings are still those it was sized with.
+        if panel.settings.describe(format) == said {
+            panel.sizes.insert(format, (said, size));
+            self.redraw();
+        }
     }
 
     /// The score of a try, which comes after it.
@@ -369,6 +428,19 @@ impl App {
         }
         panel.asked += 1;
         let _ = panel.jobs.send((panel.asked, panel.format, panel.settings));
+        // The other formats, those whose settings are not what they were
+        // sized with, sized again.
+        for format in Format::ALL.into_iter().filter(|format| *format != panel.format) {
+            let said = panel.settings.describe(format);
+            let known = panel.sizes.get(&format).is_some_and(|(had, _)| *had == said) || panel.sizing.get(&format) == Some(&said);
+            if !known {
+                panel.sizes.remove(&format);
+                panel.sizing.insert(format, said);
+                if let Some(sizer) = &panel.sizer {
+                    let _ = sizer.send((format, panel.settings));
+                }
+            }
+        }
     }
 
     fn panel_knobs(&self) -> Vec<Knob> {
@@ -587,19 +659,41 @@ impl App {
         drawn.push((Hit::Close, [close_x, close_y, close, close]));
         y += line + pad;
 
-        // The formats, as a row of buttons: the one chosen filled in.
-        let tab_h = line + pad * 2 / 3;
+        // The formats, as a row of buttons: the one chosen filled in, each
+        // with what the picture comes to in it, so as to be compared
+        // without trying each in turn.
+        let tab_h = line + small_line + pad * 2 / 3;
         let mut x = inner;
         for format in Format::ALL {
             let label = format.name();
-            let w = text.width(label, px) + 2 * pad;
+            let current = panel.settings.describe(format);
+            let (size, change) = match panel.sizes.get(&format).filter(|(said, _)| *said == current).map(|(_, size)| size) {
+                Some(Ok(size)) => {
+                    let change = (*size as f64 / file_size.max(1) as f64 - 1.0) * 100.0;
+                    (format!("{}  {change:+.0}%", meta::human_size(*size)), Some(change))
+                }
+                Some(Err(_)) => ("—".to_string(), None),
+                None if panel.source.is_some() => ("…".to_string(), None),
+                None => (String::new(), None),
+            };
+            let w = text.width(label, px).max(text.width(&size, small)) + 2 * pad;
             let chosen = format == panel.format;
             let hovered = in_rect(mouse, [x, y, w, tab_h]);
             canvas.round_fill(x, y, w, tab_h, pad / 2, if chosen { accent() } else if hovered { PLACEHOLDER_COLOR } else { 0x161616 }, 256);
             if panel.row == 0 && chosen {
                 canvas.round_outline(x - 2, y - 2, w + 4, tab_h + 4, pad / 2 + 2, 2, accent_soft());
             }
-            text.draw(canvas, x + pad, y + (tab_h - line) / 2, px, if chosen { on_accent() } else { TEXT_COLOR }, label);
+            let text_y = y + (tab_h - line - small_line) / 2;
+            text.draw(canvas, x + pad, text_y, px, if chosen { on_accent() } else { TEXT_COLOR }, label);
+            // Smaller in green, larger in red; on the chosen one, as its words.
+            let color = match change {
+                _ if chosen => on_accent(),
+                Some(change) if change.abs() < 0.5 => DIM_TEXT_COLOR,
+                Some(change) if change > 0.0 => MARK_COLOR,
+                Some(_) => KEPT_COLOR,
+                None => DIM_TEXT_COLOR,
+            };
+            text.draw(canvas, x + pad, text_y + line, small, color, &size);
             drawn.push((Hit::Format(format), [x, y, w, tab_h]));
             x += w + pad / 3;
         }
@@ -678,16 +772,21 @@ impl App {
             // The divider follows the pointer over the picture; elsewhere
             // it stands in the middle.
             let split = if in_rect(mouse, preview) { (mouse.0 as i32).clamp(dest[0], dest[0] + dest[2]) } else { dest[0] + dest[2] / 2 };
-            if let Some(frame) = cut(&source.flat, shown) {
+            if let Some(frame) = panel.cut_of(0, &source.flat, shown) {
                 draw_region(canvas, &frame, dest, panel.zoom);
             }
-            let decoded = trial.and_then(|(_, _, result)| result.as_ref().ok()).and_then(|trial| trial.decoded.as_ref());
-            if let Some(decoded) = decoded {
-                let share = f64::from(split - dest[0]) / f64::from(dest[2].max(1));
-                let right = [shown[0] + shown[2] * share, shown[1], shown[2] * (1.0 - share), shown[3]];
-                if let Some(frame) = cut(decoded, right).filter(|_| split < dest[0] + dest[2]) {
-                    draw_region(canvas, &frame, [split, dest[1], dest[0] + dest[2] - split, dest[3]], panel.zoom);
+            let decoded = trial.and_then(|(asked, _, result)| Some((*asked, result.as_ref().ok()?.decoded.as_ref()?)));
+            if let Some((asked, decoded)) = decoded {
+                // Both drawn whole, the same way into the same place, the
+                // original's left of the divider kept and laid back over:
+                // the two meet at it however it moves, neither shifting, as
+                // a part of each cut and fitted on its own would.
+                let left_w = split - dest[0];
+                let kept = canvas.copy(dest[0], dest[1], left_w, dest[3]);
+                if let Some(frame) = panel.cut_of(asked, decoded, shown) {
+                    draw_region(canvas, &frame, dest, panel.zoom);
                 }
+                canvas.paste(dest[0], dest[1], left_w, dest[3], &kept);
                 canvas.fill(split - 1, dest[1], 2, dest[3], TEXT_COLOR);
             }
             let tag = |canvas: &mut Canvas, text: &mut Text, words: &str, right: bool| {
@@ -828,10 +927,12 @@ pub(super) fn shown_region(size: (f64, f64), [x, y, w, h]: [i32; 4], zoom: u32, 
 }
 
 /// Draws a cut of the picture into a rectangle: smoothly when it is made
-/// smaller, as it is when the whole picture is shown; with its pixels
-/// blended when made larger, which close up is what is wanted.
+/// smaller, as it is when the whole picture is fitted; with its pixels
+/// kept square when made larger, which close up is what is wanted.
 pub(super) fn draw_region(canvas: &mut Canvas, frame: &Frame, [x, y, w, h]: [i32; 4], zoom: u32) {
-    if zoom == 0 {
+    // Fitted, a large picture is made smaller, smoothly; a small one
+    // larger, its pixels kept square, so that what the encoder did shows.
+    if zoom == 0 && (w as u32) <= frame.width {
         canvas.image(frame, x, y, w, h);
     } else {
         canvas.image_fast(frame, x, y, w, h);
@@ -915,5 +1016,26 @@ impl App {
         self.toast(format!("Quality {quality:.0}  ·  {}", meta::human_size(bytes)));
         self.try_settings();
         self.redraw();
+    }
+}
+
+impl ConvertPanel {
+    /// The part `rect` of `image`, the original's if `which` is 0, else a
+    /// try's: kept, so that moving the divider does not copy the picture
+    /// out again each time.
+    fn cut_of(&self, which: u64, image: &RgbImage, rect: [f64; 4]) -> Option<Arc<Frame>> {
+        let mut cuts = self.cuts.borrow_mut();
+        if let Some((_, _, frame)) = cuts.iter().find(|(had, at, _)| *had == which && *at == rect) {
+            return Some(frame.clone());
+        }
+        let frame = Arc::new(cut(image, rect)?);
+        cuts.retain(|(had, ..)| *had != which);
+        // The original, and the latest try or two.
+        if cuts.len() > 2 {
+            let oldest = cuts.iter().position(|(had, ..)| *had != 0).unwrap_or(0);
+            cuts.remove(oldest);
+        }
+        cuts.push((which, rect, frame.clone()));
+        Some(frame)
     }
 }

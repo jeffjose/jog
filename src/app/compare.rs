@@ -255,12 +255,16 @@ impl App {
             }
             // The second in the first's terms: the same share of it, should
             // it be of another size.
+            // Drawn whole into the same place, the first's left of the
+            // divider laid back over it: the two meet there however it
+            // moves, neither shifting.
             let (kx, ky) = (f64::from(images[1].width()) / size.0, f64::from(images[1].height()) / size.1);
-            let share = f64::from(split - dest[0]) / f64::from(dest[2].max(1));
-            let right = [(shown[0] + shown[2] * share) * kx, shown[1] * ky, shown[2] * (1.0 - share) * kx, shown[3] * ky];
-            if let Some(frame) = cut(&images[1], right).filter(|_| split < dest[0] + dest[2]) {
-                draw_region(canvas, &frame, [split, dest[1], dest[0] + dest[2] - split, dest[3]], compare.zoom.max(u32::from(kx != 1.0)));
+            let left_w = split - dest[0];
+            let kept = canvas.copy(dest[0], dest[1], left_w, dest[3]);
+            if let Some(frame) = cut(&images[1], [shown[0] * kx, shown[1] * ky, shown[2] * kx, shown[3] * ky]) {
+                draw_region(canvas, &frame, dest, compare.zoom.max(u32::from(kx != 1.0)));
             }
+            canvas.paste(dest[0], dest[1], left_w, dest[3], &kept);
             canvas.fill(split - 1, dest[1], 2, dest[3], TEXT_COLOR);
         } else {
             let words = compare.failed.clone().map_or("Reading…".to_string(), |error| format!("Not readable · {error}"));

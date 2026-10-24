@@ -248,6 +248,9 @@ pub enum Event {
     ConvertSource(usize, Result<Arc<PanelSource>, String>),
     ConvertTrial(u64, Format, Result<convert::Trial, String>),
     ConvertScore(u64, Option<f64>),
+    /// How large the picture in the Convert panel comes out in a format, with
+    /// that format's settings as described, or why it could not be made.
+    ConvertSize(usize, Format, String, Result<u64, String>),
     /// The quality found to fit a size: the picture, the format, the
     /// quality and the size it makes, and the size asked for.
     ConvertFit(usize, Format, Option<(f32, u64)>, u64),
@@ -4125,6 +4128,7 @@ impl App {
             Event::ConvertSource(id, source) => self.convert_source(id, source),
             Event::ConvertTrial(asked, format, trial) => self.convert_trial(asked, format, trial),
             Event::ConvertScore(asked, score) => self.convert_score(asked, score),
+            Event::ConvertSize(id, format, said, size) => self.convert_size(id, format, said, size),
             Event::ConvertFit(id, format, found, target) => self.convert_fit(id, format, found, target),
             // With a Cancel to click, for as long as it goes on.
             Event::VideoProgress(words) => self.toast_with(words, vec![("Cancel".into(), ToastLink::Cancel)]),
