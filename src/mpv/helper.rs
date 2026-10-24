@@ -256,6 +256,10 @@ pub fn main(args: &[String]) -> ExitCode {
                 // be, rather than waiting for the next.
                 Request::Checks(now) => {
                     checks = now;
+                    // Drawn on the GPU, by the player, as a shader.
+                    if engine.draws_on_gpu() {
+                        engine.set_checks_shader(checks);
+                    }
                     if let (Some(size), Some(states)) = (ahead, states.as_ref()) {
                         if draw_ahead(&engine, states, &mut slots, size, checks, &mut count) {
                             say(Notice::Frame);

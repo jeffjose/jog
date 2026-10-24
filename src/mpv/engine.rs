@@ -140,6 +140,9 @@ pub struct Engine {
     /// was chosen for it: audio, subtitles ("no" for none), then the
     /// subtitle and audio delays in seconds.
     next_tracks: RefCell<Option<(String, String, f64, f64)>>,
+    /// The checks' shader for mpv to read, while there is one, drawing on
+    /// the GPU: in memory, read by its path under /proc.
+    checks_shader: RefCell<Option<std::os::fd::OwnedFd>>,
     /// Held while a frame is drawn: by `warm` on its own thread, and
     /// by `render`, so that one draws at a time.
     drawing: std::sync::Arc<Mutex<()>>,
@@ -314,7 +317,7 @@ impl Engine {
             }
             let known = Mutex::new(vec![None; WATCHED.len()]);
             let watching = matches!(role, Role::Playback { .. });
-            Ok(Engine { api, handle, render, known, watching, hdr: Cell::new(None), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), drawing: std::sync::Arc::new(Mutex::new(())), _wake: wake, _library: library })
+            Ok(Engine { api, handle, render, known, watching, hdr: Cell::new(None), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), checks_shader: RefCell::new(None), drawing: std::sync::Arc::new(Mutex::new(())), _wake: wake, _library: library })
         }
     }
 
@@ -569,6 +572,36 @@ impl Engine {
                 EVENT_END_FILE => events.push(PlayerEvent::Ended),
                 _ => {}
             }
+        }
+    }
+
+    /// Whether this player draws on the GPU, with no frames to hand over.
+    pub fn draws_on_gpu(&self) -> bool {
+        self.render.is_null()
+    }
+
+    /// The checks drawn by mpv itself, as a shader on the picture going to
+    /// the screen: for a player drawing on the GPU, whose frames jog never
+    /// has to draw them on.
+    pub fn set_checks_shader(&self, checks: super::checks::Checks) {
+        use std::io::Write;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let path = super::checks::shader(checks).and_then(|text| {
+            // SAFETY: memfd_create takes a NUL-terminated name and flags.
+            let fd = unsafe { libc::memfd_create(c"jog-checks".as_ptr(), libc::MFD_CLOEXEC) };
+            if fd < 0 {
+                return None;
+            }
+            // SAFETY: just made, owned by nothing else.
+            let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+            std::fs::File::from(fd.try_clone().ok()?).write_all(text.as_bytes()).ok()?;
+            let path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+            *self.checks_shader.borrow_mut() = Some(fd);
+            Some(path)
+        });
+        self.set("glsl-shaders", path.as_deref().unwrap_or(""));
+        if path.is_none() {
+            self.checks_shader.borrow_mut().take();
         }
     }
 

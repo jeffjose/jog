@@ -50,6 +50,9 @@ impl App {
         // Over black: what the window shows around the video, and with it
         // the colors of what goes over it.
         ui::fill_all(pixels, 0);
+        // What of the frame paused on is outside BT.709, if asked: a blend
+        // over the picture as the rest is, and so laid over it the same way.
+        self.draw_gamut(pixels, window);
         self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
         // Over white, in a buffer of this one's own, which keeps what was
         // drawn in it: white over all of it only when it is new, of another
@@ -62,6 +65,7 @@ impl App {
             ui::fill_all(&mut white, 0xFFFFFF);
             self.video_layer.white_for = Some(place);
         }
+        self.draw_gamut(&mut white, window);
         self.draw_overlays(&mut Canvas::new(&mut white, window.0, window.1));
         let picture = picture_of(pixels, &white, window.0 as usize, place);
         // Where anything was drawn over the video: white again for next

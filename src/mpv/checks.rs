@@ -65,6 +65,44 @@ pub fn apply(pixels: &mut [u32], width: u32, checks: Checks) {
     });
 }
 
+/// The checks as an mpv user shader, for a video drawn on the GPU: run on
+/// the picture as it goes to the screen, before mpv lays anything over it,
+/// with the same bands and stripes as `apply`. `None` for no checks.
+pub fn shader(checks: Checks) -> Option<String> {
+    if !checks.any() {
+        return None;
+    }
+    let channel = |color: u32, shift: u32| f64::from(color >> shift & 0xFF) / 255.0;
+    let bands: String = BANDS
+        .iter()
+        .map(|(from, to, color)| format!("        if (l >= {from}.0 && l < {to}.0) return vec3({:.4}, {:.4}, {:.4});\n", channel(*color, 16), channel(*color, 8), channel(*color, 0)))
+        .collect();
+    Some(format!(
+        "//!HOOK OUTPUT
+//!BIND HOOKED
+//!DESC jog checks
+vec3 luma_band(vec3 c, float l) {{
+    if (c == vec3(0.0)) return c;
+{bands}    return vec3(l / 255.0);
+}}
+vec4 hook() {{
+    vec4 c = HOOKED_texOff(0);
+    // Out of 255, as the picture is drawn in software.
+    float l = floor(dot(floor(c.rgb * 255.0 + 0.5), vec3(218.0, 732.0, 74.0)) / 1024.0);
+    vec3 rgb = c.rgb;
+    if ({false_color}) rgb = luma_band(c.rgb, l);
+    if ({zebra} && l >= {CLIPPED}.0) {{
+        vec2 at = floor(HOOKED_pos * HOOKED_size);
+        rgb = mod(at.x + at.y, 8.0) < 4.0 ? vec3(0.0) : vec3(1.0);
+    }}
+    return vec4(rgb, c.a);
+}}
+",
+        false_color = checks.false_color,
+        zebra = checks.zebra,
+    ))
+}
+
 /// A pixel in false color: its band's color, or gray at its brightness.
 /// Rec. 709 luma, in integers: 0.2126, 0.7152, 0.0722 of 1024.
 fn luma(r: u32, g: u32, b: u32) -> u32 {
