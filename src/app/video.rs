@@ -523,6 +523,15 @@ impl App {
         // the info line, under the grid, or along the scenes. Elsewhere
         // its moving on with every frame changes nothing in the window.
         let time_shown = self.hover.is_some() || self.time_until.is_some() || self.show_info || self.show_debug || self.grid.is_some() || self.scenes_shown() || self.slide_at.is_some() || self.show_list;
+        // Drawn on the GPU, the video moves on without jog drawing; what jog
+        // draws of the time changes only with the second shown and the bar's
+        // handle moving a pixel, and only then is it drawn again.
+        let time_moved = !crate::mpv::gpu_video() || {
+            let bar = self.seek_bar();
+            let (at, length) = (player.number("time-pos").unwrap_or(0.0), player.number("duration").unwrap_or(0.0));
+            let key = (at as i64, (f64::from(bar.width) * at / length.max(1e-9)) as i32);
+            self.time_key.replace(Some(key)) != Some(key)
+        };
         let Some(video) = &mut self.video else { return };
         // One held ready by the spare player announced its frame before it
         // was this player, so that has to be looked for.
@@ -541,7 +550,7 @@ impl App {
                 at_end = true;
                 continue;
             }
-            if event == PlayerEvent::Changed || (event == PlayerEvent::Moved && time_shown) {
+            if event == PlayerEvent::Changed || (event == PlayerEvent::Moved && time_shown && time_moved) {
                 changed = true;
                 continue;
             }

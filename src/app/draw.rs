@@ -205,6 +205,10 @@ impl App {
         if let Some(video_window) = &mut self.video_window {
             video_window.show(playing.then_some([left, 0, stage_w as i32, stage_h as i32]));
         }
+        if self.video_window.as_ref().is_some_and(x11::VideoWindow::shown) {
+            return self.paint_over_video(pixels, window);
+        }
+        self.clear_video_layer();
         // A frame kept from before a pause, stepped back to: drawn as it
         // was kept, at this very size, in place of the main player's.
         if playing {

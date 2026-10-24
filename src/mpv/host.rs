@@ -79,6 +79,9 @@ pub struct Player {
     taken: Cell<Option<u32>>,
     /// Whether the player process has the GPU decode what it opens next.
     gpu: Cell<bool>,
+    /// What jog draws over a video drawn on the GPU, in two buffers shared
+    /// with the player process: one drawn into while the other is copied.
+    overlays: RefCell<Vec<Mapped>>,
     /// Whether this player watches properties: a preview player does not.
     watching: bool,
 }
@@ -157,6 +160,7 @@ impl Player {
             shared,
             next_id: Cell::new(1),
             buffer: RefCell::new(None),
+            overlays: RefCell::new(Vec::new()),
             states: RefCell::new(None),
             slots: RefCell::new(Vec::new()),
             ahead: Cell::new(None),
@@ -398,6 +402,37 @@ impl Player {
             return newest.is_some_and(|count| Some(count) != self.taken.get());
         }
         matches!(self.ask(|id| Request::FrameWaiting { id }), Some(Reply::Yes(true)))
+    }
+
+    /// Puts up what jog draws over a video the player draws on the GPU:
+    /// `parts` of it, each left, top, width and height in the video's
+    /// window, their premultiplied BGRA pixels one after another in
+    /// `pixels`; none to take it down. False when both buffers are still
+    /// being copied from, and it is to be asked again.
+    pub fn overlay(&self, pixels: &[u32], parts: &[[i32; 4]]) -> bool {
+        if self.gone() {
+            return true;
+        }
+        let wanted = pixels.len().max(1);
+        let mut overlays = self.overlays.borrow_mut();
+        // Made anew only to grow, with room to spare. The player process
+        // has its requests in order: one still to copy from an old buffer
+        // does so before it is told of the new.
+        if overlays.len() < 2 || overlays.iter().any(|buffer| buffer.pixels() < wire::OVERLAY_HEADER + wanted) {
+            let room = wanted + wanted / 4;
+            let Ok(made) = (0..2).map(|_| Mapped::create(wire::OVERLAY_HEADER + room)).collect::<std::io::Result<Vec<Mapped>>>() else { return true };
+            for (index, buffer) in made.iter().enumerate() {
+                if wire::send(self.socket.as_fd(), &Request::OverlayBuffer { index: index as u8, pixels: room as u64 }.encode(), Some(buffer.fd())).is_err() {
+                    return true;
+                }
+            }
+            *overlays = made;
+        }
+        let Some((index, buffer)) = overlays.iter_mut().enumerate().find(|(_, buffer)| buffer.overlay_flag().load(Ordering::Acquire) == 0) else { return false };
+        buffer.overlay_pixels()[..pixels.len()].copy_from_slice(pixels);
+        buffer.overlay_flag().store(1, Ordering::Release);
+        self.tell(&Request::Overlay { index: index as u8, parts: parts.to_vec() });
+        true
     }
 
     /// Whether each frame is drawn ahead, at a size.

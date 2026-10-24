@@ -106,6 +106,10 @@ pub fn main(args: &[String]) -> ExitCode {
     let mut states: Option<Mapped> = None;
     let mut slots: [Option<Mapped>; wire::SLOTS] = Default::default();
     let mut ahead: Option<(u32, u32)> = None;
+    // What jog draws over a video drawn on the GPU: two buffers, one being
+    // drawn into while mpv copies from the other.
+    let mut overlays: [Option<Mapped>; 2] = Default::default();
+    let mut overlays_shown = 0;
     let mut count: u32 = 0;
     // What is drawn over each frame, as a monitor does.
     let mut checks = super::checks::Checks::default();
@@ -199,6 +203,42 @@ pub fn main(args: &[String]) -> ExitCode {
                     }
                 }
                 Request::Ahead { width, height } => ahead = (width > 0 && height > 0).then_some((width, height)),
+                Request::OverlayBuffer { index, pixels } => {
+                    if let Some(slot) = overlays.get_mut(index as usize) {
+                        drop(slot.take());
+                        *slot = passed.and_then(|fd| Mapped::map(fd, wire::OVERLAY_HEADER + pixels as usize).ok());
+                    }
+                }
+                // Each part put up, copied out by mpv before the command
+                // returns; those no longer there taken down; and the buffer
+                // let go for jog's process to draw into again.
+                Request::Overlay { index, parts } => {
+                    let buffer = overlays.get(index as usize).and_then(Option::as_ref);
+                    let room = buffer.map_or(0, |buffer| buffer.pixels() - wire::OVERLAY_HEADER);
+                    let mut offset = 0usize;
+                    let mut put = 0;
+                    for (id, [x, y, w, h]) in parts.iter().enumerate().take(63) {
+                        let (Some(buffer), true) = (buffer, *w > 0 && *h > 0) else { continue };
+                        let size = *w as usize * *h as usize;
+                        if offset + size > room {
+                            break;
+                        }
+                        let address = format!("&{}", buffer.overlay_address());
+                        let fields = [id.to_string(), x.to_string(), y.to_string(), address, (offset * 4).to_string(), "bgra".to_string(), w.to_string(), h.to_string(), (w * 4).to_string()];
+                        let mut args: Vec<&[u8]> = vec![b"overlay-add"];
+                        args.extend(fields.iter().map(|field| field.as_bytes()));
+                        engine.command(&args);
+                        offset += size;
+                        put = id + 1;
+                    }
+                    for id in put..overlays_shown {
+                        engine.command(&[b"overlay-remove", id.to_string().as_bytes()]);
+                    }
+                    overlays_shown = put;
+                    if let Some(buffer) = buffer {
+                        buffer.overlay_flag().store(0, std::sync::atomic::Ordering::Release);
+                    }
+                }
                 Request::Render { id, width, height } => {
                     let wanted = width as usize * height as usize;
                     let drawn = buffer.as_mut().filter(|buffer| buffer.pixels() >= wanted).is_some_and(|buffer| {

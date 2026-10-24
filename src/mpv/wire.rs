@@ -204,6 +204,10 @@ const WORDS: usize = 5;
 /// How many numbers the block holds: the slots', then the file open.
 pub const STATE_WORDS: usize = SLOTS * WORDS + 1;
 
+/// The words before an overlay buffer's pixels: its flag, and room to
+/// keep the pixels apart from it.
+pub const OVERLAY_HEADER: usize = 16;
+
 impl Mapped {
     /// One of the numbers kept for `slot`, in shared memory made for the
     /// slots' states, to be changed atomically by either process.
@@ -214,6 +218,22 @@ impl Mapped {
     /// Which file the player has open, as counted in the block.
     pub fn file(&self) -> &std::sync::atomic::AtomicU32 {
         self.word(SLOTS * WORDS)
+    }
+
+    /// An overlay buffer's flag: set by jog's process once the layer is
+    /// in it, let go by the player's once mpv has copied it out.
+    pub fn overlay_flag(&self) -> &std::sync::atomic::AtomicU32 {
+        self.word(0)
+    }
+
+    /// Where an overlay buffer's pixels begin, in this process.
+    pub fn overlay_address(&self) -> usize {
+        self.pointer as usize + OVERLAY_HEADER * 4
+    }
+
+    /// An overlay buffer's pixels, after its flag.
+    pub fn overlay_pixels(&mut self) -> &mut [u32] {
+        &mut self.as_mut_slice()[OVERLAY_HEADER..]
     }
 
     fn word(&self, at: usize) -> &std::sync::atomic::AtomicU32 {
@@ -341,6 +361,13 @@ pub enum Request {
     Ahead { width: u32, height: u32 },
     /// What is drawn over each frame from now on.
     Checks(super::checks::Checks),
+    /// Overlay buffer `index` from now on, of `pixels` pixels after its
+    /// header; its descriptor comes with it.
+    OverlayBuffer { index: u8, pixels: u64 },
+    /// What jog draws over the video, put up from overlay buffer `index`:
+    /// parts of it, each left, top, width and height in the video's window,
+    /// their pixels one after another in the buffer. None for nothing.
+    Overlay { index: u8, parts: Vec<[i32; 4]> },
     Quit,
 }
 
@@ -585,6 +612,17 @@ impl Request {
             Request::Checks(checks) => {
                 out.u8(19).bool(checks.zebra).bool(checks.false_color);
             }
+            Request::OverlayBuffer { index, pixels } => {
+                out.u8(20).u8(*index).u64(*pixels);
+            }
+            Request::Overlay { index, parts } => {
+                out.u8(21).u8(*index).u32(parts.len() as u32);
+                for part in parts {
+                    for value in part {
+                        out.u32(*value as u32);
+                    }
+                }
+            }
         }
         out.0
     }
@@ -616,6 +654,12 @@ impl Request {
             17 => Request::Slot { index: input.u8()?, pixels: input.u64()? },
             18 => Request::Ahead { width: input.u32()?, height: input.u32()? },
             19 => Request::Checks(super::checks::Checks { zebra: input.bool()?, false_color: input.bool()? }),
+            20 => Request::OverlayBuffer { index: input.u8()?, pixels: input.u64()? },
+            21 => {
+                let (index, count) = (input.u8()?, input.u32()?);
+                let parts = (0..count.min(64)).map(|_| Some([input.u32()? as i32, input.u32()? as i32, input.u32()? as i32, input.u32()? as i32])).collect::<Option<Vec<_>>>()?;
+                Request::Overlay { index, parts }
+            }
             _ => return None,
         };
         input.end(request)
@@ -711,6 +755,9 @@ mod tests {
             Request::Settle { id: 5 },
             Request::Slots,
             Request::Slot { index: 2, pixels: 1920 * 1080 },
+            Request::OverlayBuffer { index: 1, pixels: 2160 * 1350 },
+            Request::Overlay { index: 0, parts: vec![[0, 40, 2160, 120], [10, 900, 300, 40]] },
+            Request::Overlay { index: 1, parts: Vec::new() },
             Request::Ahead { width: 0, height: 0 },
             Request::Checks(crate::mpv::Checks { zebra: true, false_color: false }),
             Request::Quit,

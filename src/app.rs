@@ -70,6 +70,7 @@ mod menu;
 mod palette;
 mod refresh;
 mod scanning;
+mod video_layer;
 mod scenes_strip;
 mod scripted;
 mod inspect;
@@ -1087,6 +1088,8 @@ pub struct App {
     backdrop: Option<(x11::Backdrop, Instant)>,
     /// Where the player draws a video on the GPU, with `JOG_VIDEO_GPU=1`.
     video_window: Option<x11::VideoWindow>,
+    /// What is drawn over the video in that window, handed to the player.
+    video_layer: video_layer::Layer,
     backdrop_done: bool,
     focused_once: bool,
     /// The first row the file list was scrolled to with the wheel, along
@@ -1298,6 +1301,9 @@ pub struct App {
     /// The player's own counts of frames dropped, while measuring: as the
     /// script measuring mpv itself counts them.
     bench_drops: BenchDrops,
+    bench_keys_played: bool,
+    /// The second and the bar's handle last drawn, for a video on the GPU.
+    time_key: Cell<Option<(i64, i32)>>,
     /// Videos looped on their own, from their row in the file list.
     looped: HashSet<usize>,
     /// What is being held down over a video, and how strong the loupe is
@@ -1850,6 +1856,7 @@ impl App {
             repainted: Cell::new(false),
             backdrop: None,
             video_window: None,
+            video_layer: Default::default(),
             backdrop_done: false,
             focused_once: false,
             list_scroll: None,
@@ -1965,6 +1972,8 @@ impl App {
             looping: if bench_seconds().is_some() { Looping::File } else { Looping::Off },
             bench_quit: bench_seconds().map(|seconds| Instant::now() + Duration::from_secs_f64(seconds + 1.5)),
             bench_drops: BenchDrops { from: Some(Instant::now() + Duration::from_millis(1500)), ..BenchDrops::default() },
+            bench_keys_played: false,
+            time_key: Cell::new(None),
             looped: HashSet::new(),
             pip: false,
             pip_live: None,
@@ -4347,8 +4356,21 @@ impl App {
 
     fn waiting(&mut self, event_loop: &ActiveEventLoop) {
         self.count_bench_drops();
+        // `JOG_BENCH_KEYS`: played once, when the measuring begins, as a
+        // scripted run plays its keys: the pointer moved, say, for what it
+        // brings up over the video.
+        if self.bench_quit.is_some() && self.bench_drops.from.is_some_and(|from| Instant::now() >= from) && !std::mem::replace(&mut self.bench_keys_played, true) {
+            if let Ok(keys) = std::env::var("JOG_BENCH_KEYS") {
+                self.play_keys(&keys, event_loop);
+            }
+        }
         if self.bench_quit.is_some_and(|at| Instant::now() >= at) {
             self.say_bench_drops();
+            // `JOG_BENCH_SHOT=FILE`: the window as the player shows it, with
+            // what is drawn over it, for checking a run that no one watched.
+            if let (Ok(file), Some(player)) = (std::env::var("JOG_BENCH_SHOT"), &self.player) {
+                player.command(&[b"screenshot-to-file", file.as_bytes(), b"window"]);
+            }
             self.bench_quit = None;
             return self.leave(event_loop);
         }
