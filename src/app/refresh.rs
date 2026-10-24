@@ -17,6 +17,7 @@ impl App {
             let listing = files::Listing {
                 recursive: self.options.listing.recursive,
                 filelist: self.options.listing.filelist.clone(),
+                only: self.options.listing.only,
                 ..files::Listing::default()
             };
             std::thread::spawn(move || {

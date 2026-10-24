@@ -60,6 +60,22 @@ pub fn is_heif(path: &Path) -> bool {
     has_ext(path, HEIF_EXTS)
 }
 
+/// Only pictures, or only videos: what `--images` and `--videos` ask for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Only {
+    Pictures,
+    Videos,
+}
+
+/// Whether a file is of the kind asked for, if one was.
+fn of_kind(path: &Path, only: Option<Only>) -> bool {
+    match only {
+        None => true,
+        Some(Only::Videos) => is_video(path),
+        Some(Only::Pictures) => !is_video(path),
+    }
+}
+
 fn is_supported(path: &Path) -> bool {
     has_ext(path, RASTER_EXTS) || needs_ffmpeg(path) || is_heif(path) || is_jxl(path) || is_raw(path) || is_video(path)
 }
@@ -89,6 +105,8 @@ pub struct Listing {
     pub randomize: bool,
     pub start_at: Option<PathBuf>,
     pub filelist: Option<PathBuf>,
+    /// Only pictures, or only videos, listed at all.
+    pub only: Option<Only>,
 }
 
 pub struct Playlist {
@@ -112,17 +130,19 @@ fn gather(args: &[PathBuf], listing: &Listing, report: bool) -> Playlist {
 
     if let Some(list) = &listing.filelist {
         match std::fs::read_to_string(list) {
-            Ok(text) => files.extend(text.lines().filter(|l| !l.is_empty()).map(PathBuf::from)),
+            Ok(text) => files.extend(text.lines().filter(|l| !l.is_empty()).map(PathBuf::from).filter(|path| of_kind(path, listing.only))),
             Err(error) => eprintln!("jog: cannot read file list {}: {error}", list.display()),
         }
     }
 
     match args {
-        [] if listing.filelist.is_none() => list_dir(Path::new("."), listing.recursive, &mut files),
+        [] if listing.filelist.is_none() => list_dir(Path::new("."), listing.recursive, listing.only, &mut files),
         _ => {
             for arg in args {
                 if arg.is_dir() {
-                    list_dir(arg, listing.recursive, &mut files);
+                    list_dir(arg, listing.recursive, listing.only, &mut files);
+                } else if arg.exists() && !of_kind(arg, listing.only) {
+                    // Named, but not of the kind asked for.
                 } else if arg.exists() {
                     files.push(arg.clone());
                 } else if report {
@@ -154,7 +174,7 @@ fn gather(args: &[PathBuf], listing: &Listing, report: bool) -> Playlist {
 /// The files the command line names as they are now, in listing order: for
 /// finding out what has appeared since `collect` was called.
 pub fn relist(args: &[PathBuf], listing: &Listing) -> Vec<PathBuf> {
-    let plain = Listing { recursive: listing.recursive, filelist: listing.filelist.clone(), ..Listing::default() };
+    let plain = Listing { recursive: listing.recursive, filelist: listing.filelist.clone(), only: listing.only, ..Listing::default() };
     gather(args, &plain, false).files
 }
 
@@ -258,7 +278,7 @@ pub fn scan(args: &[PathBuf], listing: &Listing) -> std::sync::mpsc::Receiver<Ve
     use std::sync::{mpsc, Arc, Condvar, Mutex};
     let (sender, receiver) = mpsc::channel();
     let sort = listing.sort.filter(|_| !listing.randomize);
-    let (recursive, reverse) = (listing.recursive, listing.reverse);
+    let (recursive, reverse, only) = (listing.recursive, listing.reverse, listing.only);
     // By time, the folders changed latest go first, or for the oldest, last.
     let soon = move |dir: &Path| -> u64 {
         match sort {
@@ -275,7 +295,7 @@ pub fn scan(args: &[PathBuf], listing: &Listing) -> std::sync::mpsc::Receiver<Ve
     let mut heap = BinaryHeap::new();
     if let Some(list) = &listing.filelist {
         match std::fs::read_to_string(list) {
-            Ok(text) => named.extend(text.lines().filter(|l| !l.is_empty()).enumerate().map(|(at, line)| (PathBuf::from(line), vec![0, at as u32]))),
+            Ok(text) => named.extend(text.lines().filter(|l| !l.is_empty()).enumerate().map(|(at, line)| (PathBuf::from(line), vec![0, at as u32])).filter(|(path, _)| of_kind(path, listing.only))),
             Err(error) => eprintln!("jog: cannot read file list {}: {error}", list.display()),
         }
     }
@@ -284,6 +304,8 @@ pub fn scan(args: &[PathBuf], listing: &Listing) -> std::sync::mpsc::Receiver<Ve
     for (at, arg) in args.iter().enumerate() {
         if arg.is_dir() {
             heap.push(Waiting { dir: arg.clone(), rank: vec![at as u32 + 1], soon: soon(arg) });
+        } else if arg.exists() && !of_kind(arg, listing.only) {
+            // Named, but not of the kind asked for.
         } else if arg.exists() {
             named.push((arg.clone(), vec![at as u32 + 1]));
         } else {
@@ -322,7 +344,7 @@ pub fn scan(args: &[PathBuf], listing: &Listing) -> std::sync::mpsc::Receiver<Ve
             if let Some(delay) = delay {
                 std::thread::sleep(delay);
             }
-            let (files, subdirs) = read_folder(&job.dir, recursive, sort);
+            let (files, subdirs) = read_folder(&job.dir, recursive, sort, only);
             let found: Vec<Found> = files
                 .into_iter()
                 .enumerate()
@@ -397,7 +419,7 @@ pub fn first_found(args: &[PathBuf], listing: &Listing) -> (Playlist, Option<Sca
 
 /// The pictures and videos of one folder in natural order, each with its
 /// time or size if `sort` is by that, and its subfolders in natural order.
-fn read_folder(dir: &Path, recursive: bool, sort: Option<Sort>) -> (Vec<(PathBuf, u64)>, Vec<PathBuf>) {
+fn read_folder(dir: &Path, recursive: bool, sort: Option<Sort>, only: Option<Only>) -> (Vec<(PathBuf, u64)>, Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         eprintln!("jog: cannot read directory {}", dir.display());
         return (Vec::new(), Vec::new());
@@ -410,7 +432,7 @@ fn read_folder(dir: &Path, recursive: bool, sort: Option<Sort>) -> (Vec<(PathBuf
         let is_dir = if linked { path.is_dir() } else { kind.is_some_and(|kind| kind.is_dir()) };
         if recursive && is_dir {
             subdirs.push(path);
-        } else if is_supported(&path) {
+        } else if is_supported(&path) && of_kind(&path, only) {
             // The listing's own record where it has one, which on a NAS
             // saves a trip; through a link, the file it leads to.
             let key = sort_key(sort, || if linked { std::fs::metadata(&path).ok() } else { entry.metadata().ok() });
@@ -423,7 +445,7 @@ fn read_folder(dir: &Path, recursive: bool, sort: Option<Sort>) -> (Vec<(PathBuf
 }
 
 /// Appends the images in `dir` in natural order, subdirectories last.
-fn list_dir(dir: &Path, recursive: bool, files: &mut Vec<PathBuf>) {
+fn list_dir(dir: &Path, recursive: bool, only: Option<Only>, files: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         eprintln!("jog: cannot read directory {}", dir.display());
         return;
@@ -441,7 +463,7 @@ fn list_dir(dir: &Path, recursive: bool, files: &mut Vec<PathBuf>) {
         };
         if recursive && is_dir {
             subdirs.push(path);
-        } else if is_supported(&path) {
+        } else if is_supported(&path) && of_kind(&path, only) {
             images.push(path);
         }
     }
@@ -449,7 +471,7 @@ fn list_dir(dir: &Path, recursive: bool, files: &mut Vec<PathBuf>) {
     subdirs.sort_by(|a, b| natural_cmp(&name_of(a), &name_of(b)));
     files.extend(images);
     for subdir in subdirs {
-        list_dir(&subdir, recursive, files);
+        list_dir(&subdir, recursive, only, files);
     }
 }
 
