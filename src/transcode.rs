@@ -600,7 +600,14 @@ pub struct Estimate {
 /// Encodes `seconds` (or fewer) from the middle of `from`..`to` of the
 /// video at `path` as the whole would be, to a file thrown away after,
 /// to say how large the whole will be and how long it will take.
-pub fn trial(path: &Path, (from, to): (f64, f64), target: &Target, settings: &VideoSettings, knobs: &Knobs, transform: Transform, seconds: f64) -> Result<Estimate, String> {
+pub fn trial(path: &Path, span: (f64, f64), target: &Target, settings: &VideoSettings, knobs: &Knobs, transform: Transform, seconds: f64) -> Result<Estimate, String> {
+    let (estimate, output, _) = encode_trial(path, span, target, settings, knobs, transform, seconds)?;
+    let _ = std::fs::remove_file(&output);
+    Ok(estimate)
+}
+
+/// The trial encoded and kept, where it is, and from when in the video.
+fn encode_trial(path: &Path, (from, to): (f64, f64), target: &Target, settings: &VideoSettings, knobs: &Knobs, transform: Transform, seconds: f64) -> Result<(Estimate, PathBuf, (f64, f64)), String> {
     if let Some(problem) = target.problem(settings) {
         return Err(problem);
     }
@@ -617,8 +624,69 @@ pub fn trial(path: &Path, (from, to): (f64, f64), target: &Target, settings: &Vi
     let began = std::time::Instant::now();
     run(path, &["-ss".to_string(), format!("{start:.3}")], &args, target.container.muxer(), &output, length, |_| {})?;
     let bytes = size(&output) as f64;
+    Ok((Estimate { bytes_per_second: bytes / length, pace: began.elapsed().as_secs_f64() / length }, output, (start, length)))
+}
+
+/// A frame of the video as converted, and the same frame as it is, for
+/// telling what converting loses; with what the trial said of size and
+/// time.
+pub struct Compared {
+    pub estimate: Estimate,
+    pub original: image::RgbImage,
+    pub converted: image::RgbImage,
+    /// Where in the video the frame is, in seconds.
+    pub at: f64,
+}
+
+/// Encodes a few seconds as `trial` does, keeping them, and takes the
+/// frame in their middle from both it and the video: the video's turned as
+/// it is shown and, HDR, taken down to SDR as the trial's is, or both so
+/// when the trial keeps HDR; so that what differs is what the encoding did.
+pub fn compare(path: &Path, span: (f64, f64), target: &Target, settings: &VideoSettings, knobs: &Knobs, transform: Transform, seconds: f64) -> Result<Compared, String> {
+    let (estimate, output, (start, length)) = encode_trial(path, span, target, settings, knobs, transform, seconds)?;
+    let probe = probe(path);
+    let sdr = (knobs.to_sdr || target.codec == Codec::H264) && probe.hdr;
+    let middle = length / 2.0;
+    let shown = |turn: Option<String>, tone: bool| {
+        let mut filters: Vec<String> = turn.into_iter().collect();
+        if tone {
+            filters.push(tone_map(&probe).trim_end_matches(',').to_string());
+        }
+        filters.retain(|filter| !filter.is_empty());
+        filters.join(",")
+    };
+    let original = frame_at(path, start + middle, &shown(turn_filter(transform), probe.hdr));
+    // The trial is turned already; HDR still if it kept it.
+    let converted = frame_at(&output, middle, &shown(None, probe.hdr && !sdr));
     let _ = std::fs::remove_file(&output);
-    Ok(Estimate { bytes_per_second: bytes / length, pace: began.elapsed().as_secs_f64() / length })
+    Ok(Compared { estimate, original: original?, converted: converted?, at: start + middle })
+}
+
+/// The frame of the video at `path` at `at` seconds, through `filters`.
+fn frame_at(path: &Path, at: f64, filters: &str) -> Result<image::RgbImage, String> {
+    let mut command = Command::new("ffmpeg");
+    command.args(["-hide_banner", "-nostdin", "-loglevel", "error", "-ss", &format!("{at:.3}"), "-i"]).arg(path).args(["-frames:v", "1"]);
+    if !filters.is_empty() {
+        command.args(["-vf", filters]);
+    }
+    let output = command.args(["-f", "image2pipe", "-c:v", "png", "-"]).stdin(Stdio::null()).output().map_err(|error| error.to_string())?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return Err(String::from_utf8_lossy(&output.stderr).lines().last().unwrap_or("no frame").to_string());
+    }
+    image::load_from_memory_with_format(&output.stdout, image::ImageFormat::Png).map(|picture| picture.to_rgb8()).map_err(|error| error.to_string())
+}
+
+/// What a video is, as the Convert window says it: how long, and whether
+/// HDR and with sound.
+pub struct VideoFacts {
+    pub seconds: f64,
+    pub hdr: bool,
+    pub has_audio: bool,
+}
+
+pub fn video_facts(path: &Path) -> VideoFacts {
+    let probe = probe(path);
+    VideoFacts { seconds: probe.seconds, hdr: probe.hdr, has_audio: probe.has_audio }
 }
 
 /// The files ffmpeg is writing now, and the process group of the ffmpeg

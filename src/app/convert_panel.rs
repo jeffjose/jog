@@ -254,7 +254,11 @@ impl App {
         let id = self.list[self.focus()];
         let path = self.files[id].clone();
         if files::is_video(&path) {
-            return self.toast("Videos · right-click › Convert");
+            // K again closes it.
+            if self.video_panel.take().is_some() {
+                return self.redraw();
+            }
+            return self.open_video_convert(id);
         }
         let (jobs, inbox) = mpsc::channel::<(u64, Format, Settings)>();
         let proxy = self.proxy.clone();

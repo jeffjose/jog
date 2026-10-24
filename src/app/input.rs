@@ -52,6 +52,9 @@ impl App {
         if self.convert_panel.is_some() {
             return self.panel_key(key, event_loop);
         }
+        if self.video_panel.is_some() {
+            return self.video_panel_key(key);
+        }
         if self.compare.is_some() {
             return self.compare_key(key);
         }
@@ -163,7 +166,7 @@ impl App {
         }
         // Over the Convert panel the pointer moves the divider and lights
         // up what it is on; nothing behind the panel sees it.
-        if self.convert_panel.is_some() || self.compare.is_some() {
+        if self.convert_panel.is_some() || self.video_panel.is_some() || self.compare.is_some() {
             return self.redraw();
         }
         // The scene under the pointer is picked out, and plays.
@@ -475,6 +478,12 @@ impl App {
             }
             return;
         }
+        if self.video_panel.is_some() {
+            if button == MouseButton::Left && pressed {
+                self.video_panel_click(x, y);
+            }
+            return;
+        }
         if self.compare.is_some() {
             if button == MouseButton::Left && pressed {
                 self.compare_click(x, y);
@@ -737,6 +746,9 @@ impl App {
         }
         if self.convert_panel.is_some() {
             return self.panel_wheel(lines);
+        }
+        if self.video_panel.is_some() {
+            return;
         }
         if self.compare.is_some() {
             return self.compare_wheel(lines);

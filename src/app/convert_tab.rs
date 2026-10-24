@@ -31,20 +31,20 @@ pub(super) enum Knob {
 /// What a trial was of: the same again is the same answer.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Trial {
-    id: usize,
-    target: Target,
-    knobs: Knobs,
-    span: Option<(f64, f64)>,
+    pub(super) id: usize,
+    pub(super) target: Target,
+    pub(super) knobs: Knobs,
+    pub(super) span: Option<(f64, f64)>,
 }
 
 /// The tab's choices, kept from video to video as HandBrake keeps them.
 pub struct VideoConvert {
-    target: Target,
-    knobs: Knobs,
+    pub(super) target: Target,
+    pub(super) knobs: Knobs,
     /// The whole video even when a section is marked.
-    whole: bool,
+    pub(super) whole: bool,
     /// The trial asked for last, and its answer once it has one.
-    trial: Option<(Trial, Option<Result<Estimate, String>>)>,
+    pub(super) trial: Option<(Trial, Option<Result<Estimate, String>>)>,
 }
 
 impl Default for VideoConvert {
@@ -54,7 +54,7 @@ impl Default for VideoConvert {
 }
 
 /// Heights worth offering, as their common names have them.
-const HEIGHTS: [u32; 4] = [2160, 1440, 1080, 720];
+pub(super) const HEIGHTS: [u32; 4] = [2160, 1440, 1080, 720];
 
 /// A video's facts as the tab needs them, from its inspection.
 struct Source {
@@ -78,7 +78,7 @@ fn source(found: &Inspection) -> Source {
 }
 
 /// About how long, as people say it.
-fn about(seconds: f64) -> String {
+pub(super) fn about(seconds: f64) -> String {
     match seconds {
         s if s < 90.0 => format!("about {:.0} s", s.max(1.0)),
         s if s < 5400.0 => format!("about {:.0} min", s / 60.0),
@@ -88,7 +88,7 @@ fn about(seconds: f64) -> String {
 
 impl App {
     /// The span to convert: the section, when one is marked and wanted.
-    fn convert_span(&self, id: usize) -> Option<(f64, f64)> {
+    pub(super) fn convert_span(&self, id: usize) -> Option<(f64, f64)> {
         if self.video_convert.whole {
             return None;
         }
@@ -97,7 +97,7 @@ impl App {
 
     /// What is converted, as the tab's choices say: H.264 has 8 bits, and
     /// HDR in 8 bits is banded and gray, so it always goes to SDR.
-    fn convert_knobs(&self) -> Knobs {
+    pub(super) fn convert_knobs(&self) -> Knobs {
         let mut knobs = self.video_convert.knobs;
         knobs.to_sdr |= self.video_convert.target.codec == Codec::H264;
         knobs
@@ -161,6 +161,7 @@ impl App {
     }
 
     pub(super) fn convert_tried(&mut self, trial: Trial, result: Result<Estimate, String>) {
+        self.video_panel_tried(trial, &result);
         if let Some((asked, answer)) = &mut self.video_convert.trial {
             if *asked == trial {
                 *answer = Some(result);
@@ -169,7 +170,7 @@ impl App {
         }
     }
 
-    fn start_convert(&mut self, id: usize) {
+    pub(super) fn start_convert(&mut self, id: usize) {
         let (target, knobs) = (self.video_convert.target, self.convert_knobs());
         // A section is saved from the video playing, which is this one.
         let playing = self.video.as_ref().is_some_and(|video| video.id == id);

@@ -71,6 +71,7 @@ mod palette;
 mod refresh;
 mod scanning;
 mod video_layer;
+mod video_convert;
 mod scenes_strip;
 mod scripted;
 mod inspect;
@@ -260,6 +261,10 @@ pub enum Event {
     /// What a few seconds of a video encoded say of the whole, for
     /// Inspect's Convert tab.
     VideoTrial(convert_tab::Trial, Result<crate::transcode::Estimate, String>),
+    /// What the Convert window for a video needs to know of it.
+    VideoFacts(usize, crate::transcode::VideoFacts),
+    /// A frame of a video converted, and the same frame as it is.
+    VideoCompared(convert_tab::Trial, Result<Arc<crate::transcode::Compared>, String>),
     /// A frame for a cell of the Sections tab.
     EntryFrame(scenes::Found),
     /// A signal from one of the two players that take turns playing: the
@@ -1393,6 +1398,8 @@ pub struct App {
     triage_buttons: RefCell<Vec<(Command, [i32; 4])>>,
     /// The Convert panel, when it is up.
     convert_panel: Option<ConvertPanel>,
+    /// The Convert window for a video.
+    video_panel: Option<video_convert::VideoPanel>,
     /// The picker of a video's tracks (Ctrl+J), and the tracks and timing
     /// kept for each video, read once.
     track_picker: Option<tracks::TrackPicker>,
@@ -2024,6 +2031,7 @@ impl App {
             verdicts: RefCell::new(HashMap::new()),
             triage_buttons: RefCell::new(Vec::new()),
             convert_panel: None,
+            video_panel: None,
             track_picker: None,
             inspector: None,
             video_margins: Cell::new((0.0, 0.0, 0.0)),
@@ -4160,6 +4168,8 @@ impl App {
             // With a Cancel to click, for as long as it goes on.
             Event::VideoProgress(words) => self.toast_with(words, vec![("Cancel".into(), ToastLink::Cancel)]),
             Event::VideoTrial(trial, result) => self.convert_tried(trial, result),
+            Event::VideoFacts(id, facts) => self.video_facts(id, facts),
+            Event::VideoCompared(trial, result) => self.video_compared(trial, result),
             Event::EntryFrame(found) => self.entry_frame(found),
             Event::Video(which, signal) if which == self.active => {
                 self.video_signal(signal);

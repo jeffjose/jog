@@ -726,7 +726,7 @@ impl App {
         let nothing_to_write = blocks.iter().all(|lines| lines.is_empty()) && labels.is_empty() && top_left.is_empty() && debug.is_empty();
         // In Inspect's Files tab, it is drawn there instead.
         let panel = if viewing { self.list_panel().filter(|panel| !panel.embedded) } else { None };
-        let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some() || self.compare.is_some() || self.track_picker.is_some() || self.inspector.is_some() || self.track_editor.is_some() || self.editor.is_some();
+        let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some() || self.video_panel.is_some() || self.compare.is_some() || self.track_picker.is_some() || self.inspector.is_some() || self.track_editor.is_some() || self.editor.is_some();
         // The filmstrip has words of its own: the lengths of its videos.
         let boxes = boxes || self.palette.is_some() || strip.is_some() || scene_strip.is_some() || self.overview.is_some() || self.triage_on;
         if nothing_to_write && !boxes && !self.help {
@@ -893,7 +893,7 @@ impl App {
         // A menu or a box comes up over a moment: what was there is kept
         // and laid back over it, less and less. It is well on its way from
         // the first frame, so that nothing seems to wait.
-        let boxed = self.menu.is_some() || self.prompt.is_some() || self.palette.is_some() || self.confirm.is_some() || self.help || self.convert_panel.is_some();
+        let boxed = self.menu.is_some() || self.prompt.is_some() || self.palette.is_some() || self.confirm.is_some() || self.help || self.convert_panel.is_some() || self.video_panel.is_some();
         let box_level = self.glide(&self.box_fade, if boxed { 1.0 } else { 0.0 }, EASE);
         let mut behind = std::mem::take(&mut self.fade_buf);
         let fading = boxed && box_level < 0.99;
@@ -905,6 +905,9 @@ impl App {
         }
         if self.convert_panel.is_some() {
             self.draw_convert_panel(canvas, &mut text, px);
+        }
+        if self.video_panel.is_some() {
+            self.draw_video_panel(canvas, &mut text, px);
         }
         if self.compare.is_some() {
             self.draw_compare(canvas, &mut text, px);

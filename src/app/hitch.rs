@@ -386,6 +386,7 @@ impl App {
             (self.track_picker.is_some(), "tracks"),
             (self.menu.is_some(), "menu"),
             (self.convert_panel.is_some(), "convert"),
+            (self.video_panel.is_some(), "video convert"),
         ]
         .into_iter()
         .filter_map(|(up, name)| up.then_some(name))

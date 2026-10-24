@@ -162,6 +162,7 @@ impl App {
     fn on_dialog_button(&self, x: i32, y: i32) -> bool {
         let on = |[left, top, w, h]: [i32; 4]| (left..left + w).contains(&x) && (top..top + h).contains(&y);
         self.convert_panel.as_ref().is_some_and(|panel| panel.hits().iter().any(|place| on(*place)))
+            || self.video_panel.as_ref().is_some_and(|panel| panel.hits().iter().any(|place| on(*place)))
             || self.track_editor.as_ref().is_some_and(|editor| editor.hits().iter().any(|place| on(*place)))
     }
 

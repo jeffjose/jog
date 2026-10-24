@@ -666,9 +666,8 @@ pub const MENU: &[Option<MenuItem>] = &[
     item("Go to workspace…", "@", Command::WorkspaceList),
     image_item("Edit", "e", Command::Edit),
     // A window of its own for a picture; the formats, for a video.
-    image_item("Convert…", "K", Command::ConvertPanel),
+    item("Convert…", "K", Command::ConvertPanel),
     submenu("Convert to", CONVERT_PICTURE, Applies::Images),
-    submenu("Convert", CONVERT_VIDEO, Applies::Videos),
     item("Run a command on it…", "!", Command::Shell),
     item("Repeat last command", ".", Command::RepeatShell),
     submenu("Triage", TRIAGE, Applies::Always),
@@ -699,16 +698,6 @@ const CONVERT_PICTURE: &[Option<MenuItem>] = &[
     image_item("JPEG", "", Command::Convert(Format::Jpeg)),
     image_item("PNG", "", Command::Convert(Format::Png)),
     image_item("WebP", "", Command::Convert(Format::WebP)),
-];
-
-/// A video converted whole, as one of these; Cancel stops it.
-const CONVERT_VIDEO: &[Option<MenuItem>] = &[
-    video_item("MP4  ·  H.264", "", Command::ConvertVideo(Target::new(Codec::H264, Container::Mp4))),
-    video_item("MP4  ·  HEVC", "", Command::ConvertVideo(Target::new(Codec::Hevc, Container::Mp4))),
-    video_item("MKV  ·  AV1", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::Mkv))),
-    video_item("WebM  ·  AV1", "", Command::ConvertVideo(Target::new(Codec::Av1, Container::WebM))),
-    None,
-    item("Cancel the encode", "", Command::CancelEncode),
 ];
 
 /// A stretch of a video marked between A and B: kept, saved, named.
@@ -913,9 +902,8 @@ pub const GRID_MENU: &[Option<MenuItem>] = &[
     item("Copy to…", "", Command::CopyToAsk),
     item("Move to…", "", Command::MoveToAsk),
     item("Rename", "F2", Command::Rename),
-    image_item("Convert…", "K", Command::ConvertPanel),
+    item("Convert…", "K", Command::ConvertPanel),
     submenu("Convert to", CONVERT_PICTURE, Applies::Images),
-    submenu("Convert", CONVERT_VIDEO, Applies::Videos),
     None,
     item("Copy file name", "c", Command::CopyName),
     item("Copy full path", "C", Command::CopyPath),
@@ -952,9 +940,8 @@ pub const LIST_MENU: &[Option<MenuItem>] = &[
     item("Copy to…", "", Command::CopyToAsk),
     item("Move to…", "", Command::MoveToAsk),
     item("Rename", "F2", Command::Rename),
-    image_item("Convert…", "K", Command::ConvertPanel),
+    item("Convert…", "K", Command::ConvertPanel),
     submenu("Convert to", CONVERT_PICTURE, Applies::Images),
-    submenu("Convert", CONVERT_VIDEO, Applies::Videos),
     None,
     item("Copy file name", "c", Command::CopyName),
     item("Copy full path", "C", Command::CopyPath),
@@ -1051,9 +1038,8 @@ pub const MARK_MENU: &[Option<MenuItem>] = &[
     item("Copy for the shell", "Y", Command::CopyShell),
     item("Save list to a file", "L", Command::SaveFilelist),
     None,
-    image_item("Convert…", "K", Command::ConvertPanel),
+    item("Convert…", "K", Command::ConvertPanel),
     submenu("Convert to", CONVERT_PICTURE, Applies::Images),
-    submenu("Convert", CONVERT_VIDEO, Applies::Videos),
     image_item("Compare the two", "", Command::Compare),
     None,
     item("Move to trash", "Ctrl+Del", Command::Trash),
@@ -1202,7 +1188,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("c  C", "Copy name / full path"),
                 ("Y", "Copy for the shell: one line, a folder's files as /dir/img-{1,5}.jpg"),
                 ("F2", "Rename, or move: a path such as /tmp/a.png"),
-                ("K", "Convert: JPEG XL, AVIF, JPEG, PNG, WebP, settings tried on the picture first"),
+                ("K", "Convert, pictures or videos: sizes first, a frame to compare"),
                 ("e", "Edit: draw, write, emoji, blur, erase, crop, copy text, redact · Ctrl+S over it, Ctrl+Shift+S a copy"),
                 ("u", "Undo copy, move, rename or an edit saved over"),
                 ("Delete", "Remove from the list"),
