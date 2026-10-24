@@ -137,6 +137,9 @@ const WATCH_EVERY: Duration = Duration::from_secs(1);
 const SPEEDS: [f64; 9] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
 /// How long after a seek the player's reported position cannot be trusted.
 const SEEK_SETTLE: Duration = Duration::from_millis(500);
+/// How long the seek bar may stand where a keyframe seek was aimed, ahead
+/// of playback, before it follows playback again: keyframes far apart.
+const AIM_GIVEN_UP: Duration = Duration::from_secs(8);
 /// How close to its length, in seconds, a video counts as at its end.
 const VIDEO_END: f64 = 0.25;
 /// How far back past its start, in seconds, a seek has to aim to leave a
@@ -483,6 +486,9 @@ struct Video {
     started: Instant,
     /// When the last seek was asked for and the time it was aiming at.
     seeking: Option<(Instant, f64)>,
+    /// A seek to a keyframe and the time it was aimed at: the seek bar
+    /// stands there, not at the keyframe before, until playback gets there.
+    aimed: Option<(Instant, f64)>,
     /// How long the player took to show its first frame.
     start_took: Option<Duration>,
     /// When the oldest seek not yet landed was asked for, and how long the

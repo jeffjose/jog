@@ -227,8 +227,10 @@ impl App {
         let how: &[u8] = if exact { b"absolute+exact" } else { b"absolute+keyframes" };
         player.command_later(&[b"seek", target.to_string().as_bytes(), how]);
         if let Some(video) = &mut self.video {
-            // Where it lands is only known beforehand when that is exact.
+            // Where it lands is only known beforehand when that is exact;
+            // to a keyframe, the bar stands where it was aimed at meanwhile.
             video.seeking = exact.then(|| (Instant::now(), target));
+            video.aimed = (!exact).then(|| (Instant::now(), target));
             video.seek_asked.get_or_insert_with(Instant::now);
             video.to_end = (target >= length - VIDEO_END).then(Instant::now);
         }
@@ -380,7 +382,7 @@ impl App {
             // Until the player reports for itself, this is where it is.
             // One counted from the end has to wait for the length.
             let seeking = from.filter(|seconds| *seconds >= 0.0).map(|seconds| (started, seconds));
-            self.video = Some(Video { id, showing: false, started, seeking, start_took: None, seek_asked: None, seek_took: None, held, tracks: None, track_words: None, shown_at: None, watched: false, to_end: None });
+            self.video = Some(Video { id, showing: false, started, seeking, aimed: None, start_took: None, seek_asked: None, seek_took: None, held, tracks: None, track_words: None, shown_at: None, watched: false, to_end: None });
             self.perf.video_lines = None;
             self.apply_video_view();
         }
@@ -621,10 +623,27 @@ impl App {
         if at_end && !by_hand && player.flag("eof-reached") == Some(true) {
             self.play_next();
         }
+        self.settle_aim();
         // At the end of a section looping, back to its start.
         self.relay_section();
         if let (Some(took), Some("video")) = (video_started, self.bench_scene()) {
             self.bench_note("video", "start to first frame", took);
+        }
+    }
+
+    /// A keyframe seek landed and played on to where it was aimed, or
+    /// never will (looped back, or long gone): the bar follows playback again.
+    fn settle_aim(&mut self) {
+        let (Some(player), Some(video)) = (&self.player, &mut self.video) else { return };
+        let Some((at, aim)) = video.aimed else { return };
+        if video.seek_asked.is_some() && at.elapsed() < AIM_GIVEN_UP {
+            return;
+        }
+        let now = player.number("time-pos").unwrap_or(aim);
+        // Paused short of it, the bar stays where it was put.
+        let playing = player.flag("pause") != Some(true);
+        if now >= aim - 0.02 || (playing && at.elapsed() > AIM_GIVEN_UP) {
+            video.aimed = None;
         }
     }
 
@@ -1012,20 +1031,22 @@ impl App {
                 // To the nearest keyframe, which the player can show at
                 // once, unless the very moment asked for is wanted: getting
                 // there means decoding every frame from the keyframe before.
-                let how: &[u8] = if self.precise { b"relative+exact" } else { b"relative+keyframes" };
+                let exact = self.precise;
+                let how: &[u8] = if exact { b"relative+exact" } else { b"relative+keyframes" };
                 player.command_later(&[b"seek", seconds.to_string().as_bytes(), how]);
                 // mpv has not moved yet when asked straight after a seek, so
                 // quick presses build on where the last one was heading.
-                let from = match video.seeking {
-                    Some((at, target)) if at.elapsed() < SEEK_SETTLE => target,
+                let from = match (video.seeking, video.aimed) {
+                    (Some((at, target)), _) | (None, Some((at, target))) if at.elapsed() < SEEK_SETTLE => target,
                     _ => player.number("time-pos").unwrap_or(0.0),
                 };
                 let length = player.number("duration").unwrap_or(0.0);
                 let target = (from + seconds).clamp(0.0, length);
                 // Where it lands is only known beforehand when that is
-                // exact: a keyframe may be seconds either side, and the
-                // seek bar is to show where the video is, not a guess.
-                video.seeking = self.precise.then(|| (Instant::now(), target));
+                // exact; to a keyframe, the bar stands where it was aimed
+                // at until playback gets there.
+                video.seeking = exact.then(|| (Instant::now(), target));
+                video.aimed = (!exact).then(|| (Instant::now(), target));
                 video.to_end = (target >= length - VIDEO_END).then(Instant::now);
                 video.seek_asked.get_or_insert_with(Instant::now);
             }
@@ -1098,7 +1119,15 @@ impl App {
         let position = match (self.back_shown(), video.seeking) {
             (Some((at, _)), _) => at,
             (None, Some((at, target))) if at.elapsed() < SEEK_SETTLE => target,
-            (None, _) => player.number("time-pos")?,
+            // To a keyframe before where it was aimed: there, not back at
+            // the keyframe, until playback catches up with it.
+            (None, _) => {
+                let now = player.number("time-pos")?;
+                match video.aimed {
+                    Some((_, aim)) if video.seek_asked.is_some() || now < aim => aim,
+                    _ => now,
+                }
+            }
         };
         Some((position.clamp(0.0, length), length))
     }
