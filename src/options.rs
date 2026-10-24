@@ -47,8 +47,8 @@ pub const TOPICS: &[(&str, &str, &str)] = &[
   -z, --random               shuffle the list (also --sort=random)
       --start-at FILE        start at this file
   -f, --filelist FILE        read paths from FILE, one per line
-      --videos               list only the videos
-      --images               list only the pictures (also --pictures)
+      --videos, --video      list only the videos
+      --images, --image      list only the pictures (also --pictures)
       --start HOW            what coming back to this folder from another
                              workspace does: resume (the usual), fresh or
                              random, which also shuffles it now
@@ -598,7 +598,7 @@ fn is_switch(name: &str) -> bool {
     let switches = [
         "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "random",
-        "newest", "oldest", "videos", "images", "pictures",
+        "newest", "oldest", "videos", "video", "images", "image", "pictures", "picture",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
         "debug", "verbose", "watch", "edit", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "hitches", "no-hitches", "hwdec", "no-hwdec", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
@@ -794,8 +794,8 @@ fn apply(
         // Short ways to say the orders most asked for.
         "newest" | "latest" => options.listing.sort = Some(Sort::Newest),
         "oldest" => options.listing.sort = Some(Sort::Oldest),
-        "videos" => options.listing.only = Some(Only::Videos),
-        "images" | "pictures" => options.listing.only = Some(Only::Pictures),
+        "videos" | "video" => options.listing.only = Some(Only::Videos),
+        "images" | "image" | "pictures" | "picture" => options.listing.only = Some(Only::Pictures),
         "random" => options.listing.randomize = true,
         "reverse" => options.listing.reverse = true,
         "start-at" => options.listing.start_at = Some(value()?.into()),
