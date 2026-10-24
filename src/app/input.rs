@@ -882,6 +882,12 @@ impl App {
         } else if let Some(command) = self.list_buttons().iter().find(|button| inside(button)).map(|button| button.command) {
             // One of the buttons at the head of the file list.
             self.execute(command, event_loop);
+        } else if let Some(pos) = self.list_more_at(x, y) {
+            // The chevron on the row under the pointer: its menu, as a
+            // right click on it brings up.
+            self.row_target = Some(pos);
+            self.open_menu(commands::LIST_MENU, None);
+            self.redraw();
         } else if let Some(pos) = self.list_loop_at(x, y) {
             // The loop before it has that video play again when it
             // ends, whatever the list's loop.

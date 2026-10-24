@@ -2028,6 +2028,17 @@ impl App {
         self.list_row_at(x, y).filter(|_| star)
     }
 
+    /// The list position whose menu chevron, shown on the row under the
+    /// pointer before its star (and a video's loop), is at a window position.
+    pub(super) fn list_more_at(&self, x: f64, y: f64) -> Option<usize> {
+        let panel = self.list_panel()?;
+        let room = panel.px as i32 * 2;
+        let pos = self.list_row_at(x, y)?;
+        let before = if files::is_video(&self.files[self.list[pos]]) { 2 } else { 1 };
+        let right = panel.width - room * before;
+        (right - room..right).contains(&(x as i32 - panel.left)).then_some(pos)
+    }
+
     /// The list position of the video whose loop, just before the star, is
     /// at a window position.
     pub(super) fn list_loop_at(&self, x: f64, y: f64) -> Option<usize> {
@@ -2200,6 +2211,22 @@ impl App {
                 text.draw(canvas, icon_left, line, px, color, icon);
             }
             let star_room = star_room + loop_room;
+            // On the row under the pointer, a chevron to its menu: what can
+            // be done with the file, without a right click.
+            let more_room = if hovered { px as i32 * 2 } else { 0 };
+            if hovered {
+                let half = (px as i32 / 4).max(3);
+                let cx = panel.width - star_room - more_room + (more_room - pad) / 2 + half / 2;
+                let cy = top + panel.row_height / 2 - half / 2;
+                let over = self.list_more_at(self.mouse.0, self.mouse.1) == Some(pos);
+                if over {
+                    canvas.round_fill(cx - half * 2, top + 2, half * 4, panel.row_height - 4, pad / 2, TEXT_COLOR, 40);
+                }
+                for row in 0..half {
+                    canvas.fill(cx - half + row, cy + row, (half - row) * 2, 1, if over { main } else { dim });
+                }
+            }
+            let star_room = star_room + more_room;
             // The video playing shows how far along it is: the time gone
             // by with its length, and a thin bar along the foot of its row.
             let along = self.video_time().filter(|_| current && self.video.as_ref().is_some_and(|video| video.id == id));
@@ -2752,12 +2779,19 @@ pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &
         + 2 * pad;
     let (title, hint) = ("Keyboard shortcuts", "Type to search  ·  Esc to close  ·  > in Ctrl+K lists every command");
     let head = row * 2;
-    let height = head + columns.iter().map(|c| c.2).max().unwrap_or(0) * row + row + 2 * pad;
+    let height = head + columns.iter().map(|c| c.2).max().unwrap_or(0) * row + row * 3 / 2 + 2 * pad;
+    // Too big for the window, however large: drawn smaller until it fits.
+    let room = (canvas.width - 2 * px as i32, canvas.height - 2 * px as i32);
+    if (width > room.0 || height > room.1) && px > 10 {
+        let fit = (f64::from(room.0) / f64::from(width)).min(f64::from(room.1) / f64::from(height));
+        let smaller = ((f64::from(px) * fit) as u32).clamp(10, px - 1);
+        return draw_help(canvas, text, smaller, search);
+    }
     let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
     panel(canvas, left, top, width, height, px as i32);
     text.draw(canvas, left + pad, top + pad, px * 5 / 4, TEXT_COLOR, title);
     let hint_width = text.width(hint, small);
-    text.draw(canvas, left + width - pad - hint_width, top + height - pad - row / 2, small, DIM_TEXT_COLOR, hint);
+    text.draw(canvas, left + width - pad - hint_width, top + height - pad - Text::line_height(small), small, DIM_TEXT_COLOR, hint);
     // The box what is typed goes in, at the right of the heading.
     let line = Text::line_height(px);
     let (box_w, box_h) = (px as i32 * 22, line + px as i32 * 2 / 3);
