@@ -140,6 +140,9 @@ const SEEK_SETTLE: Duration = Duration::from_millis(500);
 /// How long the seek bar may stand where a keyframe seek was aimed, ahead
 /// of playback, before it follows playback again: keyframes far apart.
 const AIM_GIVEN_UP: Duration = Duration::from_secs(8);
+/// How long playback is to have been at or past where a keyframe seek was
+/// aimed before the seek bar follows it again.
+const AIM_SETTLED: Duration = Duration::from_millis(150);
 /// How close to its length, in seconds, a video counts as at its end.
 const VIDEO_END: f64 = 0.25;
 /// How far back past its start, in seconds, a seek has to aim to leave a
@@ -489,6 +492,10 @@ struct Video {
     /// A seek to a keyframe and the time it was aimed at: the seek bar
     /// stands there, not at the keyframe before, until playback gets there.
     aimed: Option<(Instant, f64)>,
+    /// Since when playback has been at or past it, the seek landed: a
+    /// moment of that and the bar follows playback again. Straight after
+    /// a seek the player may still tell of where it was.
+    aim_reached: Option<Instant>,
     /// How long the player took to show its first frame.
     start_took: Option<Duration>,
     /// When the oldest seek not yet landed was asked for, and how long the
