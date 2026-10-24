@@ -49,6 +49,7 @@ mod compare_tab;
 mod glossary;
 use convert_panel::{ConvertPanel, PanelSource};
 mod section;
+mod bar_info;
 use section::{Edge, EntryFrames, Section, StripTab};
 mod back;
 mod hitch;
@@ -604,6 +605,9 @@ struct SeekBar {
     /// Where the bar's room begins: the window's left edge, or the edge
     /// of the file list when that is up, which the bar stands beside.
     left: i32,
+    /// How wide the title at its left may be: none in a window too narrow
+    /// for it, where the time alone stands there.
+    title_w: i32,
     /// The right edge of the window, and how many buttons stand at it.
     end: i32,
     buttons: i32,
@@ -1235,6 +1239,10 @@ pub struct App {
     hdr_headroom: f64,
     /// Where the choices of rendition in the info panel were drawn.
     info_buttons: Vec<Button>,
+    /// Where the seek bar's title, time and details were written, to be
+    /// copied by a click; and each video file's size, read once.
+    bar_hits: Vec<([i32; 4], Command)>,
+    file_bytes: HashMap<usize, u64>,
     /// The format of each image looked at, by its first bytes.
     formats: RefCell<HashMap<usize, Option<String>>>,
     scope_counts: scopes::Measured,
@@ -1959,6 +1967,8 @@ impl App {
             hdr_infos: HashMap::new(),
             hdr_headroom: 0.0,
             info_buttons: Vec::new(),
+            bar_hits: Vec::new(),
+            file_bytes: HashMap::new(),
             formats: RefCell::new(HashMap::new()),
             scope_counts: scopes::Measured::default(),
             scope_cost: Duration::ZERO,
@@ -3044,6 +3054,7 @@ impl App {
                 self.toast(format!("{count} unmarked"));
             }
             CopyName => self.copy_text(false),
+            CopyViewedFolder | CopyBarTitle | CopyTime | CopyDetail(_) | CopyDetails => self.copy_bar(command),
             Activity => self.toggle_activity(),
             CopyViewedName | CopyViewedPath | CopyViewedSize | CopyMessage(_) => {
                 let name = match command {

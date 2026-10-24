@@ -567,6 +567,8 @@ impl App {
         let mut buttons: Vec<(i32, i32, &str, u32)> = Vec::new();
         // What a button over a section does, said over it as a tooltip.
         let mut bar_tip: Option<(i32, i32, String)> = None;
+        // The title, time and details along the bar, written with the text.
+        let mut bar_info: Option<bar_info::BarInfo> = None;
         let mut subtitle_margin = SUBTITLE_MARGIN;
         let bar_wanted = viewing && (self.hover.is_some() || self.time_until.is_some());
         // It rises from the bottom edge and sinks back into it.
@@ -632,8 +634,26 @@ impl App {
             } else {
                 canvas.play_symbol(symbol_left, symbol_top, side, TEXT_COLOR);
             }
-            labels.push((bar.x - unit, bar.middle - line / 2, Ordering::Less, clock(position)));
-            labels.push((bar.x + bar.width + unit, bar.middle - line / 2, Ordering::Greater, clock(length)));
+            if bar.title_w > 0 {
+                // The title over the time at the left, the time left at the
+                // right, and what the file is over the track's right end.
+                let small_line = Text::line_height((px * 5 / 6).max(11));
+                let left = bar.control(2).0 + bar.control(2).2 + unit;
+                bar_info = Some(bar_info::BarInfo {
+                    left,
+                    top: bar.middle - (line + small_line) / 2,
+                    room: bar.title_w,
+                    title: self.bar_title(),
+                    time: format!("{} / {}", clock(position), clock(length)),
+                    right: bar.x + bar.width,
+                    details_top: bar.middle - unit - small_line,
+                    details: self.bar_details(),
+                });
+                labels.push((bar.x + bar.width + unit, bar.middle - line / 2, Ordering::Greater, format!("−{}", clock((length - position).max(0.0)))));
+            } else {
+                labels.push((bar.x - unit, bar.middle - line / 2, Ordering::Less, clock(position)));
+                labels.push((bar.x + bar.width + unit, bar.middle - line / 2, Ordering::Greater, clock(length)));
+            }
             for (which, command) in (0..).zip(self.bar_buttons()) {
                 let (left, top, side) = bar.button(which);
                 let (icon, on) = match command {
@@ -654,7 +674,8 @@ impl App {
             subtitle_margin = (height - (bar.middle - unit * 3)) * 720 / height.max(1);
             time_bottom = bar.middle - unit * 4;
 
-            if let Some(fraction) = self.hover.filter(|_| bar.on_track(self.mouse.0) && !on_tools) {
+            // Not over the section's buttons, nor over the bar's own words.
+            if let Some(fraction) = self.hover.filter(|_| bar.on_track(self.mouse.0) && !on_tools && self.bar_hit(self.mouse.0, self.mouse.1).is_none()) {
                 // A tick where the pointer is, the time there, and above
                 // that the frame from that part of the video.
                 let at = bar.x + (f64::from(bar.width) * fraction) as i32;
@@ -735,6 +756,7 @@ impl App {
         if nothing_to_write && !boxes && !self.help {
             // Nothing drawn means no debug overlay, and none of its buttons.
             self.debug_buttons.clear();
+            self.bar_hits.clear();
             return;
         }
         let mut text = self.text.take().unwrap_or_else(Text::load);
@@ -881,6 +903,10 @@ impl App {
                 Ordering::Greater => *anchor,
             };
             text.draw(canvas, left, *top, px, TEXT_COLOR, label);
+        }
+        match &bar_info {
+            Some(info) => self.draw_bar_info(canvas, &mut text, info, px),
+            None => self.bar_hits.clear(),
         }
         // A button's tooltip, as the others look: a box of its own, a
         // little shadow, standing clear above the buttons.

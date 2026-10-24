@@ -251,7 +251,11 @@ impl App {
         // Beside the file list when that is up, not under it.
         let left = self.list_panel().filter(|panel| !self.list_right && !panel.embedded).map_or(0, |panel| panel.width);
         let end = end - self.right_inset();
-        SeekBar { x: left + unit * 13, width: (end - left - unit * 13 - right).max(1), middle: base - unit * 2, unit, left, end, buttons }
+        // The title and the time at the left, where there is room for them
+        // and still a track long enough to seek along; else the time alone.
+        let title_w = if end - left > unit * 75 { unit * 15 } else { 0 };
+        let lead = if title_w > 0 { unit * 17 / 2 + title_w + unit } else { unit * 13 };
+        SeekBar { x: left + lead, width: (end - left - lead - right).max(1), middle: base - unit * 2, unit, left, title_w, end, buttons }
     }
 
     /// Tracks the pointer over the seek bar: shows it at full size, and the

@@ -171,6 +171,13 @@ pub enum Command {
     CopyViewedPath,
     /// Its dimensions, as 1920x1080: a click on them there.
     CopyViewedSize,
+    /// The folder of the file on view; and from the seek bar, its title,
+    /// the time, one of the details over the track, or all of them.
+    CopyViewedFolder,
+    CopyBarTitle,
+    CopyTime,
+    CopyDetail(u8),
+    CopyDetails,
     CopyPath,
     /// Copy the paths on one line for a shell, each folder's files folded
     /// together with braces.
@@ -654,6 +661,8 @@ pub fn command_icon(command: Command) -> &'static str {
         TravelBack => ARROW_LEFT,
         TravelForward => ARROW_RIGHT,
         CopyName | CopyViewedName | CopyViewedPath | CopyViewedSize | SaveFilelist => COPY,
+        CopyViewedFolder => FOLDERS,
+        CopyBarTitle | CopyTime | CopyDetail(_) | CopyDetails => COPY,
         CopyPath | CopyShell => CLIPBOARD,
         Reload => REFRESH,
         Remove => MINUS,
@@ -1030,6 +1039,17 @@ pub const SECTION_BAR_MENU: &[Option<MenuItem>] = &[
     video_item("Save GIF", "", Command::SaveSection(Clip::Gif)),
     video_item("Save WebP", "", Command::SaveSection(Clip::WebP)),
     video_item("Save AVIF", "", Command::SaveSection(Clip::Avif)),
+];
+
+/// The seek bar's title, time or details right-clicked: what of the file to copy.
+pub const BAR_INFO_MENU: &[Option<MenuItem>] = &[
+    video_item("Copy file name", "", Command::CopyViewedName),
+    video_item("Copy full path", "", Command::CopyViewedPath),
+    video_item("Copy folder", "", Command::CopyViewedFolder),
+    None,
+    video_item("Copy title", "", Command::CopyBarTitle),
+    video_item("Copy time", "", Command::CopyTime),
+    video_item("Copy all details", "", Command::CopyDetails),
 ];
 
 /// The seek bar right-clicked away from a section: at the time clicked.

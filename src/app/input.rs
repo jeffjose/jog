@@ -619,6 +619,9 @@ impl App {
                 let bar = self.seek_bar();
                 if let Some(tool) = self.section_tool_at(x, y) {
                     self.section_tool(tool);
+                } else if let Some(command) = self.bar_hit(x, y) {
+                    // The title, the time or a detail: copied.
+                    self.execute(command, event_loop);
                 } else if bar.on_control(0, x, y) {
                     self.step(false);
                 } else if bar.on_control(2, x, y) {
@@ -729,6 +732,11 @@ impl App {
             // done with it.
             (MouseButton::Right, true) if self.on_section(x, y) => {
                 self.open_menu(commands::SECTION_BAR_MENU, None);
+                self.redraw();
+            }
+            // On the bar's title, time or details: what of the file to copy.
+            (MouseButton::Right, true) if self.bar_hit(x, y).is_some() => {
+                self.open_menu(commands::BAR_INFO_MENU, None);
                 self.redraw();
             }
             // On another section, that one in use, and what can be done with it.
