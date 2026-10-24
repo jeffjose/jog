@@ -270,11 +270,17 @@ impl App {
         let hover = zone.contains(&y).then_some(fraction);
         if hover != self.hover {
             self.hover = hover;
-            if let Some(fraction) = hover {
+            if let Some(fraction) = hover.filter(|_| !self.bar_busy()) {
                 self.request_preview(fraction);
             }
             self.redraw();
         }
+    }
+
+    /// Whether something else is open over the bar, a menu, a box or a
+    /// window: the pointer is on that, and the frame under it is not shown.
+    pub(super) fn bar_busy(&self) -> bool {
+        self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || self.palette.is_some() || self.video_panel.is_some() || self.convert_panel.is_some() || self.compare.is_some()
     }
 
     pub(super) fn player_ready(&mut self, player: Result<Player, String>, event_loop: &ActiveEventLoop) {

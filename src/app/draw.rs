@@ -648,6 +648,9 @@ impl App {
                     right: bar.x + bar.width,
                     details_top: bar.middle - unit - small_line,
                     details: self.bar_details(),
+                    flags: flags.clone(),
+                    letters_top: bar.middle - thickness * 3 / 2 - line,
+                    tools: tools_span.map(|(left, right, _)| (left, right)),
                 });
                 labels.push((bar.x + bar.width + unit, bar.middle - line / 2, Ordering::Greater, format!("−{}", clock((length - position).max(0.0)))));
             } else {
@@ -674,8 +677,9 @@ impl App {
             subtitle_margin = (height - (bar.middle - unit * 3)) * 720 / height.max(1);
             time_bottom = bar.middle - unit * 4;
 
-            // Not over the section's buttons, nor over the bar's own words.
-            if let Some(fraction) = self.hover.filter(|_| bar.on_track(self.mouse.0) && !on_tools && self.bar_hit(self.mouse.0, self.mouse.1).is_none()) {
+            // Not over the section's buttons, nor over the bar's own words,
+            // nor while a menu or a window is open over it.
+            if let Some(fraction) = self.hover.filter(|_| bar.on_track(self.mouse.0) && !on_tools && !self.bar_busy() && self.bar_hit(self.mouse.0, self.mouse.1).is_none()) {
                 // A tick where the pointer is, the time there, and above
                 // that the frame from that part of the video.
                 let at = bar.x + (f64::from(bar.width) * fraction) as i32;

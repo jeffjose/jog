@@ -74,6 +74,12 @@ pub(super) struct BarInfo {
     pub right: i32,
     pub details_top: i32,
     pub details: Vec<String>,
+    /// Where the sections' flags stand across, the top of their letters,
+    /// and the span of a section's buttons when they are up: the details
+    /// go over a letter under them, and give way to the buttons.
+    pub flags: Vec<i32>,
+    pub letters_top: i32,
+    pub tools: Option<(i32, i32)>,
 }
 
 impl App {
@@ -156,13 +162,20 @@ impl App {
         let widths: Vec<i32> = info.details.iter().map(|detail| text.width(detail, small)).collect();
         let total = widths.iter().sum::<i32>() + gap_w * (widths.len() as i32 - 1).max(0);
         let mut x = info.right - total;
-        for (index, (detail, w)) in info.details.iter().zip(&widths).enumerate() {
+        let span = x - px as i32..info.right + px as i32;
+        let details_top = match info.flags.iter().any(|flag| span.contains(flag)) {
+            true => info.letters_top - Text::line_height(small),
+            false => info.details_top,
+        };
+        let under_tools = info.tools.is_some_and(|(left, right)| left < info.right && right > x);
+        let details = if under_tools { &[][..] } else { &info.details[..] };
+        for (index, (detail, w)) in details.iter().zip(&widths).enumerate() {
             if index > 0 {
-                text.draw(canvas, x, info.details_top, small, MENU_EDGE_COLOR, gap);
+                text.draw(canvas, x, details_top, small, MENU_EDGE_COLOR, gap);
                 x += gap_w;
             }
-            let place = [x, info.details_top, *w, Text::line_height(small)];
-            text.draw(canvas, x, info.details_top, small, if over(place) { TEXT_COLOR } else { DIM_TEXT_COLOR }, detail);
+            let place = [x, details_top, *w, Text::line_height(small)];
+            text.draw(canvas, x, details_top, small, if over(place) { TEXT_COLOR } else { DIM_TEXT_COLOR }, detail);
             hits.push((place, Command::CopyDetail(index as u8)));
             x += w;
         }
