@@ -4506,7 +4506,7 @@ impl App {
             self.redraw();
         }
         let held_until = held_until.filter(|at| *at > now);
-        let deadlines = [Some(self.session_due), flicker_due, held_until, self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due, self.back_due, self.hitches.due()];
+        let deadlines = [Some(self.session_due), flicker_due, held_until, self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due, self.back_due, self.hitches.due(), self.bench_quit, self.bench_keys.as_ref().map(|(_, at)| *at)];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -4623,13 +4623,14 @@ impl App {
         let expected = wall * if self.bench_drops.fps > 0.0 { self.bench_drops.fps } else { 60.0 };
         let [dec, vo] = self.bench_drops.drops;
         eprintln!(
-            "PLAYERSTATS dec_drop={dec:.0} vo_drop={vo:.0} expected={expected:.0} missed_pct={:.1} fps={:.1} gpu={} hwdec={} drawn_at={}x{}",
+            "PLAYERSTATS dec_drop={dec:.0} vo_drop={vo:.0} expected={expected:.0} missed_pct={:.1} fps={:.1} gpu={} hwdec={} drawn_at={}x{} paused={}",
             100.0 * (dec + vo) / expected.max(1.0),
             (expected - dec - vo) / wall.max(1e-9),
             crate::mpv::gpu_video(),
             self.player.as_ref().and_then(|player| player.text("hwdec-current")).unwrap_or_default(),
             self.player.as_ref().and_then(|player| player.number("osd-width")).unwrap_or(0.0),
-            self.player.as_ref().and_then(|player| player.number("osd-height")).unwrap_or(0.0)
+            self.player.as_ref().and_then(|player| player.number("osd-height")).unwrap_or(0.0),
+            self.player.as_ref().and_then(|player| player.flag("pause")).unwrap_or(false)
         );
     }
 }
