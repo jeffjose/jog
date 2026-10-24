@@ -600,7 +600,9 @@ impl App {
             }
             (MouseButton::Left, true) if self.hover.is_some() => {
                 let bar = self.seek_bar();
-                if bar.on_control(0, x, y) {
+                if let Some(tool) = self.section_tool_at(x, y) {
+                    self.section_tool(tool);
+                } else if bar.on_control(0, x, y) {
                     self.step(false);
                 } else if bar.on_control(2, x, y) {
                     self.step(true);
@@ -611,7 +613,9 @@ impl App {
                 } else if let Some(edge) = self.section_edge_at(&bar, x) {
                     // An end of the section is taken hold of, to move it.
                     self.drag = Some(Drag::Section(edge));
-                } else if bar.on_track(x) {
+                } else if bar.on_track(x) && y >= f64::from(bar.middle - bar.unit * 4) {
+                    // Not from as high up as the section's buttons: a click that
+                    // misses one of them is no seek.
                     // Click to jump there; keep the button down to scrub.
                     self.seek_to(self.hover.unwrap_or(0.0), self.precise);
                     self.drag = Some(Drag::Scrub);
@@ -695,6 +699,12 @@ impl App {
                     Some(Drag::Section(edge)) => self.drop_edge(edge),
                     _ => {}
                 }
+            }
+            // On the section on the seek bar, or its buttons: what can be
+            // done with it.
+            (MouseButton::Right, true) if self.on_section(x, y) => {
+                self.open_menu(commands::SECTION_BAR_MENU, None);
+                self.redraw();
             }
             // On a row of the file list, the menu is of that file.
             (MouseButton::Right, true) => match self.list_row_at(x, y) {

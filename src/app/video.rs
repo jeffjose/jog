@@ -256,7 +256,9 @@ impl App {
     pub(super) fn video_pointer(&mut self, x: f64, y: f64) {
         let bar = self.seek_bar();
         // From a little above the bar down to the edge it is lifted off.
-        let zone = f64::from(bar.middle - bar.unit * 4)..f64::from(bar.middle + bar.unit * 2);
+        // And up to the buttons over a section, when there is one.
+        let tools_top = self.section_tools(&bar).first().map_or(bar.middle - bar.unit * 4, |(_, place)| place[1] - bar.unit / 2);
+        let zone = f64::from((bar.middle - bar.unit * 4).min(tools_top))..f64::from(bar.middle + bar.unit * 2);
         let fraction = ((x - f64::from(bar.x)) / f64::from(bar.width)).clamp(0.0, 1.0);
         let hover = zone.contains(&y).then_some(fraction);
         if hover != self.hover {
@@ -399,7 +401,27 @@ impl App {
     /// most likely to be wanted next plays at once.
     pub(super) fn preload_video(&mut self) {
         let len = self.list.len();
-        if self.spare.is_none() || len < 2 || self.grid.is_some() || self.overview.is_some() {
+        if self.spare.is_none() || self.grid.is_some() || self.overview.is_some() {
+            return;
+        }
+        // A section looping: what is wanted next is its start, again and
+        // again, before any other file.
+        let playing = self.video.as_ref().map(|video| video.id);
+        if let (Some(id), Some((a, _))) = (playing, self.section().and_then(|section| section.looping())) {
+            let kept = self.kept_tracks(id);
+            let window = self.window_size();
+            let Some(spare) = self.spare.as_mut().filter(|spare| spare.id != Some(id) || (spare.from - a).abs() >= 0.01) else { return };
+            if let Some((aid, sid, sub_delay, audio_delay)) = &kept {
+                spare.player.choose_next(aid, sid, *sub_delay, *audio_delay);
+            }
+            spare.player.hold(&self.files[id], Some(a));
+            if window.0 > 0 && window.1 > 0 {
+                spare.player.draw_ahead(Some(window));
+            }
+            (spare.id, spare.from) = (Some(id), a);
+            return;
+        }
+        if len < 2 {
             return;
         }
         let next = self.list[if self.forward { (self.pos + 1) % len } else { (self.pos + len - 1) % len }];
@@ -580,6 +602,8 @@ impl App {
         if at_end && !by_hand && player.flag("eof-reached") == Some(true) {
             self.play_next();
         }
+        // At the end of a section looping, back to its start.
+        self.relay_section();
         if let (Some(took), Some("video")) = (video_started, self.bench_scene()) {
             self.bench_note("video", "start to first frame", took);
         }
@@ -949,6 +973,11 @@ impl App {
             VideoAction::Frame(forward) if self.back_step(forward) => return,
             VideoAction::Frame(_) | VideoAction::Volume(_) => {}
             _ => self.leave_back(),
+        }
+        // Stopped at the end of the last video, play plays it again.
+        let ended = self.video.is_some() && self.player.as_ref().is_some_and(|player| player.flag("eof-reached") == Some(true));
+        if action == VideoAction::Pause && ended {
+            return self.restart_video();
         }
         let (Some(player), Some(video)) = (&self.player, &mut self.video) else { return };
         // What pausing or playing turns it into: the player's own word for

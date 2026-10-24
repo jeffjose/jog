@@ -585,6 +585,17 @@ impl App {
                 }
             }
             let flags = self.draw_section(canvas, &bar, top, thickness, length, &mut labels, px);
+            // What can be done with the section, in a row above it.
+            let tools = self.section_tools(&bar);
+            let kept = !tools.is_empty() && self.section_kept();
+            self.draw_section_tools(canvas, &tools, kept, &mut buttons, &mut labels, px);
+            // The span of that row, which the time and the frame under the
+            // pointer stand clear of; on it, they are not shown at all.
+            let tools_span = tools.first().zip(tools.last()).map(|(first, last)| (first.1[0], last.1[0] + last.1[2], first.1[1]));
+            let on_tools = tools_span.is_some_and(|(left, right, top)| {
+                let (x, y) = self.mouse;
+                x >= f64::from(left) && x < f64::from(right) && y >= f64::from(top - unit / 2) && y < f64::from(bar.middle - unit)
+            });
             let handle = unit * 5 / 4;
             canvas.pill(bar.x + done - handle / 2, bar.middle - handle / 2, handle, handle, TEXT_COLOR, 256, handle);
             let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
@@ -623,7 +634,7 @@ impl App {
             subtitle_margin = (height - (bar.middle - unit * 3)) * 720 / height.max(1);
             time_bottom = bar.middle - unit * 4;
 
-            if let Some(fraction) = self.hover.filter(|_| bar.on_track(self.mouse.0)) {
+            if let Some(fraction) = self.hover.filter(|_| bar.on_track(self.mouse.0) && !on_tools) {
                 // A tick where the pointer is, the time there, and above
                 // that the frame from that part of the video.
                 let at = bar.x + (f64::from(bar.width) * fraction) as i32;
@@ -631,8 +642,21 @@ impl App {
                 // Over a section's flag, the time stands a line higher than
                 // the flag's letter.
                 let over_flag = flags.iter().any(|flag| (flag - at).abs() < line * 2);
-                let label_top = bar.middle - unit * 2 - line / 2 - if over_flag { line } else { 0 };
-                labels.push((at.clamp(unit * 4, width - unit * 4), label_top, Ordering::Equal, clock(fraction * length)));
+                let mut label_top = bar.middle - unit * 2 - line / 2 - if over_flag { line } else { 0 };
+                // Under the section's buttons, above them.
+                // The time is a few letters wide either side of the pointer.
+                if let Some((_, _, tools_top)) = tools_span.filter(|(left, right, _)| (left - unit * 6..right + unit * 6).contains(&at)) {
+                    label_top = label_top.min(tools_top - unit / 2 - line);
+                }
+                // What playing from there does with a section looping: it
+                // loops, or past its end it plays on.
+                let seconds = fraction * length;
+                let said = match self.section().and_then(|section| section.looping()) {
+                    Some((a, b)) if seconds >= a && seconds <= b => format!("{}  {}", commands::icons::REPEAT, clock(seconds)),
+                    Some((_, b)) if seconds > b => format!("{}  ·  past B", clock(seconds)),
+                    _ => clock(seconds),
+                };
+                labels.push((at.clamp(unit * 4, width - unit * 4), label_top, Ordering::Equal, said));
                 // The video has changed under a pointer that has not moved:
                 // the frame kept is of the one before, and is not shown;
                 // the one for this video is asked for.

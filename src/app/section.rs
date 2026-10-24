@@ -126,6 +126,9 @@ pub enum Edge {
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Section {
     pub a: Option<f64>,
+    /// Played on through and past its end, not looped: marked still, to
+    /// loop again, save or keep.
+    pub through: bool,
     pub b: Option<f64>,
 }
 
@@ -133,6 +136,11 @@ impl Section {
     /// Both ends, when both are marked.
     pub fn span(&self) -> Option<(f64, f64)> {
         Some((self.a?, self.b?))
+    }
+
+    /// Both ends, when both are marked and it loops between them.
+    pub fn looping(&self) -> Option<(f64, f64)> {
+        self.span().filter(|_| !self.through)
     }
 }
 
@@ -172,7 +180,7 @@ impl App {
         }
         let path = std::path::absolute(&self.files[id]).unwrap_or_else(|_| self.files[id].clone());
         if let Some(&(a, b)) = self.marked_sections.get_or_insert_with(read_marked).get(&path) {
-            self.sections.insert(id, Section { a: Some(a), b: Some(b) });
+            self.sections.insert(id, Section { a: Some(a), b: Some(b), through: false });
         }
     }
 
@@ -218,12 +226,38 @@ impl App {
                 if at <= a + SHORTEST {
                     return self.toast(format!("End must come after {}", clock(a)));
                 }
-                section = Section { a: Some(a), b: Some(at.min(length)) };
+                section = Section { a: Some(a), b: Some(at.min(length)), through: false };
             }
         }
         self.sections.insert(id, section);
         self.apply_loop();
+        // Marking the end starts the loop: back to the start at once, not
+        // on to the end and then back.
+        if let (Edge::B, Some(a)) = (edge, section.a) {
+            self.seek_to(a / length, true);
+        }
+        self.preload_video();
         self.say_section();
+        self.redraw();
+    }
+
+    /// Loops the section again, or plays on through it and past its end,
+    /// marked still.
+    pub(super) fn toggle_section_loop(&mut self) {
+        let Some(video) = &self.video else { return };
+        let id = video.id;
+        let Some(section) = self.sections.get_mut(&id).filter(|section| section.span().is_some()) else {
+            return self.toast("No section · Shift+A, Shift+B");
+        };
+        section.through = !section.through;
+        let through = section.through;
+        self.apply_loop();
+        self.preload_video();
+        if through {
+            self.toast(format!("{}  Playing through", commands::icons::PLAY));
+        } else {
+            self.say_section();
+        }
         self.redraw();
     }
 
@@ -238,6 +272,7 @@ impl App {
             marked.remove(&path);
         }
         self.apply_loop();
+        self.preload_video();
         self.toast("Section cleared");
         self.redraw();
         true
@@ -256,10 +291,45 @@ impl App {
     /// its own when there is none.
     pub(super) fn apply_section_loop(&self) {
         let Some(player) = &self.player else { return };
-        let span = self.section().and_then(|section| section.span());
+        let span = self.section().and_then(|section| section.looping());
         let (a, b) = span.map_or(("no".to_string(), "no".to_string()), |(a, b)| (format!("{a:.3}"), format!("{b:.3}")));
         player.set("ab-loop-a", &a);
         player.set("ab-loop-b", &b);
+    }
+
+    /// Back to the start of the section at its end, at once: the spare
+    /// player has it open there already, its first frame decoded, and
+    /// takes over, as it does for the next file. Going back by seeking
+    /// decodes every frame from the keyframe before the start, which on a
+    /// file with keyframes far apart is a second's wait each time round.
+    /// The player's own loop is left set, for when the spare is not ready,
+    /// a section shorter than it takes to open being one such.
+    pub(super) fn relay_section(&mut self) {
+        let Some((a, b)) = self.section().and_then(|section| section.looping()) else { return };
+        let (Some(player), Some(video)) = (&self.player, &self.video) else { return };
+        if !video.showing || video.seek_asked.is_some() || player.flag("pause") == Some(true) {
+            return;
+        }
+        let Some(at) = player.number("time-pos") else { return };
+        // On the last frame before the end: the next would be past it.
+        // Well past it is a seek there, which plays on as the player's
+        // own loop would.
+        let frame = player.number("container-fps").filter(|fps| *fps > 1.0).map_or(1.0 / 30.0, |fps| 1.0 / fps).clamp(0.01, 0.1);
+        if at < b - frame * 1.5 || at > b + 0.25 {
+            return;
+        }
+        let id = video.id;
+        let ready = self.spare.as_ref().is_some_and(|spare| spare.id == Some(id) && (spare.from - a).abs() < 0.01 && spare.player.holds(&self.files[id]));
+        if !ready {
+            return;
+        }
+        if self.options.debug {
+            eprintln!("jog: section round, at {at:.3} of {a:.3} – {b:.3}, by the spare");
+        }
+        self.enter_at = Some(a);
+        self.start_video(id);
+        // The one that played the round before holds the start for the next.
+        self.preload_video();
     }
 
     /// The end of the section near a point on the seek bar, to drag.
@@ -305,6 +375,8 @@ impl App {
         if let Some(at) = at {
             self.seek_to(at / length, true);
         }
+        // The spare made ready at the start as it is now.
+        self.preload_video();
         self.say_section();
     }
 
@@ -620,7 +692,7 @@ impl App {
         let entries = self.entries();
         let (Some(entry), Some(video)) = (entries.get(index), &self.video) else { return };
         let Some((_, length)) = self.video_time() else { return };
-        self.sections.insert(video.id, Section { a: Some(entry.start), b: Some(entry.end) });
+        self.sections.insert(video.id, Section { a: Some(entry.start), b: Some(entry.end), through: false });
         self.show_entry(index);
         self.apply_loop();
         self.seek_to(entry.start / length, true);
@@ -743,7 +815,9 @@ impl App {
         let x_of = |at: f64| bar.x + (f64::from(bar.width) * at / length) as i32;
         if let Some((a, b)) = section.span() {
             let (left, right) = (x_of(a), x_of(b));
-            canvas.round_fill(left, top - thickness / 3, (right - left).max(2), thickness + thickness * 2 / 3, thickness / 2, accent(), 200);
+            // Played through rather than looped, fainter.
+            let strength = if section.through { 90 } else { 200 };
+            canvas.round_fill(left, top - thickness / 3, (right - left).max(2), thickness + thickness * 2 / 3, thickness / 2, accent(), strength);
         }
         let line = Text::line_height(px);
         // Ends close together put their letters back to back, A to the
@@ -766,5 +840,156 @@ impl App {
             flags.push(x);
         }
         flags
+    }
+}
+
+/// The buttons over a section on the seek bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SectionTool {
+    /// Loop it, or play on through it.
+    Loop,
+    /// Save it as it is, quickly; or, from the chevron beside, as what.
+    Save,
+    SaveAs,
+    /// Keep it for the Sections tab, or forget it.
+    Keep,
+    Clear,
+}
+
+impl SectionTool {
+    /// What it does, said over it while it is pointed at.
+    fn tip(self, looping: bool, kept: bool) -> &'static str {
+        match self {
+            SectionTool::Loop if looping => "Looping  ·  click to play through",
+            SectionTool::Loop => "Playing through  ·  click to loop",
+            SectionTool::Save => "Save  ·  as it is",
+            SectionTool::SaveAs => "Save as…",
+            SectionTool::Keep if kept => "Kept  ·  click to forget",
+            SectionTool::Keep => "Keep  ·  in the Sections tab",
+            SectionTool::Clear => "Clear  ·  Esc",
+        }
+    }
+}
+
+impl App {
+    /// The buttons over the section on `bar`, and where: in a row above
+    /// its letters, centered on it, within the bar's length.
+    pub(super) fn section_tools(&self, bar: &SeekBar) -> Vec<(SectionTool, [i32; 4])> {
+        let Some((a, b)) = self.section().and_then(|section| section.span()) else { return Vec::new() };
+        let Some((_, length)) = self.video_time().filter(|(_, length)| *length > 0.0) else { return Vec::new() };
+        let unit = bar.unit;
+        let line = Text::line_height(unit as u32);
+        let (side, narrow, gap) = (unit * 2, unit * 5 / 4, unit / 4);
+        let tools = [(SectionTool::Loop, side), (SectionTool::Save, side), (SectionTool::SaveAs, narrow), (SectionTool::Keep, side), (SectionTool::Clear, side)];
+        let total = tools.iter().map(|(_, w)| w).sum::<i32>() + gap * (tools.len() as i32 - 1);
+        let x_of = |at: f64| bar.x + (f64::from(bar.width) * at / length) as i32;
+        let middle = (x_of(a) + x_of(b)) / 2;
+        let mut x = (middle - total / 2).clamp(bar.x, (bar.x + bar.width - total).max(bar.x));
+        // Where the letters A and B stand, over their flags; the row above.
+        let letters = bar.middle - unit - line;
+        let top = letters - unit / 4 - side;
+        tools
+            .iter()
+            .map(|(tool, w)| {
+                let place = [x, top, *w, side];
+                x += w + gap;
+                (*tool, place)
+            })
+            .collect()
+    }
+
+    /// The button over the section under a point, while the bar is up.
+    pub(super) fn section_tool_at(&self, x: f64, y: f64) -> Option<SectionTool> {
+        self.hover?;
+        let bar = self.seek_bar();
+        let inside = |[left, top, w, h]: [i32; 4]| x >= f64::from(left) && x < f64::from(left + w) && y >= f64::from(top) && y < f64::from(top + h);
+        self.section_tools(&bar).into_iter().find(|(_, place)| inside(*place)).map(|(tool, _)| tool)
+    }
+
+    /// Whether a point is on the section on the seek bar, or its buttons:
+    /// where a right click brings up what can be done with it.
+    pub(super) fn on_section(&self, x: f64, y: f64) -> bool {
+        if self.section_tool_at(x, y).is_some() {
+            return true;
+        }
+        let (Some(_), Some((a, b)), Some((_, length))) = (self.hover, self.section().and_then(|section| section.span()), self.video_time()) else { return false };
+        let bar = self.seek_bar();
+        let x_of = |at: f64| f64::from(bar.x) + f64::from(bar.width) * at / length;
+        let near_track = (y - f64::from(bar.middle)).abs() <= f64::from(bar.unit);
+        near_track && x >= x_of(a) - grip(&bar) && x <= x_of(b) + grip(&bar)
+    }
+
+    pub(super) fn section_tool(&mut self, tool: SectionTool) {
+        match tool {
+            SectionTool::Loop => self.toggle_section_loop(),
+            SectionTool::Save => self.save_section(crate::transcode::Clip::Quick, crate::transcode::Knobs::default()),
+            SectionTool::SaveAs => {
+                self.open_menu(commands::SECTION_SAVE_MENU, None);
+                self.redraw();
+            }
+            SectionTool::Keep => self.keep_section(),
+            SectionTool::Clear => drop(self.clear_section()),
+        }
+    }
+
+    /// Whether the section marked is one kept.
+    pub(super) fn section_kept(&mut self) -> bool {
+        let (Some(video), Some((a, b))) = (&self.video, self.section().and_then(|section| section.span())) else { return false };
+        let path = self.files[video.id].clone();
+        let kept = self.kept_sections.get_or_insert_with(read_kept);
+        kept.get(&path).is_some_and(|list| list.iter().any(|kept| kept.is(a, b)))
+    }
+
+    /// The buttons over the section: on a dark pill, the one pointed at
+    /// lit and what it does said over it; looping and kept in the accent.
+    /// Their icons go with the bar's own buttons, to be written with them.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_section_tools(&self, canvas: &mut Canvas, tools: &[(SectionTool, [i32; 4])], kept: bool, buttons: &mut Vec<(i32, i32, &'static str, u32)>, labels: &mut Vec<(i32, i32, Ordering, String)>, px: u32) {
+        let (Some(first), Some(last)) = (tools.first(), tools.last()) else { return };
+        let looping = self.section().is_some_and(|section| !section.through);
+        let line = Text::line_height(px);
+        let side = first.1[3];
+        let gap = (side / 6).max(2);
+        let (left, top) = (first.1[0] - gap, first.1[1] - gap);
+        let right = last.1[0] + last.1[2] + gap;
+        canvas.round_fill(left, top, right - left, side + 2 * gap, side / 2, 0x000000, 170);
+        let mouse = self.mouse;
+        let inside = |[l, t, w, h]: [i32; 4]| mouse.0 >= f64::from(l) && mouse.0 < f64::from(l + w) && mouse.1 >= f64::from(t) && mouse.1 < f64::from(t + h);
+        for (tool, place) in tools {
+            let [x, y, w, h] = *place;
+            let on = match tool {
+                SectionTool::Loop => looping,
+                SectionTool::Keep => kept,
+                _ => false,
+            };
+            let pointed = inside(*place);
+            if on {
+                canvas.round_fill(x, y, w, h, h / 2, accent(), 256);
+            } else if pointed {
+                canvas.round_fill(x, y, w, h, h / 2, PLACEHOLDER_COLOR, 256);
+            }
+            let icon = match tool {
+                SectionTool::Loop => commands::icons::REPEAT,
+                SectionTool::Save => commands::icons::FILM,
+                SectionTool::Keep => commands::icons::PIN,
+                SectionTool::Clear => commands::icons::X,
+                SectionTool::SaveAs => {
+                    // A small triangle, pointing down to the choices.
+                    let half = (w / 4).max(3);
+                    let (cx, cy) = (x + w / 2, y + h / 2 - half / 2);
+                    for row in 0..half {
+                        canvas.fill(cx - half + row, cy + row, (half - row) * 2, 1, TEXT_COLOR);
+                    }
+                    if pointed {
+                        labels.push((x + w / 2, top - line, Ordering::Equal, tool.tip(looping, kept).to_string()));
+                    }
+                    continue;
+                }
+            };
+            buttons.push((x + w / 2, y + (h - line) / 2, icon, if on || pointed { TEXT_COLOR } else { DIM_TEXT_COLOR }));
+            if pointed {
+                labels.push((x + w / 2, top - line, Ordering::Equal, tool.tip(looping, kept).to_string()));
+            }
+        }
     }
 }

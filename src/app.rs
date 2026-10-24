@@ -2693,6 +2693,7 @@ impl App {
             Mirror => self.transform(Transform::MIRROR),
             SectionStart => self.mark_edge(Edge::A),
             SectionEnd => self.mark_edge(Edge::B),
+            SectionLoop => self.toggle_section_loop(),
             SectionClear => {
                 self.clear_section();
             }

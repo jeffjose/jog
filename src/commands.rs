@@ -35,6 +35,8 @@ pub enum Command {
     SectionStart,
     SectionEnd,
     SectionClear,
+    /// Loop the section, or play on through it and past its end.
+    SectionLoop,
     /// Save the section as a clip or an animation.
     SaveSection(Clip),
     /// Keep the section, for the Sections tab; or forget it, kept.
@@ -576,6 +578,7 @@ pub fn command_icon(command: Command) -> &'static str {
         Restart => SKIP_BACK,
         SectionStart | SectionEnd => REPEAT,
         SectionClear => X,
+        SectionLoop => REPEAT,
         SaveSection(_) => FILM,
         KeepSection => PIN,
         RenameSection => PENCIL,
@@ -713,6 +716,7 @@ const SECTION: &[Option<MenuItem>] = &[
     video_item("Start here", "Shift+A", Command::SectionStart),
     video_item("End here", "Shift+B", Command::SectionEnd),
     video_item("Clear", "Esc", Command::SectionClear),
+    video_item("Loop / play through", "", Command::SectionLoop),
     None,
     video_item("Keep / forget", "", Command::KeepSection),
     video_item("Rename kept", "", Command::RenameSection),
@@ -1001,6 +1005,32 @@ pub const GRID_AROUND_MENU: &[Option<MenuItem>] = &[
     None,
     item("Close the grid", "g", Command::ToggleGrid),
     item("Quit", "q", Command::Quit),
+];
+
+/// A right click on the section marked, on the seek bar.
+pub const SECTION_BAR_MENU: &[Option<MenuItem>] = &[
+    video_item("Loop / play through", "", Command::SectionLoop),
+    video_item("Keep / forget", "", Command::KeepSection),
+    video_item("Clear", "Esc", Command::SectionClear),
+    None,
+    video_item("Save quick", "", Command::SaveSection(Clip::Quick)),
+    video_item("Save MP4  ·  H.264", "", Command::SaveSection(Clip::Exact(Target::new(Codec::H264, Container::Mp4)))),
+    video_item("Save MP4  ·  HEVC", "", Command::SaveSection(Clip::Exact(Target::new(Codec::Hevc, Container::Mp4)))),
+    video_item("Save MKV  ·  AV1", "", Command::SaveSection(Clip::Exact(Target::new(Codec::Av1, Container::Mkv)))),
+    video_item("Save GIF", "", Command::SaveSection(Clip::Gif)),
+    video_item("Save WebP", "", Command::SaveSection(Clip::WebP)),
+    video_item("Save AVIF", "", Command::SaveSection(Clip::Avif)),
+];
+
+/// The section's save button's other half: what to save it as.
+pub const SECTION_SAVE_MENU: &[Option<MenuItem>] = &[
+    video_item("Quick  ·  as it is", "", Command::SaveSection(Clip::Quick)),
+    video_item("MP4  ·  H.264", "", Command::SaveSection(Clip::Exact(Target::new(Codec::H264, Container::Mp4)))),
+    video_item("MP4  ·  HEVC", "", Command::SaveSection(Clip::Exact(Target::new(Codec::Hevc, Container::Mp4)))),
+    video_item("MKV  ·  AV1", "", Command::SaveSection(Clip::Exact(Target::new(Codec::Av1, Container::Mkv)))),
+    video_item("GIF", "", Command::SaveSection(Clip::Gif)),
+    video_item("WebP", "", Command::SaveSection(Clip::WebP)),
+    video_item("AVIF", "", Command::SaveSection(Clip::Avif)),
 ];
 
 /// A right click on a kept section in the Sections tab.
