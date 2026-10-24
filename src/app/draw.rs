@@ -712,7 +712,8 @@ impl App {
                 if let Some(frame) = &self.preview_frame {
                     let (w, h) = (frame.width as i32, frame.height as i32);
                     let left = (at - w / 2).clamp(unit, (width - unit - w).max(unit));
-                    let picture_top = label_top - unit / 2 - h;
+                    // Clear of the time under it, not crowding it.
+                    let picture_top = label_top - unit - h;
                     let round = unit / 2;
                     canvas.image_rounded(frame, left, picture_top, w, h, round);
                     canvas.round_outline(left - 2, picture_top - 2, w + 4, h + 4, round + 2, 2, MENU_EDGE_COLOR);
