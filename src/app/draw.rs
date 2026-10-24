@@ -669,6 +669,10 @@ impl App {
                     Command::ToggleMute => (commands::icons::VOLUME_2, true),
                     Command::CycleSubtitles if self.subtitles => (commands::icons::CAPTIONS, true),
                     Command::CycleSubtitles => (commands::icons::CAPTIONS_OFF, false),
+                    // Fullscreen: what pressing it does, out or in.
+                    Command::ToggleFullscreen if self.window.as_ref().is_some_and(|window| window.fullscreen().is_some()) => (commands::icons::SHRINK, true),
+                    Command::ToggleFullscreen => (commands::icons::EXPAND, true),
+                    Command::SmallWindow => (commands::icons::MONITOR_PLAY, true),
                     _ => (commands::icons::AUDIO_LINES, true),
                 };
                 buttons.push((left + side / 2, top + (side - line) / 2, icon, if on { TEXT_COLOR } else { DIM_TEXT_COLOR }));

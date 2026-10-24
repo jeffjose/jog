@@ -50,6 +50,7 @@ mod glossary;
 use convert_panel::{ConvertPanel, PanelSource};
 mod section;
 mod bar_info;
+mod windowed;
 use section::{Edge, EntryFrames, Section, StripTab};
 mod back;
 mod hitch;
@@ -1190,6 +1191,10 @@ pub struct App {
     /// Size images are fitted to. Using the monitor rather than the window
     /// means resizing or leaving fullscreen never needs a fresh decode.
     monitor: (u32, u32),
+    /// The window's size when last an ordinary one, and the small size
+    /// asked for, to be asked again once a window manager has had its say.
+    windowed: Option<(u32, u32)>,
+    small_wanted: Option<(u32, u32)>,
     /// What is on screen and the file it came from. Kept while the next
     /// image decodes, so navigation never flashes to black.
     shown: Option<(usize, Arc<Frame>)>,
@@ -1945,6 +1950,8 @@ impl App {
             last_request: RefCell::new(None),
             transforms: HashMap::new(),
             monitor: (0, 0),
+            windowed: None,
+            small_wanted: None,
             shown: None,
             error: None,
             view: View { zoom: options.zoom, center: None, enlarge: options.auto_zoom },
@@ -2712,8 +2719,12 @@ impl App {
 
     fn toggle_fullscreen(&mut self) {
         let Some(window) = &self.window else { return };
-        let fullscreen = window.fullscreen().is_none().then_some(Fullscreen::Borderless(None));
-        window.set_fullscreen(fullscreen);
+        // Out of it, to the small window, not to one the size of what
+        // filled the screen.
+        if window.fullscreen().is_some() {
+            return self.go_small();
+        }
+        window.set_fullscreen(Some(Fullscreen::Borderless(None)));
     }
 
     fn size_window_to_image(&mut self) {
@@ -2809,6 +2820,7 @@ impl App {
                 self.redraw();
             }
             ToggleFullscreen => self.toggle_fullscreen(),
+            SmallWindow => self.go_small(),
             ToggleFilmstrip => {
                 self.strip_pinned = !self.strip_pinned;
                 self.strip_used = true;
@@ -3260,6 +3272,7 @@ impl App {
     pub fn save_session(&mut self) {
         self.save_recent();
         self.save_marked_sections();
+        self.save_window_size();
         if self.list.is_empty() || self.cwd.as_os_str().is_empty() {
             return;
         }
@@ -4381,6 +4394,8 @@ impl App {
                     eprintln!("jog: window resized to {}x{}", size.width, size.height);
                 }
                 self.update_monitor();
+                self.settle_small(size);
+                self.note_window_size(size);
                 self.menu = None;
                 self.request();
                 // A video is drawn at its old size, and with its old zoom and

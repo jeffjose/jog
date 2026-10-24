@@ -64,6 +64,9 @@ pub enum Command {
     ToggleAntialias,
     Render,
     ToggleFullscreen,
+    /// Out of fullscreen to a small window: the size last given one, or
+    /// a quarter of the screen.
+    SmallWindow,
     ToggleFilmstrip,
     /// The panel of file names down the left side.
     ToggleList,
@@ -634,6 +637,7 @@ pub fn command_icon(command: Command) -> &'static str {
         Flip => FLIP_VERTICAL,
         Mirror => FLIP_HORIZONTAL,
         ToggleFullscreen => FULLSCREEN,
+        SmallWindow => MONITOR_PLAY,
         ToggleGrid => LAYOUT_GRID,
         ToggleFilmstrip => FILM,
         ToggleList => LIST,
@@ -816,6 +820,7 @@ const ROTATE: &[Option<MenuItem>] = &[
 
 const VIEW: &[Option<MenuItem>] = &[
     item("Fullscreen", "f", Command::ToggleFullscreen),
+    item("Small window", "", Command::SmallWindow),
     item("Grid view", "g", Command::ToggleGrid),
     item("Filmstrip", "t", Command::ToggleFilmstrip),
     item("File list", "p", Command::ToggleList),

@@ -854,7 +854,8 @@ impl App {
     /// and audio tracks.
     pub(super) fn bar_buttons(&self) -> Vec<Command> {
         let (subtitles, audio) = self.video.as_ref().and_then(|video| video.tracks).unwrap_or((0, 0));
-        let mut buttons = vec![Command::CycleLoop, Command::ToggleMute];
+        // From the right edge: the window's size, then how it plays.
+        let mut buttons = vec![Command::ToggleFullscreen, Command::SmallWindow, Command::CycleLoop, Command::ToggleMute];
         if subtitles > 0 {
             buttons.push(Command::CycleSubtitles);
         }
