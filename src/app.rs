@@ -1085,6 +1085,8 @@ pub struct App {
     /// done with, and whether the window has had the focus yet, which
     /// is the window manager done putting it up.
     backdrop: Option<(x11::Backdrop, Instant)>,
+    /// Where the player draws a video on the GPU, with `JOG_VIDEO_GPU=1`.
+    video_window: Option<x11::VideoWindow>,
     backdrop_done: bool,
     focused_once: bool,
     /// The first row the file list was scrolled to with the wheel, along
@@ -1293,6 +1295,9 @@ pub struct App {
     looping: Looping,
     /// When a run measuring playback for a set time quits by itself.
     bench_quit: Option<Instant>,
+    /// The player's own counts of frames dropped, while measuring: as the
+    /// script measuring mpv itself counts them.
+    bench_drops: BenchDrops,
     /// Videos looped on their own, from their row in the file list.
     looped: HashSet<usize>,
     /// What is being held down over a video, and how strong the loupe is
@@ -1844,6 +1849,7 @@ impl App {
             animating: Cell::new(false),
             repainted: Cell::new(false),
             backdrop: None,
+            video_window: None,
             backdrop_done: false,
             focused_once: false,
             list_scroll: None,
@@ -1958,6 +1964,7 @@ impl App {
             // Measuring playback for a set time: the video loops meanwhile.
             looping: if bench_seconds().is_some() { Looping::File } else { Looping::Off },
             bench_quit: bench_seconds().map(|seconds| Instant::now() + Duration::from_secs_f64(seconds + 1.5)),
+            bench_drops: BenchDrops { from: Some(Instant::now() + Duration::from_millis(1500)), ..BenchDrops::default() },
             looped: HashSet::new(),
             pip: false,
             pip_live: None,
@@ -4339,7 +4346,9 @@ impl App {
     }
 
     fn waiting(&mut self, event_loop: &ActiveEventLoop) {
+        self.count_bench_drops();
         if self.bench_quit.is_some_and(|at| Instant::now() >= at) {
+            self.say_bench_drops();
             self.bench_quit = None;
             return self.leave(event_loop);
         }
@@ -4527,4 +4536,54 @@ mod tests {
 /// quitting.
 fn bench_seconds() -> Option<f64> {
     std::env::var("JOG_FRAMESTATS").ok()?.parse::<f64>().ok().filter(|seconds| *seconds >= 2.0)
+}
+
+/// Frames the player dropped, counted while measuring.
+#[derive(Default)]
+struct BenchDrops {
+    from: Option<Instant>,
+    last: [Option<f64>; 2],
+    drops: [f64; 2],
+    fps: f64,
+}
+
+impl App {
+    /// The player's drop counts gone up since last looked at: each goes
+    /// back to nothing when the video starts over, which is not counted.
+    fn count_bench_drops(&mut self) {
+        let Some(from) = self.bench_drops.from.filter(|_| self.bench_quit.is_some()) else { return };
+        if Instant::now() < from {
+            return;
+        }
+        let Some(player) = &self.player else { return };
+        let now = [player.number("decoder-frame-drop-count"), player.number("frame-drop-count")];
+        if let Some(fps) = player.number("container-fps") {
+            self.bench_drops.fps = fps;
+        }
+        for (at, value) in now.into_iter().enumerate() {
+            let Some(value) = value else { continue };
+            if let Some(last) = self.bench_drops.last[at].filter(|last| value > *last) {
+                self.bench_drops.drops[at] += value - last;
+            }
+            self.bench_drops.last[at] = Some(value);
+        }
+    }
+
+    /// The line on quitting a run measuring playback: what the player says
+    /// it dropped, against the frames the time called for.
+    fn say_bench_drops(&self) {
+        let Some(from) = self.bench_drops.from else { return };
+        let wall = from.elapsed().as_secs_f64();
+        let expected = wall * if self.bench_drops.fps > 0.0 { self.bench_drops.fps } else { 60.0 };
+        let [dec, vo] = self.bench_drops.drops;
+        eprintln!(
+            "PLAYERSTATS dec_drop={dec:.0} vo_drop={vo:.0} expected={expected:.0} missed_pct={:.1} fps={:.1} gpu={} hwdec={} drawn_at={}x{}",
+            100.0 * (dec + vo) / expected.max(1.0),
+            (expected - dec - vo) / wall.max(1e-9),
+            crate::mpv::gpu_video(),
+            self.player.as_ref().and_then(|player| player.text("hwdec-current")).unwrap_or_default(),
+            self.player.as_ref().and_then(|player| player.number("osd-width")).unwrap_or(0.0),
+            self.player.as_ref().and_then(|player| player.number("osd-height")).unwrap_or(0.0)
+        );
+    }
 }

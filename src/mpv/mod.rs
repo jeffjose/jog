@@ -34,6 +34,22 @@ pub use processes::{crashes_this_run, usage};
 /// The argument that starts jog as a player process rather than as jog.
 pub const PLAYER_ARG: &str = "--player";
 
+/// Whether videos are drawn by the player on the GPU, into a window of
+/// their own inside jog's, as mpv draws its own: decoded and scaled on the
+/// GPU, nothing copied back. Otherwise the player draws each frame in
+/// software for jog to copy into its window. `JOG_VIDEO_GPU=1` for now;
+/// the player processes inherit it.
+pub fn gpu_video() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("JOG_VIDEO_GPU").is_ok_and(|value| value == "1"))
+}
+
+/// How a playing video is decoded on the GPU: left there to be drawn, or
+/// copied back for the software renderer.
+pub fn gpu_decoding() -> &'static str {
+    if gpu_video() { "auto" } else { "auto-copy" }
+}
+
 /// What a player is for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
@@ -156,6 +172,7 @@ pub(crate) const WATCHED: &[(&str, Kind, Tell)] = &[
     ("container-fps", Kind::Number, Tell::Loud),
     ("frame-drop-count", Kind::Number, Tell::Loud),
     ("vo-drop-frame-count", Kind::Number, Tell::Loud),
+    ("decoder-frame-drop-count", Kind::Number, Tell::Quiet),
     // The tracks and chapters as a whole, as JSON: read a property at a
     // time, they were a wait on the player for each of ten things about
     // each track, with every drawing of the Tracks tab.

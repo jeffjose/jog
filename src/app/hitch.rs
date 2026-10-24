@@ -56,13 +56,13 @@ pub(super) struct Hitches {
     worst: Duration,
     causes: HashMap<String, usize>,
     /// Every steady frame, for `JOG_FRAMESTATS`: measuring playback.
-    stats: FrameStats,
+    pub(super) stats: FrameStats,
 }
 
 /// Steady playback, frame by frame, said on quitting with
 /// `JOG_FRAMESTATS=1`: for comparing one way of playing with another.
 #[derive(Default)]
-struct FrameStats {
+pub(super) struct FrameStats {
     /// Gaps between frames shown, in ms.
     gaps: Vec<f64>,
     /// Drawing each, in ms.
@@ -72,6 +72,10 @@ struct FrameStats {
     expected: f64,
     /// mpv's own drops: decoder, output.
     dropped: (f64, f64),
+    /// Over the whole run: frames the player said were ready, and frames
+    /// drawn from it; fewer drawn is frames passed over in between.
+    pub(super) told: usize,
+    pub(super) taken: usize,
 }
 
 impl Hitches {
@@ -229,7 +233,7 @@ impl FrameStats {
         let shown = self.gaps.len() as f64;
         let wall: f64 = self.gaps.iter().sum::<f64>() / 1000.0;
         format!(
-            "FRAMESTATS shown={} missed={:.0} missed_pct={:.1} fps={:.1} gap_p50={:.1} gap_p99={:.1} gap_max={:.1} dec_drop={:.0} vo_drop={:.0} draw_p50={:.1} draw_p95={:.1}",
+            "FRAMESTATS shown={} missed={:.0} missed_pct={:.1} fps={:.1} gap_p50={:.1} gap_p99={:.1} gap_max={:.1} dec_drop={:.0} vo_drop={:.0} draw_p50={:.1} draw_p95={:.1} told={} taken={}",
             self.gaps.len(),
             (self.expected - shown).max(0.0),
             100.0 * (self.expected - shown).max(0.0) / self.expected.max(1.0),
@@ -241,6 +245,8 @@ impl FrameStats {
             self.dropped.1,
             pct(&self.draws, 0.5),
             pct(&self.draws, 0.95),
+            self.told,
+            self.taken,
         )
     }
 }
@@ -429,6 +435,7 @@ impl App {
         let drops = (count("frame-drop-count"), count("vo-drop-frame-count"));
         let now = Instant::now();
         self.hitches.stats.draws.push((drawing + overlays).as_secs_f64() * 1000.0);
+        self.hitches.stats.taken += 1;
         let Some((gap, dropped, busiest)) = self.hitches.frame(now, pos, Duration::from_secs_f64(1.0 / fps), drops) else {
             // Decoding frames before a pause, while the video plays on,
             // takes from it: it should have stopped when playing began.

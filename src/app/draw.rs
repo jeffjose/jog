@@ -199,6 +199,12 @@ impl App {
             }
         }
         let playing = self.grid.is_none() && self.video.as_ref().is_some_and(|video| video.showing);
+        // Drawn on the GPU, the video is in its own window over this one,
+        // shown while a video plays and over where it goes.
+        let (left, (stage_w, stage_h)) = self.stage();
+        if let Some(video_window) = &mut self.video_window {
+            video_window.show(playing.then_some([left, 0, stage_w as i32, stage_h as i32]));
+        }
         // A frame kept from before a pause, stepped back to: drawn as it
         // was kept, at this very size, in place of the main player's.
         if playing {

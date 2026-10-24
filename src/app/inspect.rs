@@ -1612,6 +1612,9 @@ impl App {
         let right = (width as i32 - left - stage_w as i32).max(0);
         let below = height.saturating_sub(stage_h);
         let want = (f64::from(left.max(0)) / across, f64::from(right) / across, f64::from(below) / f64::from(height.max(1)));
+        // Drawn on the GPU, the video has a window of its own over just
+        // where it goes: nothing of it is to be kept clear.
+        let want = if crate::mpv::gpu_video() { (0.0, 0.0, 0.0) } else { want };
         if self.video_margins.get() == want {
             return;
         }

@@ -254,10 +254,18 @@ impl Engine {
             // being set up (88 -> 340 ms here): those after it are made
             // ready ahead. Without a decoder for it, the CPU decodes.
             let mut extra: Vec<(&str, &str)> = Vec::new();
+            // Drawn on the GPU, into the window jog gives it (`wid`, set
+            // before a file is opened): mpv's own way of drawing, as when
+            // it has a window of its own. The pointer and the keys stay
+            // jog's: its window, not mpv's inside it, takes them.
+            let on_gpu = super::gpu_video() && matches!(role, Role::Playback { .. });
+            if on_gpu {
+                extra.extend_from_slice(&[("vo", "gpu"), ("force-window", "no"), ("input-cursor", "no"), ("input-vo-keyboard", "no"), ("cursor-autohide", "no"), ("osd-level", "0")]);
+            }
             match role {
                 Role::Playback { silent, gpu } => {
                     if gpu && hwdec {
-                        extra.push(("hwdec", "auto-copy"));
+                        extra.push(("hwdec", super::gpu_decoding()));
                     }
                     if silent {
                         extra.push(("ao", "null"));
@@ -281,8 +289,9 @@ impl Engine {
                 RenderParam { kind: RENDER_PARAM_API_TYPE, data: c"sw".as_ptr() as *mut c_void },
                 RenderParam { kind: RENDER_PARAM_END, data: ptr::null_mut() },
             ];
+            // Drawing on the GPU, the player has no frames to hand over.
             let mut render = ptr::null_mut();
-            if (api.render_context_create)(&mut render, handle, params.as_mut_ptr()) < 0 {
+            if !on_gpu && (api.render_context_create)(&mut render, handle, params.as_mut_ptr()) < 0 {
                 (api.terminate_destroy)(handle);
                 return Err("this libmpv has no software renderer (mpv 0.33 or newer is needed)".into());
             }
@@ -290,7 +299,9 @@ impl Engine {
             let wake: Box<Wake> = Box::new(Box::new(wake));
             let context = &*wake as *const Wake as *mut c_void;
             (api.set_wakeup_callback)(handle, Some(on_events), context);
-            (api.render_context_set_update_callback)(render, Some(on_frame), context);
+            if !render.is_null() {
+                (api.render_context_set_update_callback)(render, Some(on_frame), context);
+            }
             // Asked for after the callbacks are in place: mpv queues an
             // event for each straight away, and only signals when its
             // queue was empty.
@@ -566,7 +577,7 @@ impl Engine {
         let _drawing = self.drawing.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: the render context lives as long as the player, and the
         // lock keeps it to one thread at a time.
-        unsafe { (self.api.render_context_update)(self.render) & 1 != 0 }
+        !self.render.is_null() && unsafe { (self.api.render_context_update)(self.render) & 1 != 0 }
     }
 
     /// Draws the current frame, scaled and letterboxed to fill a
@@ -637,6 +648,9 @@ impl Renderer {
     /// # Safety
     /// The context must be alive, and drawn on by no other thread.
     unsafe fn draw(&self, pixels: &mut [u32], width: u32, height: u32) -> bool {
+        if self.context.is_null() {
+            return false;
+        }
         if pixels.len() < width as usize * height as usize {
             return false;
         }
@@ -658,12 +672,15 @@ impl Renderer {
             RenderParam { kind: RENDER_PARAM_BLOCK_FOR_TARGET_TIME, data: (&mut wait as *mut c_int).cast() },
             RenderParam { kind: RENDER_PARAM_END, data: ptr::null_mut() },
         ];
+        let started = std::time::Instant::now();
         // SAFETY: the buffer holds `height` rows of `stride` bytes, checked
         // above, and every parameter points at live storage of its type.
-        unsafe {
+        let drawn = unsafe {
             (self.update)(self.context);
             (self.render)(self.context, params.as_mut_ptr()) >= 0
-        }
+        };
+        note_render(started.elapsed(), (width, height));
+        drawn
     }
 }
 
@@ -675,11 +692,32 @@ impl Drop for Engine {
         // SAFETY: both were created in `new` and are freed exactly once, the
         // render context first as mpv requires.
         unsafe {
-            (self.api.render_context_free)(self.render);
+            if !self.render.is_null() {
+                (self.api.render_context_free)(self.render);
+            }
             (self.api.terminate_destroy)(self.handle);
         }
         if DEBUG.load(Ordering::Relaxed) {
             eprintln!("jog: {:>7.1?} mpv   player torn down", started.elapsed());
         }
+    }
+}
+
+/// With `JOG_FRAMESTATS` set, how long the player takes to draw each frame
+/// in software, said every 300 frames: the part of playback that is the
+/// player's own, beside what jog's window takes.
+fn note_render(took: std::time::Duration, size: (u32, u32)) {
+    use std::sync::Mutex;
+    static TIMES: Mutex<Vec<f64>> = Mutex::new(Vec::new());
+    if std::env::var_os("JOG_FRAMESTATS").is_none() {
+        return;
+    }
+    let Ok(mut times) = TIMES.lock() else { return };
+    times.push(took.as_secs_f64() * 1000.0);
+    if times.len() >= 300 {
+        times.sort_by(f64::total_cmp);
+        let at = |share: f64| times[((times.len() - 1) as f64 * share) as usize];
+        eprintln!("RENDERSTATS size={}x{} render_p50={:.1} render_p95={:.1} render_max={:.1}", size.0, size.1, at(0.5), at(0.95), at(1.0));
+        times.clear();
     }
 }

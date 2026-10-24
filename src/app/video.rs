@@ -56,7 +56,11 @@ impl App {
         std::thread::spawn(move || {
             if make(Which::Main(active)) {
                 make(Which::Preview);
-                make(Which::Spare(active ^ 1));
+                // Drawing on the GPU, into the one window there is for it, there
+                // is no second player to hold the next file ready (yet).
+                if !crate::mpv::gpu_video() {
+                    make(Which::Spare(active ^ 1));
+                }
             }
         });
     }
@@ -275,6 +279,15 @@ impl App {
             Ok(player) => {
                 player.set("speed", &self.playing_speed().to_string());
                 player.set("mute", if self.muted { "yes" } else { "no" });
+                // Drawing on the GPU: into a window of its own inside this one.
+                if crate::mpv::gpu_video() {
+                    if self.video_window.is_none() {
+                        self.video_window = self.window.as_ref().and_then(|window| x11::VideoWindow::new(window));
+                    }
+                    if let Some(video_window) = &self.video_window {
+                        player.set("wid", &video_window.id().to_string());
+                    }
+                }
                 self.player = Some(player);
                 self.apply_subtitles();
                 self.apply_track_prefs();
@@ -487,6 +500,9 @@ impl App {
     }
 
     pub(super) fn video_signal(&mut self, signal: Signal) {
+        if matches!(signal, Signal::Frame) {
+            self.hitches.stats.told += 1;
+        }
         let Some(player) = &self.player else { return };
         // Read the events even when no video is wanted: mpv only signals
         // again once its queue has been emptied.

@@ -246,3 +246,106 @@ impl Drop for Backdrop {
         }
     }
 }
+
+/// A window inside jog's that the player draws a video into on the GPU,
+/// as mpv draws into a window of its own: placed over where the video
+/// goes, shown while it plays. It asks for no input, so the pointer and
+/// the keys go on to jog's window around it; nor does the window mpv
+/// makes inside it, told not to.
+pub struct VideoWindow {
+    _x11: Library,
+    display: Display,
+    id: c_ulong,
+    map: unsafe extern "C" fn(Display, c_ulong) -> c_int,
+    unmap: unsafe extern "C" fn(Display, c_ulong) -> c_int,
+    move_resize: unsafe extern "C" fn(Display, c_ulong, c_int, c_int, c_uint, c_uint) -> c_int,
+    raise: unsafe extern "C" fn(Display, c_ulong) -> c_int,
+    destroy: unsafe extern "C" fn(Display, c_ulong) -> c_int,
+    flush: unsafe extern "C" fn(Display) -> c_int,
+    place: [i32; 4],
+    shown: bool,
+}
+
+impl VideoWindow {
+    /// One inside `window`, hidden, black. `None` on another windowing
+    /// system, or without libX11.
+    pub fn new(window: &Window) -> Option<VideoWindow> {
+        let (display, parent) = xlib(window)?;
+        // SAFETY: as in `mark_fullscreen`; the window made is a child of a
+        // live window, on the display it belongs to.
+        unsafe {
+            let x11 = Library::new("libX11.so.6").ok()?;
+            macro_rules! symbol {
+                ($name:literal) => {
+                    *x11.get(concat!($name, "\0").as_bytes()).ok()?
+                };
+            }
+            let create: unsafe extern "C" fn(Display, c_ulong, c_int, c_int, c_uint, c_uint, c_uint, c_ulong, c_ulong) -> c_ulong = symbol!("XCreateSimpleWindow");
+            let flush: unsafe extern "C" fn(Display) -> c_int = symbol!("XFlush");
+            let id = create(display, parent, 0, 0, 1, 1, 0, 0, 0);
+            if id == 0 {
+                return None;
+            }
+            flush(display);
+            Some(VideoWindow {
+                map: symbol!("XMapWindow"),
+                unmap: symbol!("XUnmapWindow"),
+                move_resize: symbol!("XMoveResizeWindow"),
+                raise: symbol!("XRaiseWindow"),
+                destroy: symbol!("XDestroyWindow"),
+                flush,
+                display,
+                id,
+                place: [0, 0, 1, 1],
+                shown: false,
+                _x11: x11,
+            })
+        }
+    }
+
+    /// Its X11 id, for the player's `wid`.
+    pub fn id(&self) -> u64 {
+        u64::from(self.id)
+    }
+
+    /// Shown over `place` (left, top, width, height in the window), or
+    /// hidden; the server told only of what changed.
+    pub fn show(&mut self, place: Option<[i32; 4]>) {
+        // SAFETY: the window is this one's own, alive until drop.
+        unsafe {
+            match place.filter(|[_, _, w, h]| *w > 0 && *h > 0) {
+                Some(place) => {
+                    if place != self.place {
+                        (self.move_resize)(self.display, self.id, place[0], place[1], place[2] as c_uint, place[3] as c_uint);
+                        self.place = place;
+                    }
+                    if !self.shown {
+                        (self.map)(self.display, self.id);
+                        (self.raise)(self.display, self.id);
+                        self.shown = true;
+                    }
+                }
+                None if self.shown => {
+                    (self.unmap)(self.display, self.id);
+                    self.shown = false;
+                }
+                None => return,
+            }
+            (self.flush)(self.display);
+        }
+    }
+
+    pub fn shown(&self) -> bool {
+        self.shown
+    }
+}
+
+impl Drop for VideoWindow {
+    fn drop(&mut self) {
+        // SAFETY: the window made in `new`, destroyed once.
+        unsafe {
+            (self.destroy)(self.display, self.id);
+            (self.flush)(self.display);
+        }
+    }
+}

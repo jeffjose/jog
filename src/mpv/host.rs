@@ -232,7 +232,7 @@ impl Player {
     fn opening(&self, path: &Path) {
         let gpu = self.role.gpu() && HWDEC.load(Ordering::Relaxed) && crashes::crashed_on(path).is_none();
         if gpu != self.gpu.get() {
-            self.tell(&Request::Set { name: "hwdec".into(), value: if gpu { "auto-copy" } else { "no" }.into() });
+            self.tell(&Request::Set { name: "hwdec".into(), value: if gpu { super::gpu_decoding() } else { "no" }.into() });
             self.gpu.set(gpu);
         }
         *self.shared.open.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((path.to_path_buf(), gpu));
