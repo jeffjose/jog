@@ -1430,8 +1430,14 @@ pub struct App {
     /// The section marked in each video, by file: still there when the
     /// video is come back to.
     sections: HashMap<usize, Section>,
-    /// The sections marked when jog was last quit, by video, read once.
-    marked_sections: Option<HashMap<PathBuf, (f64, f64)>>,
+    /// The other sections marked in each video, by file, in no order: each
+    /// made the one in use by a click on it.
+    other_sections: HashMap<usize, Vec<Section>>,
+    /// Where on the seek bar it was right-clicked, in seconds, for its menu.
+    bar_menu_at: Option<f64>,
+    /// The sections marked when jog was last quit, by video, read once:
+    /// the one in use first.
+    marked_sections: Option<HashMap<PathBuf, Vec<(f64, f64)>>>,
     /// The strip's tab; the sections kept, by video, read the first time
     /// they are wanted; each video's own chapters, read from the player;
     /// and the frames for the Sections tab's cells.
@@ -2051,6 +2057,8 @@ impl App {
             edit_waiting: None,
             track_memory: None,
             sections: HashMap::new(),
+            other_sections: HashMap::new(),
+            bar_menu_at: None,
             marked_sections: None,
             strip_tab: StripTab::Scenes,
             kept_sections: None,
@@ -2745,6 +2753,15 @@ impl App {
             SectionClear => {
                 self.clear_section();
             }
+            SectionStartAt | SectionEndAt | PlayFromHere => {
+                let Some(at) = self.bar_menu_at.take().or_else(|| self.video_time().map(|(at, _)| at)) else { return };
+                match command {
+                    SectionStartAt => self.mark_edge_at(Edge::A, at, true),
+                    SectionEndAt => self.mark_edge_at(Edge::B, at, false),
+                    _ => self.play_from(at),
+                }
+            }
+            SectionClearAll => self.clear_all_sections(),
             SaveSection(clip) => self.save_section(clip, crate::transcode::Knobs::default()),
             KeepSection => self.keep_section(),
             RenameSection => self.ask_section_name(),

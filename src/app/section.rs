@@ -160,61 +160,111 @@ fn marked_path() -> Option<PathBuf> {
     crate::positions::state_dir().map(|dir| dir.join("marked-sections"))
 }
 
-fn read_marked() -> HashMap<PathBuf, (f64, f64)> {
+fn read_marked() -> HashMap<PathBuf, Vec<(f64, f64)>> {
     let text = marked_path().and_then(|path| std::fs::read_to_string(path).ok()).unwrap_or_default();
-    text.lines()
-        .filter_map(|line| {
-            let mut parts = line.splitn(3, '\t');
-            let (a, b, path) = (parts.next()?.parse().ok()?, parts.next()?.parse().ok()?, parts.next()?);
-            Some((PathBuf::from(path), (a, b)))
-        })
-        .collect()
+    let mut marked: HashMap<PathBuf, Vec<(f64, f64)>> = HashMap::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let (Some(a), Some(b), Some(path)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        if let (Ok(a), Ok(b)) = (a.parse(), b.parse()) {
+            marked.entry(PathBuf::from(path)).or_default().push((a, b));
+        }
+    }
+    marked
+}
+
+/// The letters of the `n`th section by time: A and B, C and D, and on.
+fn letters(n: usize) -> (String, String) {
+    let letter = |k: usize| match u8::try_from(k).ok().filter(|k| *k < 26) {
+        Some(k) => char::from(b'A' + k).to_string(),
+        None => format!("Z{}", k - 25),
+    };
+    (letter(2 * n), letter(2 * n + 1))
 }
 
 impl App {
-    /// A video opened: the section it had marked when jog was last quit,
-    /// unless one is marked now.
+    /// A video opened: the sections it had marked when jog was last quit,
+    /// unless some are marked now.
     pub(super) fn restore_section(&mut self, id: usize) {
-        if self.sections.contains_key(&id) {
+        if self.sections.contains_key(&id) || self.other_sections.contains_key(&id) {
             return;
         }
         let path = std::path::absolute(&self.files[id]).unwrap_or_else(|_| self.files[id].clone());
-        if let Some(&(a, b)) = self.marked_sections.get_or_insert_with(read_marked).get(&path) {
-            self.sections.insert(id, Section { a: Some(a), b: Some(b), through: false });
+        let Some(spans) = self.marked_sections.get_or_insert_with(read_marked).get(&path).cloned() else { return };
+        let mut spans = spans.into_iter().map(|(a, b)| Section { a: Some(a), b: Some(b), through: false });
+        if let Some(first) = spans.next() {
+            self.sections.insert(id, first);
+        }
+        let others: Vec<Section> = spans.collect();
+        if !others.is_empty() {
+            self.other_sections.insert(id, others);
         }
     }
 
-    /// Keeps the sections marked, for the next run.
+    /// Keeps the sections marked, for the next run: the one in use first.
     pub(super) fn save_marked_sections(&mut self) {
         let mut marked = self.marked_sections.take().unwrap_or_else(read_marked);
-        for (&id, section) in &self.sections {
+        let ids: std::collections::HashSet<usize> = self.sections.keys().chain(self.other_sections.keys()).copied().collect();
+        for id in ids {
             let path = std::path::absolute(&self.files[id]).unwrap_or_else(|_| self.files[id].clone());
-            match section.span() {
-                Some(span) => marked.insert(path, span),
-                None => marked.remove(&path),
+            let others = self.other_sections.get(&id).into_iter().flatten();
+            let spans: Vec<(f64, f64)> = self.sections.get(&id).into_iter().chain(others).filter_map(Section::span).collect();
+            match spans.is_empty() {
+                true => marked.remove(&path),
+                false => marked.insert(path, spans),
             };
         }
         let Some(file) = marked_path() else { return };
-        let mut lines: Vec<String> = marked.iter().map(|(path, (a, b))| format!("{a:.3}\t{b:.3}\t{}", path.display())).collect();
-        lines.sort();
+        let mut paths: Vec<&PathBuf> = marked.keys().collect();
+        paths.sort();
+        let lines: Vec<String> = paths.iter().flat_map(|path| marked[*path].iter().map(move |(a, b)| format!("{a:.3}\t{b:.3}\t{}", path.display()))).collect();
         let _ = file.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&file, lines.join("\n") + "\n"));
         self.marked_sections = Some(marked);
     }
 
-    /// The section of the video on view, if one is marked.
+    /// The section of the video on view in use, if one is marked.
     pub(super) fn section(&self) -> Option<Section> {
         let video = self.video.as_ref()?;
         self.sections.get(&video.id).copied()
     }
 
+    /// Every section of the video on view by time, whether it is the one
+    /// in use, and its letters.
+    pub(super) fn all_sections(&self) -> Vec<(Section, bool, (String, String))> {
+        let Some(video) = &self.video else { return Vec::new() };
+        let others = self.other_sections.get(&video.id).into_iter().flatten().map(|section| (*section, false));
+        let mut all: Vec<(Section, bool)> = self.section().map(|section| (section, true)).into_iter().chain(others).collect();
+        all.sort_by(|x, y| x.0.a.unwrap_or(0.0).total_cmp(&y.0.a.unwrap_or(0.0)));
+        all.into_iter().enumerate().map(|(n, (section, active))| (section, active, letters(n))).collect()
+    }
+
+    /// The letters of the section in use.
+    pub(super) fn active_letters(&self) -> (String, String) {
+        self.all_sections().into_iter().find(|(_, active, _)| *active).map_or_else(|| letters(0), |(_, _, letters)| letters)
+    }
+
     /// Marks an end of the section where the video is now.
     pub(super) fn mark_edge(&mut self, edge: Edge) {
+        let Some((at, _)) = self.video_time() else { return };
+        self.mark_edge_at(edge, at, false);
+    }
+
+    /// Marks an end of the section in use at `at`. A start outside the
+    /// one marked, or `fresh`, begins another, the one before kept marked.
+    pub(super) fn mark_edge_at(&mut self, edge: Edge, at: f64, fresh: bool) {
         let Some(video) = &self.video else { return self.toast("Sections are for videos") };
         let id = video.id;
-        let Some((at, length)) = self.video_time() else { return };
+        let Some((_, length)) = self.video_time() else { return };
         let mut section = self.sections.get(&id).copied().unwrap_or_default();
         match edge {
             Edge::A => {
+                if let Some((a, b)) = section.span().filter(|(a, b)| fresh || at < *a || at > *b) {
+                    let others = self.other_sections.entry(id).or_default();
+                    if !others.iter().any(|other| other.span() == Some((a, b))) {
+                        others.push(Section { through: false, ..section });
+                    }
+                    section = Section::default();
+                }
                 section.a = Some(at);
                 // An end before the new start is no end of it.
                 if section.b.is_some_and(|b| b <= at + SHORTEST) {
@@ -238,6 +288,75 @@ impl App {
         }
         self.preload_video();
         self.say_section();
+        self.redraw();
+    }
+
+    /// The other section on the seek bar's track under a point, while the
+    /// bar is up: its place among the others.
+    pub(super) fn other_section_at(&self, x: f64, y: f64) -> Option<usize> {
+        self.hover?;
+        let video = self.video.as_ref()?;
+        let (_, length) = self.video_time().filter(|(_, length)| *length > 0.0)?;
+        let bar = self.seek_bar();
+        if (y - f64::from(bar.middle)).abs() > f64::from(bar.unit) {
+            return None;
+        }
+        let x_of = |at: f64| f64::from(bar.x) + f64::from(bar.width) * at / length;
+        let others = self.other_sections.get(&video.id)?;
+        // The shortest of those under it, for one inside another.
+        (0..others.len())
+            .filter_map(|n| others[n].span().map(|span| (n, span)))
+            .filter(|(_, (a, b))| x >= x_of(*a) - grip(&bar) / 2.0 && x <= x_of(*b) + grip(&bar) / 2.0)
+            .min_by(|(_, x), (_, y)| (x.1 - x.0).total_cmp(&(y.1 - y.0)))
+            .map(|(n, _)| n)
+    }
+
+    /// Whether a point is on the seek bar's track, while the bar is up.
+    pub(super) fn on_seek_track(&self, x: f64, y: f64) -> bool {
+        let bar = self.seek_bar();
+        self.hover.is_some() && self.video.is_some() && bar.on_track(x) && (y - f64::from(bar.middle)).abs() <= f64::from(bar.unit * 2)
+    }
+
+    /// Another section made the one in use; the one that was, kept
+    /// marked among the others, unless it was only begun.
+    pub(super) fn activate_section(&mut self, n: usize) {
+        let Some(video) = &self.video else { return };
+        let id = video.id;
+        let Some(others) = self.other_sections.get_mut(&id).filter(|others| n < others.len()) else { return };
+        let chosen = others.remove(n);
+        if let Some(was) = self.sections.insert(id, chosen).filter(|was| was.span().is_some()) {
+            others.push(was);
+        }
+        self.apply_loop();
+        self.preload_video();
+        self.redraw();
+    }
+
+    /// Unmarks every section of the video on view.
+    pub(super) fn clear_all_sections(&mut self) {
+        let Some(video) = &self.video else { return };
+        let id = video.id;
+        let path = std::path::absolute(&self.files[id]).unwrap_or_else(|_| self.files[id].clone());
+        let had = self.sections.remove(&id).is_some() | self.other_sections.remove(&id).is_some_and(|others| !others.is_empty());
+        if !had {
+            return self.toast("No sections");
+        }
+        if let Some(marked) = &mut self.marked_sections {
+            marked.remove(&path);
+        }
+        self.apply_loop();
+        self.preload_video();
+        self.toast("Sections cleared");
+        self.redraw();
+    }
+
+    /// Played on from `at`, in seconds.
+    pub(super) fn play_from(&mut self, at: f64) {
+        let Some((_, length)) = self.video_time().filter(|(_, length)| *length > 0.0) else { return };
+        self.seek_to(at / length, true);
+        if let Some(player) = &self.player {
+            player.set("pause", "no");
+        }
         self.redraw();
     }
 
@@ -807,43 +926,44 @@ impl App {
         }
     }
 
-    /// Draws the section over the seek bar's track: the stretch between
-    /// the ends in the accent, and each end as a flag to take hold of.
-    /// Gives back where the flags' letters stand across, for the time under
-    /// the pointer to stay clear of.
+    /// Draws the sections over the seek bar's track: the stretch between
+    /// the ends in the accent, and each end as a flag, the one in use's to
+    /// take hold of; the others fainter. Gives back where the flags'
+    /// letters stand across, for the time under the pointer to stay clear of.
     pub(super) fn draw_section(&self, canvas: &mut Canvas, bar: &SeekBar, top: i32, thickness: i32, length: f64, labels: &mut Vec<(i32, i32, Ordering, String)>, px: u32) -> Vec<i32> {
-        let Some(section) = self.section() else { return Vec::new() };
         let x_of = |at: f64| bar.x + (f64::from(bar.width) * at / length) as i32;
-        if let Some((a, b)) = section.span() {
-            let (left, right) = (x_of(a), x_of(b));
-            // Played through rather than looped, fainter.
-            let strength = if section.through { 90 } else { 200 };
-            canvas.round_fill(left, top - thickness / 3, (right - left).max(2), thickness + thickness * 2 / 3, thickness / 2, accent(), strength);
-        }
         let line = Text::line_height(px);
-        // Ends close together put their letters back to back, A to the
-        // left of its flag and B to the right, rather than one on the other.
-        let close = match (section.a, section.b) {
-            (Some(a), Some(b)) => (x_of(b) - x_of(a)).abs() < line,
-            _ => false,
-        };
         let mut flags = Vec::new();
-        for (edge, at) in [(Edge::A, section.a), (Edge::B, section.b)] {
-            let Some(at) = at else { continue };
-            let x = x_of(at);
-            let tall = thickness * 3;
-            // Under the pointer, or held, it stands out: there to take hold of.
-            if self.flag_under == Some(edge) {
-                canvas.round_fill(x - 3, bar.middle - tall / 2 - 2, 7, tall + 4, 3, TEXT_COLOR, 256);
-            } else {
-                canvas.fill(x - 1, bar.middle - tall / 2, 3, tall, accent_soft());
+        for (section, active, (first, second)) in self.all_sections() {
+            if let Some((a, b)) = section.span() {
+                let (left, right) = (x_of(a), x_of(b));
+                // Played through rather than looped, fainter; one not in use, more so.
+                let strength = if !active { 70 } else if section.through { 90 } else { 200 };
+                canvas.round_fill(left, top - thickness / 3, (right - left).max(2), thickness + thickness * 2 / 3, thickness / 2, accent(), strength);
             }
-            let (word, side) = match edge {
-                Edge::A => ("A", if close { Ordering::Less } else { Ordering::Equal }),
-                Edge::B => ("B", if close { Ordering::Greater } else { Ordering::Equal }),
+            // Ends close together put their letters back to back, A to the
+            // left of its flag and B to the right, rather than one on the other.
+            let close = match (section.a, section.b) {
+                (Some(a), Some(b)) => (x_of(b) - x_of(a)).abs() < line,
+                _ => false,
             };
-            labels.push((x, bar.middle - tall / 2 - line, side, word.to_string()));
-            flags.push(x);
+            for (edge, at) in [(Edge::A, section.a), (Edge::B, section.b)] {
+                let Some(at) = at else { continue };
+                let x = x_of(at);
+                let tall = if active { thickness * 3 } else { thickness * 2 };
+                // Under the pointer, or held, it stands out: there to take hold of.
+                if active && self.flag_under == Some(edge) {
+                    canvas.round_fill(x - 3, bar.middle - tall / 2 - 2, 7, tall + 4, 3, TEXT_COLOR, 256);
+                } else {
+                    canvas.fill(x - 1, bar.middle - tall / 2, 3, tall, if active { accent_soft() } else { DIM_TEXT_COLOR });
+                }
+                let (word, side) = match edge {
+                    Edge::A => (&first, if close { Ordering::Less } else { Ordering::Equal }),
+                    Edge::B => (&second, if close { Ordering::Greater } else { Ordering::Equal }),
+                };
+                labels.push((x, bar.middle - thickness * 3 / 2 - line, side, word.clone()));
+                flags.push(x);
+            }
         }
         flags
     }
@@ -868,10 +988,10 @@ pub enum SectionTool {
 
 impl SectionTool {
     /// What it does, said over it while it is pointed at.
-    fn tip(self, looping: bool, kept: bool) -> &'static str {
+    fn tip(self, looping: bool, kept: bool, (a, b): &(String, String)) -> String {
         match self {
-            SectionTool::Play => "Play from A",
-            SectionTool::Convert => "Convert…  ·  A–B",
+            SectionTool::Play => return format!("Play from {a}"),
+            SectionTool::Convert => return format!("Convert…  ·  {a}–{b}"),
             SectionTool::Loop if looping => "Looping  ·  click to play through",
             SectionTool::Loop => "Playing through  ·  click to loop",
             SectionTool::Save => "Save  ·  as it is",
@@ -880,6 +1000,7 @@ impl SectionTool {
             SectionTool::Keep => "Keep  ·  in the Sections tab",
             SectionTool::Clear => "Clear  ·  Esc",
         }
+        .to_string()
     }
 }
 
@@ -965,6 +1086,7 @@ impl App {
     pub(super) fn draw_section_tools(&self, canvas: &mut Canvas, tools: &[(SectionTool, [i32; 4])], kept: bool, buttons: &mut Vec<(i32, i32, &'static str, u32)>, tip: &mut Option<(i32, i32, String)>, px: u32) {
         let (Some(first), Some(last)) = (tools.first(), tools.last()) else { return };
         let looping = self.section().is_some_and(|section| !section.through);
+        let letters = self.active_letters();
         let line = Text::line_height(px);
         let side = first.1[3];
         let gap = (side / 6).max(2);
@@ -1005,7 +1127,7 @@ impl App {
                         canvas.fill(cx - half + row, cy + row, (half - row) * 2, 1, TEXT_COLOR);
                     }
                     if pointed {
-                        *tip = Some((x + w / 2, top - px as i32 * 3 / 4, tool.tip(looping, kept).to_string()));
+                        *tip = Some((x + w / 2, top - px as i32 * 3 / 4, tool.tip(looping, kept, &letters)));
                     }
                     continue;
                 }
@@ -1013,7 +1135,7 @@ impl App {
             let lit = on || pointed || (*tool == SectionTool::Loop && looping);
             buttons.push((x + w / 2, y + (h - line) / 2, icon, if lit { TEXT_COLOR } else { DIM_TEXT_COLOR }));
             if pointed {
-                *tip = Some((x + w / 2, top - px as i32 * 3 / 4, tool.tip(looping, kept).to_string()));
+                *tip = Some((x + w / 2, top - px as i32 * 3 / 4, tool.tip(looping, kept, &letters)));
             }
         }
     }
@@ -1034,11 +1156,6 @@ impl App {
     /// The section played from its start, A.
     pub(super) fn play_section(&mut self) {
         let Some(a) = self.section().and_then(|section| section.a) else { return };
-        let Some((_, length)) = self.video_time().filter(|(_, length)| *length > 0.0) else { return };
-        self.seek_to(a / length, true);
-        if let Some(player) = &self.player {
-            player.set("pause", "no");
-        }
-        self.redraw();
+        self.play_from(a);
     }
 }

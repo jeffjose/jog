@@ -145,6 +145,8 @@ where they were left unless --no-positions is given.
   Section menu               keep the section, or save it: quick (from the
                              keyframe before), exact as MP4 or MKV, GIF,
                              animated WebP or AVIF
+  Right click on the bar     start or end a section there: more than one,
+                             A–B, C–D…; a click on one puts it in use
   T, then T again            the Sections tab: kept sections and the file's
                              chapters; a click plays one, a right click on a
                              kept one renames or removes it"),

@@ -41,6 +41,13 @@ pub enum Command {
     SectionPlay,
     /// The Convert window, for the section.
     SectionConvert,
+    /// From the seek bar's own menu, at the time right-clicked: a new
+    /// section started there, the one marked ended there, or play from there.
+    SectionStartAt,
+    SectionEndAt,
+    PlayFromHere,
+    /// Every section of the video unmarked, not only the one in use.
+    SectionClearAll,
     /// Save the section as a clip or an animation.
     SaveSection(Clip),
     /// Keep the section, for the Sections tab; or forget it, kept.
@@ -587,6 +594,9 @@ pub fn command_icon(command: Command) -> &'static str {
         SectionLoop => REPEAT,
         SectionPlay => PLAY,
         SectionConvert => REPLACE,
+        SectionStartAt | SectionEndAt => REPEAT,
+        PlayFromHere => PLAY,
+        SectionClearAll => X,
         SaveSection(_) => FILM,
         KeepSection => PIN,
         RenameSection => PENCIL,
@@ -714,6 +724,7 @@ const SECTION: &[Option<MenuItem>] = &[
     video_item("Start here", "Shift+A", Command::SectionStart),
     video_item("End here", "Shift+B", Command::SectionEnd),
     video_item("Clear", "Esc", Command::SectionClear),
+    video_item("Clear all", "", Command::SectionClearAll),
     video_item("Loop / play through", "", Command::SectionLoop),
     None,
     video_item("Keep / forget", "", Command::KeepSection),
@@ -1005,7 +1016,7 @@ pub const GRID_AROUND_MENU: &[Option<MenuItem>] = &[
 
 /// A right click on the section marked, on the seek bar.
 pub const SECTION_BAR_MENU: &[Option<MenuItem>] = &[
-    video_item("Play from A", "", Command::SectionPlay),
+    video_item("Play from the start", "", Command::SectionPlay),
     video_item("Convert…", "", Command::SectionConvert),
     None,
     video_item("Loop / play through", "", Command::SectionLoop),
@@ -1019,6 +1030,16 @@ pub const SECTION_BAR_MENU: &[Option<MenuItem>] = &[
     video_item("Save GIF", "", Command::SaveSection(Clip::Gif)),
     video_item("Save WebP", "", Command::SaveSection(Clip::WebP)),
     video_item("Save AVIF", "", Command::SaveSection(Clip::Avif)),
+];
+
+/// The seek bar right-clicked away from a section: at the time clicked.
+pub const SEEK_BAR_MENU: &[Option<MenuItem>] = &[
+    video_item("Play from here", "", Command::PlayFromHere),
+    None,
+    video_item("Start a section here", "", Command::SectionStartAt),
+    video_item("End the section here", "", Command::SectionEndAt),
+    None,
+    video_item("Clear all sections", "", Command::SectionClearAll),
 ];
 
 /// The section's save button's other half: what to save it as.
@@ -1132,6 +1153,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Shift+Left  Shift+Right", "Step one frame"),
                 ("b", "Back to the start"),
                 ("Shift+A  Shift+B", "Mark a section's start / end: it loops; drag its ends on the seek bar, Esc clears it"),
+                ("Right click on the bar", "Sections: start, end, more than one; a click puts one in use"),
                 ("]  [  \\", "Faster / slower / normal speed"),
                 ("Up  Down  m", "Volume, mute"),
                 ("l", "Loop: this video, the whole list, off"),

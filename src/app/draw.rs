@@ -673,7 +673,7 @@ impl App {
                 let seconds = fraction * length;
                 let said = match self.section().and_then(|section| section.looping()) {
                     Some((a, b)) if seconds >= a && seconds <= b => format!("{}  {}", commands::icons::REPEAT, clock(seconds)),
-                    Some((_, b)) if seconds > b => format!("{}  ·  past B", clock(seconds)),
+                    Some((_, b)) if seconds > b => format!("{}  ·  past {}", clock(seconds), self.active_letters().1),
                     _ => clock(seconds),
                 };
                 labels.push((at.clamp(unit * 4, width - unit * 4), label_top, Ordering::Equal, said));

@@ -634,6 +634,10 @@ impl App {
                     // Not from as high up as the section's buttons: a click that
                     // misses one of them is no seek.
                     // Click to jump there; keep the button down to scrub.
+                    // On another section, that one is in use from then on.
+                    if let Some(n) = self.other_section_at(x, y) {
+                        self.activate_section(n);
+                    }
                     self.seek_to(self.hover.unwrap_or(0.0), self.precise);
                     self.drag = Some(Drag::Scrub);
                 }
@@ -725,6 +729,20 @@ impl App {
             // done with it.
             (MouseButton::Right, true) if self.on_section(x, y) => {
                 self.open_menu(commands::SECTION_BAR_MENU, None);
+                self.redraw();
+            }
+            // On another section, that one in use, and what can be done with it.
+            (MouseButton::Right, true) if self.other_section_at(x, y).is_some() => {
+                if let Some(n) = self.other_section_at(x, y) {
+                    self.activate_section(n);
+                }
+                self.open_menu(commands::SECTION_BAR_MENU, None);
+                self.redraw();
+            }
+            // Elsewhere along the seek bar: sections begun and ended there.
+            (MouseButton::Right, true) if self.on_seek_track(x, y) => {
+                self.bar_menu_at = self.hover.zip(self.video_time()).map(|(fraction, (_, length))| fraction * length);
+                self.open_menu(commands::SEEK_BAR_MENU, None);
                 self.redraw();
             }
             // On a row of the file list, the menu is of that file.
