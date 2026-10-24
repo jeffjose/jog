@@ -962,7 +962,7 @@ impl App {
     /// lit and what it does said over it; looping and kept in the accent.
     /// Their icons go with the bar's own buttons, to be written with them.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn draw_section_tools(&self, canvas: &mut Canvas, tools: &[(SectionTool, [i32; 4])], kept: bool, buttons: &mut Vec<(i32, i32, &'static str, u32)>, labels: &mut Vec<(i32, i32, Ordering, String)>, px: u32) {
+    pub(super) fn draw_section_tools(&self, canvas: &mut Canvas, tools: &[(SectionTool, [i32; 4])], kept: bool, buttons: &mut Vec<(i32, i32, &'static str, u32)>, tip: &mut Option<(i32, i32, String)>, px: u32) {
         let (Some(first), Some(last)) = (tools.first(), tools.last()) else { return };
         let looping = self.section().is_some_and(|section| !section.through);
         let line = Text::line_height(px);
@@ -1005,7 +1005,7 @@ impl App {
                         canvas.fill(cx - half + row, cy + row, (half - row) * 2, 1, TEXT_COLOR);
                     }
                     if pointed {
-                        labels.push((x + w / 2, top - line, Ordering::Equal, tool.tip(looping, kept).to_string()));
+                        *tip = Some((x + w / 2, top - px as i32 * 3 / 4, tool.tip(looping, kept).to_string()));
                     }
                     continue;
                 }
@@ -1013,7 +1013,7 @@ impl App {
             let lit = on || pointed || (*tool == SectionTool::Loop && looping);
             buttons.push((x + w / 2, y + (h - line) / 2, icon, if lit { TEXT_COLOR } else { DIM_TEXT_COLOR }));
             if pointed {
-                labels.push((x + w / 2, top - line, Ordering::Equal, tool.tip(looping, kept).to_string()));
+                *tip = Some((x + w / 2, top - px as i32 * 3 / 4, tool.tip(looping, kept).to_string()));
             }
         }
     }

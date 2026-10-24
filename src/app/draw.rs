@@ -565,6 +565,8 @@ impl App {
         let mut labels: Vec<(i32, i32, Ordering, String)> = Vec::new();
         // The buttons at the right of the bar: where, which icon, how bright.
         let mut buttons: Vec<(i32, i32, &str, u32)> = Vec::new();
+        // What a button over a section does, said over it as a tooltip.
+        let mut bar_tip: Option<(i32, i32, String)> = None;
         let mut subtitle_margin = SUBTITLE_MARGIN;
         let bar_wanted = viewing && (self.hover.is_some() || self.time_until.is_some());
         // It rises from the bottom edge and sinks back into it.
@@ -606,7 +608,7 @@ impl App {
             // What can be done with the section, in a row above it.
             let tools = self.section_tools(&bar);
             let kept = !tools.is_empty() && self.section_kept();
-            self.draw_section_tools(canvas, &tools, kept, &mut buttons, &mut labels, px);
+            self.draw_section_tools(canvas, &tools, kept, &mut buttons, &mut bar_tip, px);
             // The span of that row, which the time and the frame under the
             // pointer stand clear of; on it, they are not shown at all.
             let tools_span = tools.first().zip(tools.last()).map(|(first, last)| (first.1[0], last.1[0] + last.1[2], first.1[1]));
@@ -879,6 +881,19 @@ impl App {
                 Ordering::Greater => *anchor,
             };
             text.draw(canvas, left, *top, px, TEXT_COLOR, label);
+        }
+        // A button's tooltip, as the others look: a box of its own, a
+        // little shadow, standing clear above the buttons.
+        if let Some((center, bottom, words)) = &bar_tip {
+            let small = (px * 5 / 6).max(11);
+            let pad = px as i32 / 2;
+            let (w, h) = (text.width(words, small) + pad * 2, Text::line_height(small) + pad);
+            let x = (center - w / 2).clamp(pad, (width - w - pad).max(pad));
+            let y = bottom - h;
+            canvas.round_fill(x + 2, y + 3, w, h, pad, 0x000000, 96);
+            canvas.round_fill(x, y, w, h, pad, 0x24252C, 256);
+            canvas.round_outline(x, y, w, h, pad, 1, MENU_EDGE_COLOR);
+            text.draw(canvas, x + pad, y + pad / 2, small, TEXT_COLOR, words);
         }
         if let Some(behind) = &behind {
             canvas.dissolve(0, band_top, width, height - band_top, behind, 256);
