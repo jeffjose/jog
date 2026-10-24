@@ -1128,6 +1128,9 @@ pub struct App {
     scan: Option<scanning::Scanning>,
     /// File sizes looked up for searches such as `>10mb`.
     sizes: HashMap<usize, Option<u64>>,
+    /// The last folder the find box matched a file's folder for, and how it
+    /// read: files come a folder at a time, so each is made once.
+    folder_memo: RefCell<Option<(PathBuf, std::rc::Rc<str>)>>,
     /// Where videos were left, read the first time one is played.
     positions: Option<Positions>,
     /// The videos watched, read when first asked about, and what has been
@@ -1859,6 +1862,7 @@ impl App {
             watch: None,
             scan: None,
             sizes: HashMap::new(),
+            folder_memo: RefCell::new(None),
             positions: None,
             seen: RefCell::new(None),
             seen_known: RefCell::new(HashMap::new()),

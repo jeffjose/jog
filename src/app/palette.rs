@@ -103,7 +103,7 @@ impl App {
         if query.is_empty() {
             return all;
         }
-        let score = |name: &str, loose: bool| query.score(&Facts { name, video: false, marked: false, seen: None, verdict: None, size: None }, loose);
+        let score = |name: &str, loose: bool| query.score(&Facts { name, video: false, marked: false, seen: None, verdict: None, folder: None, size: None }, loose);
         let pass = |loose: bool| -> Vec<(i32, (String, &'static str, Command))> {
             all.iter().filter_map(|entry| Some((score(&entry.0, loose)?, entry.clone()))).collect()
         };
@@ -528,9 +528,18 @@ impl App {
             let right = layout.left + layout.width - pad;
             text.draw(canvas, right - length_width, text_top, px, dim, &length);
             let name_left = cell_left + thumb.0 + pad;
-            let name = clipped(text, &self.name_of(id), right - length_width - pad - name_left, px);
+            let room = right - length_width - pad - name_left;
+            let name = clipped(text, &self.name_of(id), room, px);
             let color = if self.marks.contains(&id) && at != palette.selected { MARK_COLOR } else { main };
             text.draw(canvas, name_left, text_top, px, color, &name);
+            // The folder it is in, below the one opened, if it is in one:
+            // among many alike names, which one is which.
+            let folder = self.folder_within(self.files[id].parent().unwrap_or(Path::new("")));
+            let name_w = text.width(&name, px);
+            if !folder.is_empty() && room - name_w > pad * 4 {
+                let folder = clipped(text, &folder, room - name_w - pad, px);
+                text.draw(canvas, name_left + name_w + pad, text_top, px, dim, &folder);
+            }
         }
         drawn
     }
@@ -545,7 +554,21 @@ impl App {
             false => None,
         };
         let seen = (query.wants_seen() && files::is_video(path)).then(|| self.watched(id));
-        query.score(&Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), seen, verdict: self.verdict(id), size }, loose)
+        // The folder it is in from the folder opened down, not from the
+        // root: in /mnt/nas/photos, "nas" is in every path and tells none
+        // apart. Made once for each folder in turn, as the files come.
+        let (roots, memo) = (&self.options.paths, &self.folder_memo);
+        let folder = path.parent().unwrap_or(Path::new(""));
+        let within = || {
+            if let Some((_, said)) = memo.borrow().as_ref().filter(|(had, _)| had == folder) {
+                return said.clone();
+            }
+            let said: std::rc::Rc<str> = within_roots(roots, folder).to_lowercase().into();
+            *memo.borrow_mut() = Some((folder.to_path_buf(), said.clone()));
+            said
+        };
+        let facts = Facts { name: &name, video: files::is_video(path), marked: self.marks.contains(&id), seen, verdict: self.verdict(id), folder: Some(&within), size };
+        query.score(&facts, loose)
     }
 
     pub(super) fn sort_by(&mut self, sort: Sort) {
@@ -832,4 +855,24 @@ impl App {
         }
     }
 
+}
+
+/// A folder as it is below the one opened that holds it, not from the
+/// root; empty for the folder opened itself, or one outside it.
+fn within_roots(roots: &[PathBuf], folder: &Path) -> String {
+    let here = [PathBuf::from(".")];
+    let roots = if roots.is_empty() { &here[..] } else { roots };
+    // A file named itself stands for the folder it is in.
+    let folder_of = |root: &PathBuf| if root.is_file() { root.parent().unwrap_or(Path::new("")).to_path_buf() } else { root.clone() };
+    let rest = roots.iter().map(folder_of).filter_map(|root| folder.strip_prefix(&root).ok().map(Path::to_path_buf)).min_by_key(|rest| rest.as_os_str().len());
+    // Outside all of them, as from a file list: nothing, rather than the
+    // whole way from the root.
+    rest.map(|rest| rest.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+impl App {
+    /// The folder a file is in, below the one opened.
+    pub(super) fn folder_within(&self, folder: &Path) -> String {
+        within_roots(&self.options.paths, folder)
+    }
 }

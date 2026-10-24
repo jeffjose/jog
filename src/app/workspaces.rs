@@ -105,7 +105,7 @@ impl App {
     /// a row to save it as one.
     pub(super) fn spaces_matching(&mut self, typed: &str) -> Vec<(String, &'static str, Command)> {
         let query = Query::parse(typed);
-        let wanted = |name: &str, loose: bool| query.is_empty() || query.score(&Facts { name, video: false, marked: false, seen: None, verdict: None, size: None }, loose).is_some();
+        let wanted = |name: &str, loose: bool| query.is_empty() || query.score(&Facts { name, video: false, marked: false, seen: None, verdict: None, folder: None, size: None }, loose).is_some();
         let row = |(at, space): (usize, &Space)| {
             let folder = space.paths.first().map(|path| short_dir(path)).unwrap_or_default();
             let unsaved = if space.saved { "" } else { "   (not saved)" };

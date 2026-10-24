@@ -1,4 +1,5 @@
-//! Matching file names against what is typed in the search box.
+//! Matching file names, and failing those their folders, against what is
+//! typed in the search box.
 
 /// What was typed, split into terms that must all hold.
 pub struct Query {
@@ -7,7 +8,7 @@ pub struct Query {
 
 enum Term {
     /// The letters appear in this order, not necessarily together.
-    Fuzzy(Vec<char>),
+    Fuzzy(Vec<char>, String),
     /// `^text`: the name starts with this.
     Prefix(String),
     /// `!text`: the name does not contain this.
@@ -43,6 +44,9 @@ pub struct Facts<'a> {
     pub seen: Option<bool>,
     /// What a triage has decided about it: kept, rejected, or neither.
     pub verdict: Option<crate::triage::Verdict>,
+    /// The folder it is in, from the folder opened down, in lower case:
+    /// asked for only of a file whose name does not have what was typed.
+    pub folder: Option<&'a dyn Fn() -> std::rc::Rc<str>>,
     /// Size in bytes; only looked up when `Query::wants_size` says so.
     pub size: Option<u64>,
 }
@@ -97,7 +101,7 @@ impl Query {
                 (!rest.is_empty()).then(|| match kind {
                     '^' => Term::Prefix(rest),
                     '!' => Term::Without(rest),
-                    _ => Term::Fuzzy(rest.chars().collect()),
+                    _ => Term::Fuzzy(rest.chars().collect(), rest.to_string()),
                 })
             })
             .collect();
@@ -124,7 +128,11 @@ impl Query {
         let mut total = 0;
         for term in &self.terms {
             total += match term {
-                Term::Fuzzy(letters) => fuzzy(letters, &name, loose)?,
+                // In the name; or failing that, as typed, in where it is,
+                // which counts for less than any match in a name.
+                // Being together as typed, a match in a path is found the first
+                // time through or not at all: not looked for again loosely.
+                Term::Fuzzy(letters, typed) => fuzzy(letters, &name, loose).or_else(|| file.folder.filter(|_| !loose).and_then(|folder| in_path(typed, &folder(), &name)))?,
                 Term::Prefix(start) => name.starts_with(start.as_str()).then_some(200)?,
                 Term::Without(part) => (!name.contains(part.as_str())).then_some(0)?,
                 Term::Is(kind) => {
@@ -149,6 +157,21 @@ impl Query {
         }
         Some(total)
     }
+}
+
+/// Scores `letters` found together, as typed, in the path to a file: a
+/// little more where a folder's name begins with them, and always less
+/// than the least match in a name.
+fn in_path(typed: &str, folder: &str, name: &str) -> Option<i32> {
+    // Where it is found, and whether a word begins there.
+    let found = |path: &str| path.find(typed).map(|at| path[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric()));
+    // In the folder; or, with a slash, across into the name.
+    let starts = match found(folder) {
+        Some(starts) => starts,
+        None if typed.contains('/') && !folder.is_empty() => found(&format!("{folder}/{name}"))?,
+        None => return None,
+    };
+    Some(if starts { 5 } else { 1 })
 }
 
 /// Scores `letters` within `name`: together as typed, or, when `loose`,
@@ -192,7 +215,7 @@ mod tests {
 
     fn matches<'a>(query: &str, names: &[&'a str]) -> Vec<&'a str> {
         let query = Query::parse(query);
-        let facts = |name: &'a str| Facts { name, video: name.ends_with(".mp4"), marked: name == "bark.jpg", seen: None, verdict: None, size: Some(name.len() as u64 * 1024) };
+        let facts = |name: &'a str| Facts { name, video: name.ends_with(".mp4"), marked: name == "bark.jpg", seen: None, verdict: None, folder: None, size: Some(name.len() as u64 * 1024) };
         // As the search box does: scattered letters only when nothing has
         // them together.
         let pass = |loose: bool| -> Vec<(i32, &'a str)> {
@@ -207,6 +230,45 @@ mod tests {
     }
 
     const NAMES: &[&str] = &["berserker-bloodmoon.mp4", "bark.jpg", "My-Foo.png", "foo-bar.jpg", "food.webp", "alien.jpg"];
+
+    /// As `matches`, each file a path, its name the last part.
+    fn matches_paths<'a>(query: &str, paths: &[&'a str]) -> Vec<&'a str> {
+        let query = Query::parse(query);
+        let pass = |loose: bool| -> Vec<(i32, &'a str)> {
+            paths
+                .iter()
+                .filter_map(|path| {
+                    let name = path.rsplit('/').next().unwrap_or(path);
+                    let folder = || std::rc::Rc::from(path.rsplit_once('/').map_or("", |(folder, _)| folder).to_lowercase());
+                    let facts = Facts { name, video: false, marked: false, seen: None, verdict: None, folder: Some(&folder), size: None };
+                    Some((query.score(&facts, loose)?, *path))
+                })
+                .collect()
+        };
+        let mut scored = pass(false);
+        if scored.is_empty() {
+            scored = pass(true);
+        }
+        scored.sort_by_key(|(score, _)| -score);
+        scored.into_iter().map(|(_, path)| path).collect()
+    }
+
+    #[test]
+    fn a_folder_matches_too_but_after_a_name() {
+        let paths = ["2024/Beach-Trip/img1.jpg", "2024/city/beach.jpg", "2023/misc/sunset.jpg", "2024/city/b-e-a-c-h.png"];
+        // In a name first, then in where it is.
+        assert_eq!(matches_paths("beach", &paths), ["2024/city/beach.jpg", "2024/Beach-Trip/img1.jpg"]);
+        // Across a folder and the name.
+        assert_eq!(matches_paths("trip/img", &paths), ["2024/Beach-Trip/img1.jpg"]);
+        // Every term must hold, where each can.
+        assert_eq!(matches_paths("2024 sunset", &paths), Vec::<&str>::new());
+        assert_eq!(matches_paths("2023 sunset", &paths), ["2023/misc/sunset.jpg"]);
+        // Letters scattered through a path are no match: they would be in
+        // nearly every one; scattered through a name still are.
+        let mut scattered = matches_paths("bch", &paths);
+        scattered.sort_unstable();
+        assert_eq!(scattered, ["2024/city/b-e-a-c-h.png", "2024/city/beach.jpg"]);
+    }
 
     #[test]
     fn letters_match_in_order_and_ignore_case() {
