@@ -729,6 +729,7 @@ impl App {
         let boxes = self.menu.is_some() || self.prompt.is_some() || self.confirm.is_some() || panel.is_some() || self.convert_panel.is_some() || self.video_panel.is_some() || self.compare.is_some() || self.track_picker.is_some() || self.inspector.is_some() || self.track_editor.is_some() || self.editor.is_some();
         // The filmstrip has words of its own: the lengths of its videos.
         let boxes = boxes || self.palette.is_some() || strip.is_some() || scene_strip.is_some() || self.overview.is_some() || self.triage_on;
+        let boxes = boxes || self.activity.open || self.activity_running();
         if nothing_to_write && !boxes && !self.help {
             // Nothing drawn means no debug overlay, and none of its buttons.
             self.debug_buttons.clear();
@@ -813,6 +814,9 @@ impl App {
         }
         text_block(canvas, &mut text, &exif, px, |_, h| (left, bottom - h));
         text_block(canvas, &mut text, &actions, px, |w, h| (width - margin - w, bottom - h));
+        // The Activity panel, under the toast and what runs, which stand
+        // to its left.
+        self.draw_activity(canvas, &mut text, px);
         // A toast slides in from the right edge, and off that way again
         // as its time runs out.
         let toast_in = self.glide(&self.toast_slide, 1.0, EASE);
@@ -851,6 +855,9 @@ impl App {
             }
             _ => text_block(canvas, &mut text, &toast, px, |w, _| (width - margin - w + (toast_away * f64::from(w + margin)) as i32, margin)),
         }
+        // While anything runs, how far along, below where a toast goes.
+        let pill_top = margin + if self.toast.is_some() { Text::line_height(px) + px as i32 } else { 0 };
+        self.draw_activity_pill(canvas, &mut text, px, width - margin, pill_top);
         self.draw_triage(canvas, &mut text, px);
         // Twice the usual size, centered just above the seek bar.
         text_block(canvas, &mut text, &time, px, |w, h| ((width - w) / 2, time_bottom - h));

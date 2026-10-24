@@ -842,6 +842,7 @@ impl App {
         }
         match ops::move_file(&from, &to) {
             Ok(()) => {
+                self.job_renamed(&from, &to);
                 match moved {
                     true => println!("[rename] {} -> {}", from.display(), to.display()),
                     false => println!("[rename] {old_name} -> {said}"),

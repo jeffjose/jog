@@ -172,8 +172,9 @@ pub enum Command {
     Undo,
     /// Do again what was last undone.
     Redo,
-    /// What the toasts said lately: the find box, set to them.
-    Messages,
+    /// The Activity panel: conversions and saves, running and done, and
+    /// what the toasts said.
+    Activity,
     /// Back to where the last jump was made from, and on again.
     TravelBack,
     TravelForward,
@@ -352,6 +353,7 @@ pub fn for_key(key: Key<&str>, modifiers: ModifiersState, numpad: bool) -> Optio
             "r" => Reload,
             "S" => Save,
             "K" => ConvertPanel,
+            "N" => Activity,
             "s" => SortMenu,
             "m" => ToggleMute,
             "l" => CycleLoop,
@@ -631,7 +633,8 @@ pub fn command_icon(command: Command) -> &'static str {
         Compare => EYE,
         Undo => UNDO,
         Redo => ROTATE_CW,
-        Messages | CopyMessage(_) => CLOCK,
+        CopyMessage(_) => CLOCK,
+        Activity => LIST,
         TravelBack => ARROW_LEFT,
         TravelForward => ARROW_RIGHT,
         CopyName | CopyViewedName | CopyViewedPath | CopyViewedSize | SaveFilelist => COPY,
@@ -855,7 +858,7 @@ const FILE: &[Option<MenuItem>] = &[
     item("Save the file list", "L", Command::SaveFilelist),
     item("Undo", "u", Command::Undo),
     item("Redo", "U", Command::Redo),
-    item("Messages", "", Command::Messages),
+    item("Activity", "N", Command::Activity),
     None,
     item("Copy file name", "c", Command::CopyName),
     item("Copy full path", "C", Command::CopyPath),
@@ -1189,6 +1192,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Y", "Copy for the shell: one line, a folder's files as /dir/img-{1,5}.jpg"),
                 ("F2", "Rename, or move: a path such as /tmp/a.png"),
                 ("K", "Convert, pictures or videos: sizes first, a frame to compare"),
+                ("N", "Activity: conversions running and done, and what jog has said"),
                 ("e", "Edit: draw, write, emoji, blur, erase, crop, copy text, redact · Ctrl+S over it, Ctrl+Shift+S a copy"),
                 ("u", "Undo copy, move, rename or an edit saved over"),
                 ("Delete", "Remove from the list"),

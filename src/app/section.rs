@@ -397,6 +397,7 @@ impl App {
             return;
         }
         self.toast(format!("Saving {what}…"));
+        let job = self.job_begin(format!("Saving {}  ·  {what}", output.file_name().unwrap_or_default().to_string_lossy()));
         // A section worth saving is worth coming back to.
         self.keep_quietly(&path, a, b);
         let proxy = self.proxy.clone();
@@ -407,10 +408,10 @@ impl App {
                 let percent = (share * 100.0) as u32;
                 if said != Some(percent) {
                     said = Some(percent);
-                    let _ = proxy.send_event(Event::VideoProgress(format!("{name}  ·  {}", progress_words(share, started))));
+                    let _ = proxy.send_event(Event::JobProgress(job, share, format!("{name}  ·  {}", progress_words(share, started))));
                 }
             });
-            let mut done = Converted { created: Vec::new(), failed: 0, what, before: 0, after: 0, how: None, error: None, saving: true };
+            let mut done = Converted { created: Vec::new(), failed: 0, what, before: 0, after: 0, how: None, error: None, job, saving: true };
             match result {
                 Ok(made) => {
                     // In full, to be found from anywhere.

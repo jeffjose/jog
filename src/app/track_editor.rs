@@ -421,6 +421,7 @@ impl App {
         }
         self.track_editor = None;
         self.toast("Writing the tracks…");
+        let job = self.job_begin(format!("Writing the tracks  ·  {}", output.file_name().unwrap_or_default().to_string_lossy()));
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let name = output.file_name().unwrap_or_default().to_string_lossy().into_owned();
@@ -429,7 +430,7 @@ impl App {
                 let percent = (share * 100.0) as u32;
                 if said != Some(percent) {
                     said = Some(percent);
-                    let _ = proxy.send_event(Event::VideoProgress(format!("{name}  ·  {}", progress_words(share, started))));
+                    let _ = proxy.send_event(Event::JobProgress(job, share, format!("{name}  ·  {}", progress_words(share, started))));
                 }
             });
             // In place of the original: the new file takes its name. The
@@ -445,22 +446,27 @@ impl App {
                     Ok(target)
                 }
             });
-            let _ = proxy.send_event(Event::TracksWritten(result, replacing));
+            let _ = proxy.send_event(Event::TracksWritten(result, replacing, job));
         });
     }
 
-    pub(super) fn tracks_written(&mut self, result: Result<PathBuf, String>, replaced: bool) {
+    pub(super) fn tracks_written(&mut self, result: Result<PathBuf, String>, replaced: bool, job: u64) {
         match (result, replaced) {
-            (Err(error), _) => self.toast(format!("Not written · {error}")),
+            (Err(error), _) => {
+                self.job_end(job, super::activity::JobState::Failed(error.clone()));
+                self.toast(format!("Not written · {error}"));
+            }
             (Ok(path), true) => {
                 println!("[tracks] replaced {}", path.display());
-                self.toast(format!("Replaced {}", path.file_name().unwrap_or_default().to_string_lossy()));
+                let said = format!("Replaced {}", path.file_name().unwrap_or_default().to_string_lossy());
+                self.job_end(job, super::activity::JobState::Done { outputs: vec![path.clone()], said: said.clone() });
+                self.toast(said);
                 self.refresh();
             }
             (Ok(path), false) => {
                 println!("[tracks] {}", path.display());
                 let said = format!("{}  ·  {}", path.file_name().unwrap_or_default().to_string_lossy(), meta::human_size(std::fs::metadata(&path).map_or(0, |m| m.len())));
-                self.made(path, said);
+                self.made_by(path, said, Some(job));
             }
         }
     }
@@ -498,9 +504,10 @@ impl App {
         let seconds = editor.seconds;
         let proxy = self.proxy.clone();
         self.toast("Taking it out…");
+        let job = self.job_begin(format!("Taking out  ·  {}", output.file_name().unwrap_or_default().to_string_lossy()));
         std::thread::spawn(move || {
             let result = crate::transcode::remux(&video, &args, muxer, &output, seconds, |_| {});
-            let _ = proxy.send_event(Event::TracksWritten(result, false));
+            let _ = proxy.send_event(Event::TracksWritten(result, false, job));
         });
     }
 

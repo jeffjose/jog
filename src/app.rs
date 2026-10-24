@@ -72,6 +72,7 @@ mod refresh;
 mod scanning;
 mod video_layer;
 mod video_convert;
+mod activity;
 mod scenes_strip;
 mod scripted;
 mod inspect;
@@ -238,6 +239,8 @@ pub struct Converted {
     how: Option<String>,
     /// Why the last that could not be converted could not.
     error: Option<String>,
+    /// The job it was, in Activity.
+    job: u64,
     /// A section of a video saved, rather than files converted.
     saving: bool,
 }
@@ -256,8 +259,8 @@ pub enum Event {
     /// The quality found to fit a size: the picture, the format, the
     /// quality and the size it makes, and the size asked for.
     ConvertFit(usize, Format, Option<(f32, u64)>, u64),
-    /// How far along converting videos is, in words.
-    VideoProgress(String),
+    /// How far along a job is: its number, the share done, and in words.
+    JobProgress(u64, f64, String),
     /// What a few seconds of a video encoded say of the whole, for
     /// Inspect's Convert tab.
     VideoTrial(convert_tab::Trial, Result<crate::transcode::Estimate, String>),
@@ -290,7 +293,7 @@ pub enum Event {
     Compared(usize, Result<inspect::Inspection, String>),
     /// The tracks editor's file written, or why not; and whether it took
     /// the original's place.
-    TracksWritten(Result<PathBuf, String>, bool),
+    TracksWritten(Result<PathBuf, String>, bool, u64),
     /// Text from the clipboard, for Edit to paste.
     EditPaste(String),
     /// A picture from the clipboard, for Edit to lay over the one edited.
@@ -365,8 +368,8 @@ enum Redo {
 enum ToastLink {
     Undo,
     Show(PathBuf),
-    /// Stop the encode it tells of.
-    Cancel,
+    /// The Activity panel, open.
+    Activity,
 }
 
 /// Why the list is being brought up to date: the folders watched, a
@@ -1400,6 +1403,8 @@ pub struct App {
     convert_panel: Option<ConvertPanel>,
     /// The Convert window for a video.
     video_panel: Option<video_convert::VideoPanel>,
+    /// Conversions and saves, running and done, and the panel listing them.
+    activity: activity::Activity,
     /// The picker of a video's tracks (Ctrl+J), and the tracks and timing
     /// kept for each video, read once.
     track_picker: Option<tracks::TrackPicker>,
@@ -2032,6 +2037,7 @@ impl App {
             triage_buttons: RefCell::new(Vec::new()),
             convert_panel: None,
             video_panel: None,
+            activity: Default::default(),
             track_picker: None,
             inspector: None,
             video_margins: Cell::new((0.0, 0.0, 0.0)),
@@ -2232,7 +2238,10 @@ impl App {
         match link {
             ToastLink::Undo => self.execute(Command::Undo, event_loop),
             ToastLink::Show(path) => self.show_path(&path),
-            ToastLink::Cancel => self.execute(Command::CancelEncode, event_loop),
+            ToastLink::Activity => {
+                self.activity.open = true;
+                self.redraw();
+            }
         }
         true
     }
@@ -3000,7 +3009,7 @@ impl App {
                 self.toast(format!("{count} unmarked"));
             }
             CopyName => self.copy_text(false),
-            Messages => self.open_palette_with("~"),
+            Activity => self.toggle_activity(),
             CopyViewedName | CopyViewedPath | CopyViewedSize | CopyMessage(_) => {
                 let name = match command {
                     CopyViewedPath => {
@@ -3284,9 +3293,21 @@ impl App {
     }
 
     /// How far in from the right edge of the window things there stand:
-    /// by the width of the file list, when that is on the right.
+    /// by the width of the file list, when that is on the right, and of the
+    /// Activity panel while it is up.
     fn right_inset(&self) -> i32 {
+        self.list_right_inset() + self.activity_width()
+    }
+
+    /// The file list's width, when it is on the right.
+    fn list_right_inset(&self) -> i32 {
         self.list_panel().filter(|panel| self.list_right && !panel.embedded).map_or(0, |panel| panel.width)
+    }
+
+    /// The Activity panel's width, while it is up.
+    fn activity_width(&self) -> i32 {
+        let (width, height) = self.window_size();
+        if self.activity.open { draw::panel_width(width as i32, ui_px(height), 30.0) } else { 0 }
     }
 
     // ---- Shell commands -------------------------------------------------
@@ -4166,7 +4187,7 @@ impl App {
             Event::ConvertSize(id, format, said, size) => self.convert_size(id, format, said, size),
             Event::ConvertFit(id, format, found, target) => self.convert_fit(id, format, found, target),
             // With a Cancel to click, for as long as it goes on.
-            Event::VideoProgress(words) => self.toast_with(words, vec![("Cancel".into(), ToastLink::Cancel)]),
+            Event::JobProgress(job, share, words) => self.job_progress(job, share, words),
             Event::VideoTrial(trial, result) => self.convert_tried(trial, result),
             Event::VideoFacts(id, facts) => self.video_facts(id, facts),
             Event::VideoCompared(trial, result) => self.video_compared(trial, result),
@@ -4182,7 +4203,7 @@ impl App {
             Event::CompareDelta(ticket, delta) => self.compare_delta(ticket, delta),
             Event::Inspected(id, found) => self.inspected(id, found),
             Event::Compared(id, found) => self.compared(id, found),
-            Event::TracksWritten(result, replaced) => self.tracks_written(result, replaced),
+            Event::TracksWritten(result, replaced, job) => self.tracks_written(result, replaced, job),
             Event::EditSaved(saved) => self.edit_saved(saved),
             Event::EditPaste(words) => self.edit_paste(words),
             Event::EditPasteImage(picture) => self.edit_paste_image(picture),

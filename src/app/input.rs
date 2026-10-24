@@ -49,6 +49,10 @@ impl App {
         if self.track_picker.is_some() && self.picker_key(&key) {
             return;
         }
+        // Esc closes the Activity panel first.
+        if self.activity_key(&key) {
+            return;
+        }
         if self.convert_panel.is_some() {
             return self.panel_key(key, event_loop);
         }
@@ -449,6 +453,10 @@ impl App {
             self.help = !pressed;
             return self.redraw();
         }
+        // The Activity panel and the pill of what runs take a click on them.
+        if button == MouseButton::Left && pressed && self.confirm.is_none() && self.menu.is_none() && self.activity_click(x, y) {
+            return self.redraw();
+        }
         if button == MouseButton::Left && pressed && self.confirm.is_none() && self.toast_click(x, y, event_loop) {
             return self.redraw();
         }
@@ -733,6 +741,10 @@ impl App {
             MouseScrollDelta::LineDelta(_, y) => f64::from(y),
             MouseScrollDelta::PixelDelta(position) => position.y / 50.0,
         };
+        // Over the Activity panel, it scrolls that.
+        if self.activity_wheel(lines) {
+            return;
+        }
         if self.editor.is_some() {
             return self.editor_wheel(lines);
         }

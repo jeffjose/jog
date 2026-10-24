@@ -377,10 +377,12 @@ impl App {
         if self.dry(|_| paths.iter().map(|(path, _)| format!("convert to {}: {}", format.name(), path.display())).collect(), &format!("would convert {}", paths.len())) {
             return;
         }
-        self.toast(format!("Converting {} → {}  ·  {}…", paths.len(), format.name(), settings.describe(format)));
+        let title = format!("Converting {} → {}  ·  {}", paths.len(), format.name(), settings.describe(format));
+        self.toast(format!("{title}…"));
+        let job = self.job_begin(title);
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let mut done = Converted { created: Vec::new(), failed: 0, what: format.name().to_string(), before: 0, after: 0, how: None, error: None, saving: false };
+            let mut done = Converted { created: Vec::new(), failed: 0, what: format.name().to_string(), before: 0, after: 0, how: None, error: None, job, saving: false };
             let (total, began, started) = (paths.len(), crate::transcode::generation(), Instant::now());
             let _batch = crate::transcode::Batch::begin();
             for (index, (path, transform)) in paths.into_iter().enumerate() {
@@ -392,7 +394,7 @@ impl App {
                 // Of several, how far along, as a video's encode says.
                 if total > 1 {
                     let words = format!("{} of {total} → {}  ·  {}", index + 1, format.name(), progress_words(index as f64 / total as f64, started));
-                    let _ = proxy.send_event(Event::VideoProgress(words));
+                    let _ = proxy.send_event(Event::JobProgress(job, index as f64 / total as f64, words));
                 }
                 match convert::convert(&path, format, &settings, transform) {
                     Ok((to, how)) => {
@@ -438,12 +440,14 @@ impl App {
         if self.dry(|_| paths.iter().map(|(path, _)| format!("convert to {what}: {}", path.display())).collect(), &format!("would convert {}", paths.len())) {
             return;
         }
-        self.toast(format!("Converting {} → {what}…", paths.len()));
+        let title = format!("Converting {} → {what}", paths.len());
+        self.toast(format!("{title}…"));
+        let job = self.job_begin(title);
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let total = paths.len();
             let (began, _batch) = (crate::transcode::generation(), crate::transcode::Batch::begin());
-            let mut done = Converted { created: Vec::new(), failed: 0, what: what.clone(), before: 0, after: 0, how: None, error: None, saving: false };
+            let mut done = Converted { created: Vec::new(), failed: 0, what: what.clone(), before: 0, after: 0, how: None, error: None, job, saving: false };
             for (index, (path, transform)) in paths.iter().enumerate() {
                 // Called off: the rest are not begun.
                 if crate::transcode::generation() != began {
@@ -459,7 +463,8 @@ impl App {
                     if said != Some(percent) {
                         said = Some(percent);
                         let of = if total > 1 { format!(" ({} of {total})", index + 1) } else { String::new() };
-                        let _ = proxy.send_event(Event::VideoProgress(format!("{name}{of}  ·  {}", progress_words(share, started))));
+                        let overall = (index as f64 + share) / total as f64;
+                        let _ = proxy.send_event(Event::JobProgress(job, overall, format!("{name}{of}  ·  {}", progress_words(share, started))));
                     }
                 });
                 match result {
@@ -486,23 +491,28 @@ impl App {
 
     pub(super) fn converted(&mut self, done: Converted) {
         let canceled = done.error.as_deref() == Some(crate::transcode::CANCELED_WORD);
+        let job = done.job;
         if canceled && done.created.is_empty() {
+            self.job_end(job, activity::JobState::Canceled);
             return self.toast("Canceled");
         }
         // Nothing made: why, rather than a count of nothing.
         if done.created.is_empty() {
             let why = done.error.unwrap_or_else(|| "see the terminal".to_string());
+            self.job_end(job, activity::JobState::Failed(why.clone()));
             return self.toast(format!("{} · {why}", if done.saving { "Not saved" } else { "Not converted" }));
         }
         // What was made joins the list beside what it was made from, and
         // the toast goes to it on a click.
         self.adopt_created(&done.created);
-        let links = vec![("Show".into(), ToastLink::Show(done.created[0].clone())), ("Undo".into(), ToastLink::Undo)];
+        let links = vec![("Show".into(), ToastLink::Show(done.created[0].clone())), ("Undo".into(), ToastLink::Undo), ("Activity".into(), ToastLink::Activity)];
         // A section saved: what and how large.
         if done.saving {
             let made = &done.created[0];
             let size = std::fs::metadata(made).map_or(0, |meta| meta.len());
-            self.toast_with(format!("{}  ·  {}", made.file_name().unwrap_or_default().to_string_lossy(), meta::human_size(size)), links);
+            let said = format!("{}  ·  {}", made.file_name().unwrap_or_default().to_string_lossy(), meta::human_size(size));
+            self.job_end(job, activity::JobState::Done { outputs: done.created.clone(), said: said.clone() });
+            self.toast_with(said, links);
             self.did(Undo::Created(done.created));
             return;
         }
@@ -524,6 +534,7 @@ impl App {
         if canceled {
             summary.push_str("  ·  the rest canceled");
         }
+        self.job_end(job, activity::JobState::Done { outputs: done.created.clone(), said: summary.clone() });
         self.toast_with(summary, links);
         self.did(Undo::Created(done.created));
     }
@@ -531,7 +542,17 @@ impl App {
     /// A file jog has just made, a frame or a copy: it joins the list, is
     /// undone by Undo, and the toast that says so goes to it on a click.
     pub(super) fn made(&mut self, path: PathBuf, said: String) {
+        self.made_by(path, said, None);
+    }
+
+    /// As `made`, for the file a job running in Activity made: that job is
+    /// done, rather than another kept.
+    pub(super) fn made_by(&mut self, path: PathBuf, said: String, job: Option<u64>) {
         self.adopt_created(std::slice::from_ref(&path));
+        match job {
+            Some(job) => self.job_end(job, activity::JobState::Done { outputs: vec![path.clone()], said: said.clone() }),
+            None => self.job_made(&path, &said),
+        }
         self.toast_with(said, vec![("Show".into(), ToastLink::Show(path.clone())), ("Undo".into(), ToastLink::Undo)]);
         self.did(Undo::Created(vec![path]));
     }
