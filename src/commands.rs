@@ -37,6 +37,10 @@ pub enum Command {
     SectionClear,
     /// Loop the section, or play on through it and past its end.
     SectionLoop,
+    /// Play the section from its start.
+    SectionPlay,
+    /// The Convert window, for the section.
+    SectionConvert,
     /// Save the section as a clip or an animation.
     SaveSection(Clip),
     /// Keep the section, for the Sections tab; or forget it, kept.
@@ -581,6 +585,8 @@ pub fn command_icon(command: Command) -> &'static str {
         SectionStart | SectionEnd => REPEAT,
         SectionClear => X,
         SectionLoop => REPEAT,
+        SectionPlay => PLAY,
+        SectionConvert => REPLACE,
         SaveSection(_) => FILM,
         KeepSection => PIN,
         RenameSection => PENCIL,
@@ -999,6 +1005,9 @@ pub const GRID_AROUND_MENU: &[Option<MenuItem>] = &[
 
 /// A right click on the section marked, on the seek bar.
 pub const SECTION_BAR_MENU: &[Option<MenuItem>] = &[
+    video_item("Play from A", "", Command::SectionPlay),
+    video_item("Convert…", "", Command::SectionConvert),
+    None,
     video_item("Loop / play through", "", Command::SectionLoop),
     video_item("Keep / forget", "", Command::KeepSection),
     video_item("Clear", "Esc", Command::SectionClear),

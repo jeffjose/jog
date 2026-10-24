@@ -713,7 +713,11 @@ impl App {
                 self.end_hold(false);
                 match self.drag.take() {
                     Some(Drag::Zoom { moved: false, .. }) => self.execute(Command::ZoomActual, event_loop),
-                    Some(Drag::Section(edge)) => self.drop_edge(edge),
+                    Some(Drag::Section(edge)) => {
+                        self.drop_edge(edge);
+                        // Let go: the hand open again.
+                        self.edge_cursor(x, y);
+                    }
                     _ => {}
                 }
             }

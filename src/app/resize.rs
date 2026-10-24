@@ -114,15 +114,28 @@ impl App {
             Some(Drag::Resize(edge)) => Some(edge),
             _ => self.edge_at(x, y),
         };
-        if edge == self.edge_under {
+        // An end of a section on the seek bar: a hand, to take hold of it,
+        // and closed while it is held.
+        let held = match self.drag {
+            Some(Drag::Section(flag)) => Some(flag),
+            _ => None,
+        };
+        let flag = held.or_else(|| edge.is_none().then(|| self.flag_at(x, y)).flatten());
+        if edge == self.edge_under && flag == self.flag_under {
             return;
         }
+        if flag != self.flag_under {
+            self.redraw();
+        }
         self.edge_under = edge;
-        let icon = match edge {
-            Some(PanelEdge::Strip) => CursorIcon::NsResize,
-            Some(PanelEdge::Inspector) if self.inspector_bottom => CursorIcon::NsResize,
-            Some(_) => CursorIcon::EwResize,
-            None => CursorIcon::Default,
+        self.flag_under = flag;
+        let icon = match (edge, flag) {
+            (Some(PanelEdge::Strip), _) => CursorIcon::NsResize,
+            (Some(PanelEdge::Inspector), _) if self.inspector_bottom => CursorIcon::NsResize,
+            (Some(_), _) => CursorIcon::EwResize,
+            (None, Some(_)) if held.is_some() => CursorIcon::Grabbing,
+            (None, Some(_)) => CursorIcon::Grab,
+            (None, None) => CursorIcon::Default,
         };
         if let Some(window) = &self.window {
             window.set_cursor(icon);

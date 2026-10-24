@@ -529,8 +529,9 @@ impl App {
             drawn.push((hit, [x, y, w, footer_h]));
             x += w + pad / 2;
         }
-        if crate::transcode::busy() {
-            let w = button(canvas, text, x, "Cancel the one converting", false);
+        // A conversion running, not the trials of this window.
+        if self.activity_running() {
+            let w = button(canvas, text, x, "Cancel converting", false);
             drawn.push((Hit::Cancel, [x, y, w, footer_h]));
         }
         let go = if converting.is_some() { "Convert A–B  ⏎" } else { "Convert  ⏎" };

@@ -832,7 +832,12 @@ impl App {
             let Some(at) = at else { continue };
             let x = x_of(at);
             let tall = thickness * 3;
-            canvas.fill(x - 1, bar.middle - tall / 2, 3, tall, accent_soft());
+            // Under the pointer, or held, it stands out: there to take hold of.
+            if self.flag_under == Some(edge) {
+                canvas.round_fill(x - 3, bar.middle - tall / 2 - 2, 7, tall + 4, 3, TEXT_COLOR, 256);
+            } else {
+                canvas.fill(x - 1, bar.middle - tall / 2, 3, tall, accent_soft());
+            }
             let (word, side) = match edge {
                 Edge::A => ("A", if close { Ordering::Less } else { Ordering::Equal }),
                 Edge::B => ("B", if close { Ordering::Greater } else { Ordering::Equal }),
@@ -847,6 +852,10 @@ impl App {
 /// The buttons over a section on the seek bar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SectionTool {
+    /// Play it from its start, A.
+    Play,
+    /// The Convert window, for the section.
+    Convert,
     /// Loop it, or play on through it.
     Loop,
     /// Save it as it is, quickly; or, from the chevron beside, as what.
@@ -861,6 +870,8 @@ impl SectionTool {
     /// What it does, said over it while it is pointed at.
     fn tip(self, looping: bool, kept: bool) -> &'static str {
         match self {
+            SectionTool::Play => "Play from A",
+            SectionTool::Convert => "Convert…  ·  A–B",
             SectionTool::Loop if looping => "Looping  ·  click to play through",
             SectionTool::Loop => "Playing through  ·  click to loop",
             SectionTool::Save => "Save  ·  as it is",
@@ -881,7 +892,7 @@ impl App {
         let unit = bar.unit;
         let line = Text::line_height(unit as u32);
         let (side, narrow, gap) = (unit * 2, unit * 5 / 4, unit / 4);
-        let tools = [(SectionTool::Loop, side), (SectionTool::Save, side), (SectionTool::SaveAs, narrow), (SectionTool::Keep, side), (SectionTool::Clear, side)];
+        let tools = [(SectionTool::Play, side), (SectionTool::Convert, side), (SectionTool::Save, side), (SectionTool::SaveAs, narrow), (SectionTool::Keep, side), (SectionTool::Loop, side), (SectionTool::Clear, side)];
         let total = tools.iter().map(|(_, w)| w).sum::<i32>() + gap * (tools.len() as i32 - 1);
         let x_of = |at: f64| bar.x + (f64::from(bar.width) * at / length) as i32;
         let middle = (x_of(a) + x_of(b)) / 2;
@@ -922,6 +933,12 @@ impl App {
 
     pub(super) fn section_tool(&mut self, tool: SectionTool) {
         match tool {
+            SectionTool::Play => self.play_section(),
+            SectionTool::Convert => {
+                let Some(id) = self.video.as_ref().map(|video| video.id) else { return };
+                self.video_convert.whole = false;
+                self.open_video_convert(id);
+            }
             SectionTool::Loop => self.toggle_section_loop(),
             SectionTool::Save => self.save_section(crate::transcode::Clip::Quick, crate::transcode::Knobs::default()),
             SectionTool::SaveAs => {
@@ -959,7 +976,11 @@ impl App {
         for (tool, place) in tools {
             let [x, y, w, h] = *place;
             let on = match tool {
-                SectionTool::Loop => looping,
+                // Looping is said by the icon lit, not filled in: it is
+                // how the section plays, not the first thing to do with it.
+                SectionTool::Loop => false,
+                // Playing from A is what a section is for, first of all.
+                SectionTool::Play => true,
                 SectionTool::Keep => kept,
                 _ => false,
             };
@@ -970,6 +991,8 @@ impl App {
                 canvas.round_fill(x, y, w, h, h / 2, PLACEHOLDER_COLOR, 256);
             }
             let icon = match tool {
+                SectionTool::Play => commands::icons::PLAY,
+                SectionTool::Convert => commands::icons::REPLACE,
                 SectionTool::Loop => commands::icons::REPEAT,
                 SectionTool::Save => commands::icons::FILM,
                 SectionTool::Keep => commands::icons::PIN,
@@ -987,10 +1010,35 @@ impl App {
                     continue;
                 }
             };
-            buttons.push((x + w / 2, y + (h - line) / 2, icon, if on || pointed { TEXT_COLOR } else { DIM_TEXT_COLOR }));
+            let lit = on || pointed || (*tool == SectionTool::Loop && looping);
+            buttons.push((x + w / 2, y + (h - line) / 2, icon, if lit { TEXT_COLOR } else { DIM_TEXT_COLOR }));
             if pointed {
                 labels.push((x + w / 2, top - line, Ordering::Equal, tool.tip(looping, kept).to_string()));
             }
         }
+    }
+}
+
+impl App {
+    /// The end of the section under the pointer on the seek bar, while the
+    /// bar is up: there to be dragged.
+    pub(super) fn flag_at(&self, x: f64, y: f64) -> Option<Edge> {
+        self.hover?;
+        let bar = self.seek_bar();
+        let near = (y - f64::from(bar.middle)).abs() <= f64::from(bar.unit * 3);
+        near.then(|| self.section_edge_at(&bar, x)).flatten()
+    }
+}
+
+impl App {
+    /// The section played from its start, A.
+    pub(super) fn play_section(&mut self) {
+        let Some(a) = self.section().and_then(|section| section.a) else { return };
+        let Some((_, length)) = self.video_time().filter(|(_, length)| *length > 0.0) else { return };
+        self.seek_to(a / length, true);
+        if let Some(player) = &self.player {
+            player.set("pause", "no");
+        }
+        self.redraw();
     }
 }

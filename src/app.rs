@@ -1355,6 +1355,8 @@ pub struct App {
     list_units: f64,
     inspector_units: f64,
     edge_under: Option<PanelEdge>,
+    /// The end of a section the pointer is over on the seek bar, to drag.
+    flag_under: Option<section::Edge>,
     /// How far each dialog has been moved from the middle, and the heading
     /// of the one drawn last frame, to take hold of.
     dialog_moved: RefCell<HashMap<&'static str, (i32, i32)>>,
@@ -2025,6 +2027,7 @@ impl App {
             inspector_list_drawing: Cell::new(false),
             popout_at: pins.at.clone(),
             edge_under: None,
+            flag_under: None,
             dialog_moved: RefCell::new(HashMap::new()),
             dialog_header: Cell::new(None),
             popouts: Vec::new(),
@@ -2737,6 +2740,8 @@ impl App {
             SectionStart => self.mark_edge(Edge::A),
             SectionEnd => self.mark_edge(Edge::B),
             SectionLoop => self.toggle_section_loop(),
+            SectionPlay => self.play_section(),
+            SectionConvert => self.section_tool(section::SectionTool::Convert),
             SectionClear => {
                 self.clear_section();
             }
