@@ -1005,9 +1005,25 @@ impl SectionTool {
 }
 
 impl App {
-    /// The buttons over the section on `bar`, and where: in a row above
-    /// its letters, centered on it, within the bar's length.
+    /// The buttons over the section on `bar`, and where, while the pointer
+    /// is on the section or on them: none while it is elsewhere, so that
+    /// they are not over the picture the whole time the bar is up.
     pub(super) fn section_tools(&self, bar: &SeekBar) -> Vec<(SectionTool, [i32; 4])> {
+        let tools = self.section_tools_place(bar);
+        let (Some(first), Some(last), Some((a, b)), Some((_, length))) = (tools.first(), tools.last(), self.section().and_then(|section| section.span()), self.video_time()) else { return Vec::new() };
+        let x_of = |at: f64| f64::from(bar.x) + f64::from(bar.width) * at / length.max(1e-9);
+        let grip = f64::from(bar.unit);
+        let left = f64::from(first.1[0]).min(x_of(a) - grip);
+        let right = f64::from(last.1[0] + last.1[2]).max(x_of(b) + grip);
+        let (top, bottom) = (f64::from(first.1[1] - bar.unit / 2), f64::from(bar.middle + bar.unit));
+        let (x, y) = self.mouse;
+        let on = x >= left && x <= right && y >= top && y <= bottom;
+        if on { tools } else { Vec::new() }
+    }
+
+    /// Where the buttons over the section go: in a row above
+    /// its letters, centered on it, within the bar's length.
+    fn section_tools_place(&self, bar: &SeekBar) -> Vec<(SectionTool, [i32; 4])> {
         let Some((a, b)) = self.section().and_then(|section| section.span()) else { return Vec::new() };
         let Some((_, length)) = self.video_time().filter(|(_, length)| *length > 0.0) else { return Vec::new() };
         let unit = bar.unit;
