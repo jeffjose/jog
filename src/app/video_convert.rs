@@ -1,13 +1,15 @@
 //! The Convert window for a video, as the one for a picture: the codecs
 //! along the top, the settings below, the picture, and Convert. What each
-//! codec comes to, and how a frame looks converted beside the same frame
-//! as it is, are only found out when asked for, Estimate and Compare:
-//! each is an encode of a few seconds, which on a 4K video is a good deal
-//! of work, not to be done for nothing.
+//! codec comes to is found as soon as the window opens, and again as the
+//! settings change: a few seconds of each encoded, the codec chosen first,
+//! a round no longer wanted stopping before its next codec. A frame
+//! converted beside the same frame as it is is found only when asked for,
+//! Compare: the picture of it is for looking at, not to be made for nothing.
 //!
 //! The choices are the Convert tab's in Inspect, kept as one: changed in
 //! either, they are changed in both.
 
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use winit::keyboard::{Key, NamedKey};
@@ -29,7 +31,6 @@ enum Hit {
     Sdr(bool),
     Audio(Audio),
     Whole(bool),
-    Estimate,
     Compare,
     Convert,
     Cancel,
@@ -49,6 +50,9 @@ pub struct VideoPanel {
     estimates: Vec<(Trial, Option<Result<Estimate, String>>)>,
     /// The frame compared, by the trial it was of, once it has come.
     compared: Option<(Trial, Option<Result<Arc<Compared>, String>>)>,
+    /// Which round of estimates is wanted: one begun for settings changed
+    /// since stops before its next codec.
+    round: Arc<AtomicU64>,
     drawn: Vec<(Hit, [i32; 4])>,
 }
 
@@ -63,7 +67,9 @@ impl App {
     pub(super) fn open_video_convert(&mut self, id: usize) {
         let path = self.files[id].clone();
         let bytes = std::fs::metadata(&path).map_or(0, |meta| meta.len());
-        self.video_panel = Some(VideoPanel { id, facts: None, bytes, estimates: Vec::new(), compared: None, drawn: Vec::new() });
+        self.video_panel = Some(VideoPanel { id, facts: None, bytes, estimates: Vec::new(), compared: None, round: Arc::new(AtomicU64::new(0)), drawn: Vec::new() });
+        // What each codec comes to, found at once, a few seconds of each.
+        self.estimate_codecs(id);
         let proxy = self.proxy.clone();
         std::thread::spawn(move || drop(proxy.send_event(Event::VideoFacts(id, crate::transcode::video_facts(&path)))));
         self.menu = None;
@@ -102,19 +108,32 @@ impl App {
     /// Each codec tried as the settings are, one after another on a thread
     /// of their own; those tried already as they are not tried again.
     fn estimate_codecs(&mut self, id: usize) {
-        let trials: Vec<Trial> = self.codecs_now().into_iter().map(|codec| self.trial_of(id, codec)).collect();
+        // The codec chosen first: its size is the one most looked for.
+        let chosen = self.video_convert.target.codec;
+        let mut codecs = self.codecs_now();
+        codecs.sort_by_key(|codec| *codec != chosen);
+        let trials: Vec<Trial> = codecs.into_iter().map(|codec| self.trial_of(id, codec)).collect();
         let Some(panel) = &mut self.video_panel else { return };
+        // Those asked for before and not yet begun are not wanted now: the
+        // settings they were of are gone.
+        panel.estimates.retain(|(_, answer)| answer.is_some());
         let fresh: Vec<Trial> = trials.into_iter().filter(|trial| !panel.estimates.iter().any(|(had, _)| had == trial)).collect();
+        let round = panel.round.fetch_add(1, AtomicOrdering::Relaxed) + 1;
         if fresh.is_empty() {
-            return;
+            return self.redraw();
         }
         panel.estimates.extend(fresh.iter().map(|trial| (*trial, None)));
+        let wanted = panel.round.clone();
         let path = self.files[id].clone();
         let settings = self.options.convert.video;
         let transform = self.transforms.get(&id).copied().unwrap_or_default();
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             for trial in fresh {
+                // Settings changed since: the next round has these.
+                if wanted.load(AtomicOrdering::Relaxed) != round {
+                    return;
+                }
                 let result = crate::transcode::trial(&path, trial.span.unwrap_or((0.0, 0.0)), &trial.target, &settings, &trial.knobs, transform, TRIAL);
                 if proxy.send_event(Event::VideoTrial(trial, result)).is_err() {
                     return;
@@ -168,6 +187,7 @@ impl App {
 
     fn video_panel_hit(&mut self, hit: Hit, x: f64) {
         let Some(id) = self.video_panel.as_ref().map(|panel| panel.id) else { return };
+        let changes = matches!(hit, Hit::Codec(_) | Hit::Container(_) | Hit::Quality(..) | Hit::Speed(_) | Hit::Height(_) | Hit::Sdr(_) | Hit::Audio(_) | Hit::Whole(_));
         let state = &mut self.video_convert;
         match hit {
             Hit::Codec(codec) => {
@@ -198,7 +218,6 @@ impl App {
             Hit::Sdr(sdr) => state.knobs.to_sdr = sdr,
             Hit::Audio(audio) => state.target.audio = Some(audio),
             Hit::Whole(whole) => state.whole = whole,
-            Hit::Estimate => return self.estimate_codecs(id),
             Hit::Compare => return self.compare_frames(id),
             Hit::Convert => {
                 self.video_panel = None;
@@ -208,6 +227,10 @@ impl App {
                 crate::transcode::cancel();
             }
             Hit::Close => self.video_panel = None,
+        }
+        // Settings changed: what each codec comes to, found again.
+        if changes && self.video_panel.is_some() {
+            return self.estimate_codecs(id);
         }
         self.redraw();
     }
@@ -236,6 +259,7 @@ impl App {
                 let crf = self.convert_knobs().crf(self.video_convert.target.codec, &self.options.convert.video);
                 let crf = if way == NamedKey::ArrowRight { crf.saturating_sub(1).max(best) } else { (crf + 1).min(worst) };
                 self.video_convert.knobs.crf = Some(crf);
+                return self.estimate_codecs(id);
             }
             Key::Character("e") => return self.estimate_codecs(id),
             Key::Character("c") => return self.compare_frames(id),
@@ -315,7 +339,7 @@ impl App {
                 (Some(Some(Err(_))), _) => ("—".to_string(), None),
                 (Some(None), _) => ("trying…".to_string(), None),
                 _ if !allowed => ("not in WebM".to_string(), None),
-                _ => ("e to estimate".to_string(), None),
+                _ => ("…".to_string(), None),
             };
             let w = text.width(codec.name(), px).max(text.width(&said, small)) + 2 * pad;
             let chosen = codec == target.codec;
@@ -482,7 +506,7 @@ impl App {
                 format!("{} → ≈ {}   ·   converts in {}", meta::human_size(panel.bytes), meta::human_size(bytes as u64), about(estimate.pace * seconds))
             }
             (Some(Err(error)), _) => format!("Not tried · {error}"),
-            _ => format!("Size and time: e estimates each codec, trying {} s of it", TRIAL as u32),
+            _ => format!("Trying {} s of each codec for the size and the time…", TRIAL as u32),
         };
         text.draw(canvas, inner, y, px, DIM_TEXT_COLOR, &said);
         y += line + pad;
@@ -500,7 +524,7 @@ impl App {
             w
         };
         let mut x = inner;
-        for (words, hit) in [("Estimate", Hit::Estimate), ("Compare", Hit::Compare)] {
+        for (words, hit) in [("Compare", Hit::Compare)] {
             let w = button(canvas, text, x, words, false);
             drawn.push((hit, [x, y, w, footer_h]));
             x += w + pad / 2;
@@ -515,7 +539,7 @@ impl App {
         button(canvas, text, go_x, go, true);
         drawn.push((Hit::Convert, [go_x, y, go_w, footer_h]));
         y += footer_h + pad / 2;
-        let keys = "Tab codec  ·  ←→ quality  ·  e estimate  ·  c compare  ·  Enter convert  ·  Esc close";
+        let keys = "Tab codec  ·  ←→ quality  ·  c compare  ·  Enter convert  ·  Esc close";
         text.draw(canvas, inner, y, small, DIM_TEXT_COLOR, keys);
 
         if let Some(panel) = &mut self.video_panel {

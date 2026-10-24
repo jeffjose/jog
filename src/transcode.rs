@@ -597,13 +597,32 @@ pub struct Estimate {
     pub pace: f64,
 }
 
-/// Encodes `seconds` (or fewer) from the middle of `from`..`to` of the
-/// video at `path` as the whole would be, to a file thrown away after,
-/// to say how large the whole will be and how long it will take.
-pub fn trial(path: &Path, span: (f64, f64), target: &Target, settings: &VideoSettings, knobs: &Knobs, transform: Transform, seconds: f64) -> Result<Estimate, String> {
-    let (estimate, output, _) = encode_trial(path, span, target, settings, knobs, transform, seconds)?;
-    let _ = std::fs::remove_file(&output);
-    Ok(estimate)
+/// Encodes `seconds` (or fewer) of `from`..`to` of the video at `path` as
+/// the whole would be, to files thrown away after, to say how large the
+/// whole will be and how long it will take. A long stretch is tried in
+/// three pieces, a fifth, half and four fifths of the way through, and
+/// what they say put together: the middle alone may be a quiet scene, or
+/// a busy one, and say too little or too much of the whole.
+pub fn trial(path: &Path, (from, to): (f64, f64), target: &Target, settings: &VideoSettings, knobs: &Knobs, transform: Transform, seconds: f64) -> Result<Estimate, String> {
+    let to = if to > from { to } else { probe(path).seconds };
+    let length = to - from;
+    let spans: Vec<(f64, f64)> = if length >= seconds * 6.0 {
+        let piece = seconds / 3.0;
+        [0.2, 0.5, 0.8].iter().map(|at| (from + length * at - piece / 2.0, from + length * at + piece / 2.0)).collect()
+    } else {
+        vec![(from, to)]
+    };
+    let piece = seconds / spans.len() as f64;
+    let (mut bytes, mut took, mut covered) = (0.0, 0.0, 0.0);
+    for span in spans {
+        let (estimate, output, (_, length)) = encode_trial(path, span, target, settings, knobs, transform, piece)?;
+        let _ = std::fs::remove_file(&output);
+        bytes += estimate.bytes_per_second * length;
+        took += estimate.pace * length;
+        covered += length;
+    }
+    let covered = covered.max(1e-6);
+    Ok(Estimate { bytes_per_second: bytes / covered, pace: took / covered })
 }
 
 /// The trial encoded and kept, where it is, and from when in the video.
