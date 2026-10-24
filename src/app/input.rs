@@ -139,7 +139,6 @@ impl App {
     }
 
     pub(super) fn mouse_moved(&mut self, x: f64, y: f64) {
-        if std::env::var_os("JOG_TRACE_POINTER").is_some() { eprintln!("POINTER {x:.0} {y:.0} hover={:?}", self.hover); }
         let (dx, dy) = (x - self.mouse.0, y - self.mouse.1);
         self.mouse = (x, y);
         if self.editor.is_some() {

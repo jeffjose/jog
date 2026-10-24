@@ -226,3 +226,35 @@ mod tests {
         assert_eq!(bands(&spans), [[10, 2, 40, 4], [0, 90, 100, 6]]);
     }
 }
+
+impl App {
+    /// The window player `index` draws a video into on the GPU, made the
+    /// first time it is wanted; `None` when videos are drawn in software,
+    /// or no such window can be made.
+    pub(super) fn video_window_id(&mut self, index: usize) -> Option<u64> {
+        if !crate::mpv::gpu_video() {
+            return None;
+        }
+        let slot = self.video_windows.get_mut(index)?;
+        if slot.is_none() {
+            *slot = self.window.as_ref().and_then(|window| x11::VideoWindow::new(window));
+        }
+        slot.as_ref().map(x11::VideoWindow::id)
+    }
+
+    /// The playing player's window shown over `place`, or none; the other
+    /// player's hidden, holding what it holds out of sight.
+    pub(super) fn show_video_windows(&mut self, place: Option<[i32; 4]>) {
+        let active = usize::from(self.active);
+        for (index, window) in self.video_windows.iter_mut().enumerate() {
+            if let Some(window) = window {
+                window.show(place.filter(|_| index == active));
+            }
+        }
+    }
+
+    /// Whether the playing player's window is up.
+    pub(super) fn video_window_shown(&self) -> bool {
+        self.video_windows.get(usize::from(self.active)).and_then(Option::as_ref).is_some_and(x11::VideoWindow::shown)
+    }
+}

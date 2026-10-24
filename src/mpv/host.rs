@@ -445,6 +445,10 @@ impl Player {
     /// holding the next video ready has its first frame drawn so, at the
     /// window's size, for it to be only copied in when it takes over.
     pub fn draw_ahead(&self, size: Option<(u32, u32)>) {
+        // Drawing on the GPU, there are no frames to draw ahead.
+        if super::gpu_video() {
+            return;
+        }
         if self.ahead.get() == size || self.gone() {
             return;
         }

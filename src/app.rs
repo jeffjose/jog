@@ -1086,8 +1086,9 @@ pub struct App {
     /// done with, and whether the window has had the focus yet, which
     /// is the window manager done putting it up.
     backdrop: Option<(x11::Backdrop, Instant)>,
-    /// Where the player draws a video on the GPU, with `JOG_VIDEO_GPU=1`.
-    video_window: Option<x11::VideoWindow>,
+    /// Where the players draw videos on the GPU, with `JOG_VIDEO_GPU=1`: one
+    /// for each, by the index the player is known by, the playing one's shown.
+    video_windows: [Option<x11::VideoWindow>; 2],
     /// What is drawn over the video in that window, handed to the player.
     video_layer: video_layer::Layer,
     backdrop_done: bool,
@@ -1302,6 +1303,8 @@ pub struct App {
     /// script measuring mpv itself counts them.
     bench_drops: BenchDrops,
     bench_keys_played: bool,
+    /// What is left of them to play, and when.
+    bench_keys: Option<(String, Instant)>,
     /// The second and the bar's handle last drawn, for a video on the GPU.
     time_key: Cell<Option<(i64, i32)>>,
     /// Videos looped on their own, from their row in the file list.
@@ -1855,7 +1858,7 @@ impl App {
             animating: Cell::new(false),
             repainted: Cell::new(false),
             backdrop: None,
-            video_window: None,
+            video_windows: [None, None],
             video_layer: Default::default(),
             backdrop_done: false,
             focused_once: false,
@@ -1973,6 +1976,7 @@ impl App {
             bench_quit: bench_seconds().map(|seconds| Instant::now() + Duration::from_secs_f64(seconds + 1.5)),
             bench_drops: BenchDrops { from: Some(Instant::now() + Duration::from_millis(1500)), ..BenchDrops::default() },
             bench_keys_played: false,
+            bench_keys: None,
             time_key: Cell::new(None),
             looped: HashSet::new(),
             pip: false,
@@ -4182,6 +4186,13 @@ impl App {
             Event::Gamut(mask) => self.gamut_read(mask),
             Event::Video(_, signal) => self.spare_signal(signal),
             Event::Spare(spare) => {
+                // Drawing on the GPU, it has a window of its own too, out of sight
+                // until it takes over.
+                if let Ok(spare) = &spare {
+                    if let Some(id) = self.video_window_id(usize::from(self.active ^ 1)) {
+                        spare.set("wid", &id.to_string());
+                    }
+                }
                 self.spare = spare.ok().map(|player| Spare { player, id: None, from: 0.0 });
                 self.apply_subtitles();
                 self.apply_track_prefs();
@@ -4356,12 +4367,23 @@ impl App {
 
     fn waiting(&mut self, event_loop: &ActiveEventLoop) {
         self.count_bench_drops();
-        // `JOG_BENCH_KEYS`: played once, when the measuring begins, as a
-        // scripted run plays its keys: the pointer moved, say, for what it
-        // brings up over the video.
-        if self.bench_quit.is_some() && self.bench_drops.from.is_some_and(|from| Instant::now() >= from) && !std::mem::replace(&mut self.bench_keys_played, true) {
-            if let Ok(keys) = std::env::var("JOG_BENCH_KEYS") {
-                self.play_keys(&keys, event_loop);
+        // `JOG_BENCH_KEYS`: played when the measuring begins, as a scripted
+        // run plays its keys, a `{Wait}` being half a second: the pointer
+        // moved, say, for what it brings up over the video.
+        if self.bench_quit.is_some() && self.bench_drops.from.is_some_and(|from| Instant::now() >= from) {
+            if !std::mem::replace(&mut self.bench_keys_played, true) {
+                self.bench_keys = std::env::var("JOG_BENCH_KEYS").ok().map(|keys| (keys, Instant::now()));
+            }
+            if let Some((script, due)) = self.bench_keys.take() {
+                if Instant::now() < due {
+                    self.bench_keys = Some((script, due));
+                } else {
+                    let (keys, later) = script.split_once("{Wait}").unwrap_or((&script, ""));
+                    let later = (!later.is_empty()).then(|| (later.to_string(), Instant::now() + Duration::from_millis(500)));
+                    let keys = keys.to_string();
+                    self.bench_keys = later;
+                    self.play_keys(&keys, event_loop);
+                }
             }
         }
         if self.bench_quit.is_some_and(|at| Instant::now() >= at) {

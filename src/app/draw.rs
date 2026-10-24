@@ -202,10 +202,8 @@ impl App {
         // Drawn on the GPU, the video is in its own window over this one,
         // shown while a video plays and over where it goes.
         let (left, (stage_w, stage_h)) = self.stage();
-        if let Some(video_window) = &mut self.video_window {
-            video_window.show(playing.then_some([left, 0, stage_w as i32, stage_h as i32]));
-        }
-        if self.video_window.as_ref().is_some_and(x11::VideoWindow::shown) {
+        self.show_video_windows(playing.then_some([left, 0, stage_w as i32, stage_h as i32]));
+        if self.video_window_shown() {
             return self.paint_over_video(pixels, window);
         }
         self.clear_video_layer();

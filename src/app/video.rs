@@ -56,11 +56,7 @@ impl App {
         std::thread::spawn(move || {
             if make(Which::Main(active)) {
                 make(Which::Preview);
-                // Drawing on the GPU, into the one window there is for it, there
-                // is no second player to hold the next file ready (yet).
-                if !crate::mpv::gpu_video() {
-                    make(Which::Spare(active ^ 1));
-                }
+                make(Which::Spare(active ^ 1));
             }
         });
     }
@@ -280,13 +276,8 @@ impl App {
                 player.set("speed", &self.playing_speed().to_string());
                 player.set("mute", if self.muted { "yes" } else { "no" });
                 // Drawing on the GPU: into a window of its own inside this one.
-                if crate::mpv::gpu_video() {
-                    if self.video_window.is_none() {
-                        self.video_window = self.window.as_ref().and_then(|window| x11::VideoWindow::new(window));
-                    }
-                    if let Some(video_window) = &self.video_window {
-                        player.set("wid", &video_window.id().to_string());
-                    }
+                if let Some(id) = self.video_window_id(usize::from(self.active)) {
+                    player.set("wid", &id.to_string());
                 }
                 self.player = Some(player);
                 self.apply_subtitles();
@@ -342,6 +333,9 @@ impl App {
         // The tracks and timing kept for it, told before it opens.
         let kept = self.kept_tracks(id);
         let window = self.window_size();
+        // What was drawn over the video goes with the player that had it,
+        // which may now be the spare: drawn again for the one taking over.
+        self.clear_video_layer();
         if let Some(player) = &mut self.player {
             let started = Instant::now();
             // Seeking one that is held somewhere else takes longer than
