@@ -1291,6 +1291,8 @@ pub struct App {
     /// What a video that has played to its end does, kept from one video
     /// to the next.
     looping: Looping,
+    /// When a run measuring playback for a set time quits by itself.
+    bench_quit: Option<Instant>,
     /// Videos looped on their own, from their row in the file list.
     looped: HashSet<usize>,
     /// What is being held down over a video, and how strong the loupe is
@@ -1953,7 +1955,9 @@ impl App {
             pointer_found: input::Arrival::Coming,
             speed: 1.0,
             muted: false,
-            looping: Looping::Off,
+            // Measuring playback for a set time: the video loops meanwhile.
+            looping: if bench_seconds().is_some() { Looping::File } else { Looping::Off },
+            bench_quit: bench_seconds().map(|seconds| Instant::now() + Duration::from_secs_f64(seconds + 1.5)),
             looped: HashSet::new(),
             pip: false,
             pip_live: None,
@@ -4335,6 +4339,10 @@ impl App {
     }
 
     fn waiting(&mut self, event_loop: &ActiveEventLoop) {
+        if self.bench_quit.is_some_and(|at| Instant::now() >= at) {
+            self.bench_quit = None;
+            return self.leave(event_loop);
+        }
         let now = Instant::now();
         self.tend_popouts(event_loop);
         // What one of Inspect's buttons asked for.
@@ -4512,4 +4520,11 @@ mod tests {
         // The name without its ending, the folder, and the time in a video.
         assert_eq!(expand_action("%s %d %t", path, 12.5), r"'it'\''s here' '/pics' 12.500");
     }
+}
+
+/// `JOG_FRAMESTATS=SECONDS`: play for that long after settling, looping,
+/// then quit, saying how it went; as `JOG_FRAMESTATS=1`, it only says so on
+/// quitting.
+fn bench_seconds() -> Option<f64> {
+    std::env::var("JOG_FRAMESTATS").ok()?.parse::<f64>().ok().filter(|seconds| *seconds >= 2.0)
 }

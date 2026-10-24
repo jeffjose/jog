@@ -67,8 +67,9 @@ struct FrameStats {
     gaps: Vec<f64>,
     /// Drawing each, in ms.
     draws: Vec<f64>,
-    /// Frames the gaps say were never shown.
-    missed: f64,
+    /// Frames the time between them called for: what was shown and what
+    /// was not.
+    expected: f64,
     /// mpv's own drops: decoder, output.
     dropped: (f64, f64),
 }
@@ -152,9 +153,10 @@ impl Hitches {
         let gap = now.duration_since(then);
         let moved = pos - was;
         let wall = gap.as_secs_f64();
-        // The video went on about as far as the clock did, give or take a
-        // change of speed: anything else is a pause, a step or a seek.
-        if !(moved > 0.0 && moved > wall * 0.4 && moved < wall * 4.0 + period.as_secs_f64()) {
+        // Back to the start, a loop going round, or on far ahead, a seek:
+        // not a frame following the one before. The time along, as last
+        // reported, may not have moved since: the frame is new all the same.
+        if moved < -0.05 || moved > wall * 4.0 + 0.5 {
             self.settling = Some(now + SETTLE);
             return None;
         }
@@ -163,7 +165,7 @@ impl Hitches {
         }
         self.settling = None;
         self.stats.gaps.push(wall * 1000.0);
-        self.stats.missed += (wall / period.as_secs_f64()).round().max(1.0) - 1.0;
+        self.stats.expected += wall / period.as_secs_f64();
         if let Some((late, lost)) = before_drops {
             self.stats.dropped.0 += (drops.0 - late).max(0.0);
             self.stats.dropped.1 += (drops.1 - lost).max(0.0);
@@ -228,8 +230,8 @@ impl FrameStats {
         format!(
             "FRAMESTATS shown={} missed={:.0} missed_pct={:.1} fps={:.1} gap_p50={:.1} gap_p99={:.1} gap_max={:.1} dec_drop={:.0} vo_drop={:.0} draw_p50={:.1} draw_p95={:.1}",
             self.gaps.len(),
-            self.missed,
-            100.0 * self.missed / (shown + self.missed).max(1.0),
+            (self.expected - shown).max(0.0),
+            100.0 * (self.expected - shown).max(0.0) / self.expected.max(1.0),
             shown / wall.max(1e-9),
             pct(&self.gaps, 0.5),
             pct(&self.gaps, 0.99),
