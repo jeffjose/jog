@@ -545,6 +545,7 @@ pub mod icons {
     pub const ERASER: &str = "\u{e70f}";
     pub const TEXT_SCAN: &str = "\u{e710}";
     pub const REDACT: &str = "\u{e711}";
+    pub const PIP: &str = "\u{e712}";
 }
 
 /// The icon drawn beside a menu item.
@@ -637,7 +638,7 @@ pub fn command_icon(command: Command) -> &'static str {
         Flip => FLIP_VERTICAL,
         Mirror => FLIP_HORIZONTAL,
         ToggleFullscreen => FULLSCREEN,
-        SmallWindow => MONITOR_PLAY,
+        SmallWindow => PIP,
         ToggleGrid => LAYOUT_GRID,
         ToggleFilmstrip => FILM,
         ToggleList => LIST,
