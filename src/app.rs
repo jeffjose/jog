@@ -1255,6 +1255,9 @@ pub struct App {
     /// copied by a click; and each video file's size, read once.
     bar_hits: Vec<([i32; 4], Command)>,
     file_bytes: HashMap<usize, u64>,
+    /// How many letters the longest title in the list has, for the
+    /// seek bar's room for it: by the list's length and first file.
+    title_chars: Cell<Option<(usize, usize, usize)>>,
     /// The format of each image looked at, by its first bytes.
     formats: RefCell<HashMap<usize, Option<String>>>,
     scope_counts: scopes::Measured,
@@ -1988,6 +1991,7 @@ impl App {
             info_buttons: Vec::new(),
             bar_hits: Vec::new(),
             file_bytes: HashMap::new(),
+            title_chars: Cell::new(None),
             formats: RefCell::new(HashMap::new()),
             scope_counts: scopes::Measured::default(),
             scope_cost: Duration::ZERO,

@@ -83,6 +83,26 @@ pub(super) struct BarInfo {
 }
 
 impl App {
+    /// How wide the title's room on the seek bar is: as the longest title
+    /// in the list needs, so that it is tight where the names are short
+    /// and does not move from one file to the next; at least as wide as
+    /// the time under it, at most fifteen lines of text. Worked out from
+    /// how many letters, once a list, from its first few thousand files.
+    pub(super) fn title_room(&self, unit: i32) -> i32 {
+        let key = (self.list.len(), self.list.first().copied().unwrap_or(0));
+        let chars = match self.title_chars.get() {
+            Some((len, first, chars)) if (len, first) == key => chars,
+            _ => {
+                let current = self.list.get(self.pos).copied();
+                let ids = self.list.iter().take(5000).copied().chain(current);
+                let chars = ids.map(|id| title_of(&self.name_of(id)).chars().count()).max().unwrap_or(0);
+                self.title_chars.set(Some((key.0, key.1, chars)));
+                chars
+            }
+        };
+        (chars as i32 * unit * 11 / 20).clamp(unit * 8, unit * 15)
+    }
+
     /// The title of the video playing, from its file's name.
     pub(super) fn bar_title(&self) -> String {
         title_of(&self.name())

@@ -253,7 +253,7 @@ impl App {
         let end = end - self.right_inset();
         // The title and the time at the left, where there is room for them
         // and still a track long enough to seek along; else the time alone.
-        let title_w = if end - left > unit * 75 { unit * 15 } else { 0 };
+        let title_w = if end - left > unit * 75 { self.title_room(unit) } else { 0 };
         let lead = if title_w > 0 { unit * 17 / 2 + title_w + unit } else { unit * 13 };
         SeekBar { x: left + lead, width: (end - left - lead - right).max(1), middle: base - unit * 2, unit, left, title_w, end, buttons }
     }
