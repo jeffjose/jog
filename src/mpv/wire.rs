@@ -332,7 +332,9 @@ pub enum Request {
     Set { name: String, value: String },
     SetFilter(String),
     ChooseNext { aid: String, sid: String, sub_delay: f64, audio_delay: f64 },
-    Play { path: Vec<u8>, from: Option<f64>, paused: bool },
+    /// `keyframe`: from the keyframe before `from`, not the very moment,
+    /// which is decoding every frame between them before the first shows.
+    Play { path: Vec<u8>, from: Option<f64>, paused: bool, keyframe: bool },
     Hold { path: Vec<u8>, from: Option<f64> },
     Open { path: Vec<u8> },
     Stop,
@@ -564,8 +566,8 @@ impl Request {
             Request::ChooseNext { aid, sid, sub_delay, audio_delay } => {
                 out.u8(3).text(aid).text(sid).f64(*sub_delay).f64(*audio_delay);
             }
-            Request::Play { path, from, paused } => {
-                out.u8(4).bytes(path).maybe_f64(*from).bool(*paused);
+            Request::Play { path, from, paused, keyframe } => {
+                out.u8(4).bytes(path).maybe_f64(*from).bool(*paused).bool(*keyframe);
             }
             Request::Hold { path, from } => {
                 out.u8(5).bytes(path).maybe_f64(*from);
@@ -638,7 +640,7 @@ impl Request {
             1 => Request::Set { name: input.text()?, value: input.text()? },
             2 => Request::SetFilter(input.text()?),
             3 => Request::ChooseNext { aid: input.text()?, sid: input.text()?, sub_delay: input.f64()?, audio_delay: input.f64()? },
-            4 => Request::Play { path: input.bytes()?, from: input.maybe_f64()?, paused: input.bool()? },
+            4 => Request::Play { path: input.bytes()?, from: input.maybe_f64()?, paused: input.bool()?, keyframe: input.bool()? },
             5 => Request::Hold { path: input.bytes()?, from: input.maybe_f64()? },
             6 => Request::Open { path: input.bytes()? },
             7 => Request::Stop,
@@ -742,7 +744,7 @@ mod tests {
             Request::Set { name: "pause".into(), value: "yes".into() },
             Request::SetFilter("lavfi=[hflip]".into()),
             Request::ChooseNext { aid: "2".into(), sid: "no".into(), sub_delay: -0.5, audio_delay: 0.25 },
-            Request::Play { path: b"/v.mp4".to_vec(), from: Some(12.5), paused: true },
+            Request::Play { path: b"/v.mp4".to_vec(), from: Some(12.5), paused: true, keyframe: true },
             Request::Hold { path: b"/v.mp4".to_vec(), from: None },
             Request::Open { path: b"/v.mp4".to_vec() },
             Request::Stop,
@@ -785,7 +787,7 @@ mod tests {
 
     #[test]
     fn broken_messages_are_refused() {
-        let whole = Request::Play { path: b"/v.mp4".to_vec(), from: Some(1.0), paused: false }.encode();
+        let whole = Request::Play { path: b"/v.mp4".to_vec(), from: Some(1.0), paused: false, keyframe: false }.encode();
         for cut in 0..whole.len() {
             assert_eq!(Request::decode(&whole[..cut]), None, "cut at {cut}");
         }

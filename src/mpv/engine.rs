@@ -140,6 +140,9 @@ pub struct Engine {
     /// was chosen for it: audio, subtitles ("no" for none), then the
     /// subtitle and audio delays in seconds.
     next_tracks: RefCell<Option<(String, String, f64, f64)>>,
+    /// A file opened at the keyframe before where it was asked for: seeks
+    /// are exact again once it is showing.
+    keyframe_start: Cell<bool>,
     /// The checks' shader for mpv to read, while there is one, drawing on
     /// the GPU: in memory, read by its path under /proc.
     checks_shader: RefCell<Option<std::os::fd::OwnedFd>>,
@@ -323,7 +326,7 @@ impl Engine {
             }
             let known = Mutex::new(vec![None; WATCHED.len()]);
             let watching = matches!(role, Role::Playback { .. });
-            Ok(Engine { api, handle, render, known, watching, hdr: Cell::new(None), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), checks_shader: RefCell::new(None), drawing: std::sync::Arc::new(Mutex::new(())), _wake: wake, _library: library })
+            Ok(Engine { api, handle, render, known, watching, hdr: Cell::new(None), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), keyframe_start: Cell::new(false), checks_shader: RefCell::new(None), drawing: std::sync::Arc::new(Mutex::new(())), _wake: wake, _library: library })
         }
     }
 
@@ -377,10 +380,14 @@ impl Engine {
 
     /// Starts playing a file, replacing whatever was playing, from the
     /// beginning or from a number of seconds in; or, `paused`, opens it on
-    /// that frame and stays there.
-    pub fn play(&self, path: &Path, from: Option<f64>, paused: bool) {
+    /// that frame and stays there. `keyframe`, from the keyframe before
+    /// that, which shows at once: the very moment means decoding every
+    /// frame from it first, a third of a second on a 4K video.
+    pub fn play(&self, path: &Path, from: Option<f64>, paused: bool, keyframe: bool) {
         self.pick_tracks();
-        let start = from.map(|seconds| format!("start={seconds:.3}"));
+        self.keyframe_start.set(keyframe && from.is_some());
+        let how = if keyframe { ",hr-seek=no" } else { "" };
+        let start = from.map(|seconds| format!("start={seconds:.3}{how}"));
         let mut arguments: Vec<&[u8]> = vec![b"loadfile", path.as_os_str().as_bytes()];
         if let Some(start) = &start {
             arguments.extend([b"replace".as_slice(), start.as_bytes()]);
@@ -576,7 +583,14 @@ impl Engine {
                 }
                 EVENT_COMMAND_REPLY if event.reply_userdata != 0 => events.push(PlayerEvent::Replied(event.reply_userdata, event.error >= 0)),
                 EVENT_START_FILE => events.push(PlayerEvent::Started),
-                EVENT_PLAYBACK_RESTART => events.push(PlayerEvent::Showing),
+                EVENT_PLAYBACK_RESTART => {
+                    // Only the opening was to be from a keyframe; an A-B loop's
+                    // seeks, and the rest, are as they were.
+                    if self.keyframe_start.take() {
+                        self.set("hr-seek", "default");
+                    }
+                    events.push(PlayerEvent::Showing);
+                }
                 EVENT_END_FILE => events.push(PlayerEvent::Ended),
                 _ => {}
             }

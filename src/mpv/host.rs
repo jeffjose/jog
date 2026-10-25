@@ -271,9 +271,9 @@ impl Player {
     /// Starts playing a file, replacing whatever was playing, from the
     /// beginning or from a number of seconds in; or, `paused`, opens it on
     /// that frame and stays there.
-    pub fn play(&self, path: &Path, from: Option<f64>, paused: bool) {
+    pub fn play(&self, path: &Path, from: Option<f64>, paused: bool, keyframe: bool) {
         self.opening(path);
-        self.tell(&Request::Play { path: path.as_os_str().as_bytes().to_vec(), from, paused });
+        self.tell(&Request::Play { path: path.as_os_str().as_bytes().to_vec(), from, paused, keyframe });
     }
 
     /// Opens a file and stops on the frame it would start at, so that it

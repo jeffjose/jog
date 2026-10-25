@@ -380,7 +380,9 @@ impl App {
                     if let Some((aid, sid, sub_delay, audio_delay)) = &kept {
                         player.choose_next(aid, sid, *sub_delay, *audio_delay);
                     }
-                    player.play(&self.files[id], from, paused);
+                    // Picked up where it was left, from the keyframe before:
+                    // at once, rather than after decoding up to the moment.
+                    player.play(&self.files[id], from, paused, carried.is_none() && from.is_some());
                     // Its first frame drawn ahead too, in the player's own
                     // process: the first draw at a size sets the conversion
                     // up, a hundred milliseconds that are not the window's.
@@ -394,8 +396,12 @@ impl App {
             }
             // Until the player reports for itself, this is where it is.
             // One counted from the end has to wait for the length.
-            let seeking = from.filter(|seconds| *seconds >= 0.0).map(|seconds| (started, seconds));
-            self.video = Some(Video { id, showing: false, started, seeking, aimed: None, aim_reached: None, start_took: None, seek_asked: None, seek_took: None, held, tracks: None, track_words: None, shown_at: None, watched: false, to_end: None });
+            let at = from.filter(|seconds| *seconds >= 0.0).map(|seconds| (started, seconds));
+            // Resumed from the keyframe before, the bar stands where it was
+            // left until playback gets there, as after a click.
+            let resumed = carried.is_none() && !held;
+            let (seeking, aimed) = if resumed { (None, at) } else { (at, None) };
+            self.video = Some(Video { id, showing: false, started, seeking, aimed, aim_reached: None, start_took: None, seek_asked: None, seek_took: None, held, tracks: None, track_words: None, shown_at: None, watched: false, to_end: None });
             self.perf.video_lines = None;
             self.apply_video_view();
         }

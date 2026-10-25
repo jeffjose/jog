@@ -159,12 +159,12 @@ pub fn main(args: &[String]) -> ExitCode {
                 }
                 Request::SetFilter(filter) => engine.set_filter(&filter),
                 Request::ChooseNext { aid, sid, sub_delay, audio_delay } => engine.choose_next(&aid, &sid, sub_delay, audio_delay),
-                Request::Play { path, from, paused } => {
+                Request::Play { path, from, paused, keyframe } => {
                     test_crash.check(&path, gpu);
                     if let Some(states) = states.as_ref() {
                         wire::opened(states);
                     }
-                    engine.play(Path::new(OsStr::from_bytes(&path)), from, paused);
+                    engine.play(Path::new(OsStr::from_bytes(&path)), from, paused, keyframe);
                 }
                 Request::Hold { path, from } => {
                     test_crash.check(&path, gpu);
