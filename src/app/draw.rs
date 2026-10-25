@@ -673,10 +673,13 @@ impl App {
                     Command::ToggleFullscreen if self.window.as_ref().is_some_and(|window| window.fullscreen().is_some()) => (commands::icons::SHRINK, true),
                     Command::ToggleFullscreen => (commands::icons::EXPAND, true),
                     Command::SmallWindow => (commands::icons::PIP, true),
+                    Command::PlaybackSettings => (commands::icons::SETTINGS, true),
                     _ => (commands::icons::AUDIO_LINES, true),
                 };
                 buttons.push((left + side / 2, top + (side - line) / 2, icon, if on { TEXT_COLOR } else { DIM_TEXT_COLOR }));
             }
+            // Over the volume button, while the pointer is on it, its slider.
+            self.draw_volume(canvas, &bar, &mut labels);
             // Subtitles stand clear of the bar while it is up.
             subtitle_margin = (height - (bar.middle - unit * 3)) * 720 / height.max(1);
             time_bottom = bar.middle - unit * 4;

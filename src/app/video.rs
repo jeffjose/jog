@@ -265,7 +265,9 @@ impl App {
         // From a little above the bar down to the edge it is lifted off.
         // And up to the buttons over a section, when there is one.
         let tools_top = self.section_tools(&bar).first().map_or(bar.middle - bar.unit * 4, |(_, place)| place[1] - bar.unit / 2);
-        let zone = f64::from((bar.middle - bar.unit * 4).min(tools_top))..f64::from(bar.middle + bar.unit * 2);
+        // And up to the top of the volume slider, while it is up.
+        let reach = self.hover.and_then(|_| self.volume_reach(&bar)).map_or(i32::MAX, |top| top - bar.unit / 2);
+        let zone = f64::from((bar.middle - bar.unit * 4).min(tools_top).min(reach))..f64::from(bar.middle + bar.unit * 2);
         let fraction = ((x - f64::from(bar.x)) / f64::from(bar.width)).clamp(0.0, 1.0);
         let hover = zone.contains(&y).then_some(fraction);
         if hover != self.hover {
@@ -854,9 +856,9 @@ impl App {
     /// and audio tracks.
     pub(super) fn bar_buttons(&self) -> Vec<Command> {
         let (subtitles, audio) = self.video.as_ref().and_then(|video| video.tracks).unwrap_or((0, 0));
-        // From the right edge: fullscreen, which leaves to the small
-        // window, then how it plays.
-        let mut buttons = vec![Command::ToggleFullscreen, Command::CycleLoop, Command::ToggleMute];
+        // From the right edge: fullscreen, which leaves to the small window;
+        // the cog, a menu of speeds and tracks; then how it plays.
+        let mut buttons = vec![Command::ToggleFullscreen, Command::PlaybackSettings, Command::CycleLoop, Command::ToggleMute];
         if subtitles > 0 {
             buttons.push(Command::CycleSubtitles);
         }
@@ -1122,6 +1124,12 @@ impl App {
             Some(false) => SPEEDS[at.saturating_sub(1)],
             None => 1.0,
         };
+        self.set_speed(self.speed);
+    }
+
+    /// Plays at `speed` from now on, this video and the ones after.
+    pub(super) fn set_speed(&mut self, speed: f64) {
+        self.speed = speed;
         if let Some(player) = &self.player {
             player.set("speed", &self.playing_speed().to_string());
         }

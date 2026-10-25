@@ -30,6 +30,10 @@ pub enum Command {
     SpeedUp,
     SpeedDown,
     SpeedReset,
+    /// A speed from `SPEEDS`, by its place there; and the seek bar's
+    /// cog, the menu of how a video plays.
+    SetSpeed(u8),
+    PlaybackSettings,
     /// Mark the start or the end of a section of the video, which then
     /// loops; and unmark it.
     SectionStart,
@@ -546,6 +550,7 @@ pub mod icons {
     pub const TEXT_SCAN: &str = "\u{e710}";
     pub const REDACT: &str = "\u{e711}";
     pub const PIP: &str = "\u{e712}";
+    pub const SETTINGS: &str = "\u{e713}";
 }
 
 /// The icon drawn beside a menu item.
@@ -615,6 +620,9 @@ pub fn command_icon(command: Command) -> &'static str {
         SpeedUp => CHEVRONS_RIGHT,
         SpeedDown => CHEVRONS_LEFT,
         SpeedReset => GAUGE,
+        // A list of speeds: the one playing ticked, the rest plain.
+        SetSpeed(_) => "",
+        PlaybackSettings => SETTINGS,
         VolumeUp => VOLUME_2,
         VolumeDown => VOLUME_1,
         ToggleMute => VOLUME_X,
@@ -1056,6 +1064,25 @@ pub const BAR_INFO_MENU: &[Option<MenuItem>] = &[
     video_item("Copy title", "", Command::CopyBarTitle),
     video_item("Copy time", "", Command::CopyTime),
     video_item("Copy all details", "", Command::CopyDetails),
+];
+
+/// The speeds, each by its place in `SPEEDS`, the one playing ticked.
+const SPEED_MENU: &[Option<MenuItem>] = &[
+    video_item("0.25×", "", Command::SetSpeed(0)),
+    video_item("0.5×", "", Command::SetSpeed(1)),
+    video_item("0.75×", "", Command::SetSpeed(2)),
+    video_item("Normal", "\\", Command::SetSpeed(3)),
+    video_item("1.25×", "", Command::SetSpeed(4)),
+    video_item("1.5×", "", Command::SetSpeed(5)),
+    video_item("2×", "", Command::SetSpeed(6)),
+    video_item("3×", "", Command::SetSpeed(7)),
+    video_item("4×", "", Command::SetSpeed(8)),
+];
+
+/// The seek bar's cog: how the video plays.
+pub const PLAYBACK_MENU: &[Option<MenuItem>] = &[
+    submenu("Speed", SPEED_MENU, Applies::Videos),
+    video_item("Audio and subtitles…", "Ctrl+J", Command::TrackPicker),
 ];
 
 /// The seek bar right-clicked away from a section: at the time clicked.

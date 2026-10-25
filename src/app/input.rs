@@ -312,6 +312,7 @@ impl App {
                     self.view_changed();
                 }
             }
+            Some(Drag::Volume) => self.volume_to(y),
             Some(Drag::Scrub) => {
                 let bar = self.seek_bar();
                 let fraction = ((x - f64::from(bar.x)) / f64::from(bar.width)).clamp(0.0, 1.0);
@@ -617,7 +618,11 @@ impl App {
             }
             (MouseButton::Left, true) if self.hover.is_some() => {
                 let bar = self.seek_bar();
-                if let Some(tool) = self.section_tool_at(x, y) {
+                if self.on_volume(x, y) {
+                    // The volume slider over its button: set, and held.
+                    self.drag = Some(Drag::Volume);
+                    self.volume_to(y);
+                } else if let Some(tool) = self.section_tool_at(x, y) {
                     self.section_tool(tool);
                 } else if let Some(command) = self.bar_hit(x, y) {
                     // The title, the time or a detail: copied.
@@ -771,6 +776,11 @@ impl App {
             MouseScrollDelta::LineDelta(_, y) => f64::from(y),
             MouseScrollDelta::PixelDelta(position) => position.y / 50.0,
         };
+        // Over the volume slider, or its button, it turns the sound up or down.
+        let bar = self.seek_bar();
+        if lines != 0.0 && self.volume_slider(&bar).is_some() {
+            return self.video_action(VideoAction::Volume((lines.signum() * 5.0) as i32));
+        }
         // Over the Activity panel, it scrolls that.
         if self.activity_wheel(lines) {
             return;

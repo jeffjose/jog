@@ -50,7 +50,7 @@ PICKS = {
     "TYPE": "text-bold", "MONITOR_PLAY": "display", "FILE": "file", "STEP_FORWARD": "round-alt-arrow-right",
     "STEP_BACK": "round-alt-arrow-left", "FAST_FORWARD": "rewind-forward", "REWIND": "rewind-back",
     "SKIP_BACK": "skip-previous", "SKIP_FORWARD": "skip-next", "REPLACE": "transfer-horizontal",
-    "LIST_FILTER": "filter", "LIST_X": "filter-close", "PIN": "pin", "PIP": "to-pip",
+    "LIST_FILTER": "filter", "LIST_X": "filter-close", "PIN": "pin", "PIP": "to-pip", "SETTINGS": "settings",
     # Edit's tools, as hotshot has them.
     "SELECT": "cursor", "ARROW_UP_RIGHT": "arrow-right-up", "MARKER": "paint-roller",
     "SPOTLIGHT": "flashlight-on", "CROP": "crop", "EDIT": "pen-new-square", "REDO": "undo-right",

@@ -51,6 +51,7 @@ use convert_panel::{ConvertPanel, PanelSource};
 mod section;
 mod bar_info;
 mod windowed;
+mod volume;
 use section::{Edge, EntryFrames, Section, StripTab};
 mod back;
 mod hitch;
@@ -1557,6 +1558,8 @@ enum Drag {
     Pan,
     /// Dragging along the seek bar.
     Scrub,
+    /// Dragging along the volume slider over its button.
+    Volume,
     /// Dragging an end of the section along the seek bar.
     Section(Edge),
     Zoom { start_x: f64, start_scale: f64, anchor: (f64, f64), moved: bool },
@@ -3110,6 +3113,11 @@ impl App {
             SpeedUp => self.change_speed(Some(true)),
             SpeedDown => self.change_speed(Some(false)),
             SpeedReset => self.change_speed(None),
+            SetSpeed(at) => self.set_speed(SPEEDS[usize::from(at).min(SPEEDS.len() - 1)]),
+            PlaybackSettings => {
+                self.open_menu(commands::PLAYBACK_MENU, None);
+                self.redraw();
+            }
             PlayPause => self.video_action(VideoAction::Pause),
             // Back to the video that is playing, the whole window of it.
             ShowPlaying => self.toggle_grid(),
@@ -3243,6 +3251,7 @@ impl App {
             ToggleList => self.show_list,
             ToggleGridTitles => self.grid_titles,
             ToggleMute => self.muted,
+            SetSpeed(at) => SPEEDS.get(usize::from(at)).is_some_and(|speed| (speed - self.speed).abs() < 1e-9),
             CycleLoop => self.looping != Looping::Off,
             Triage => self.triage_on,
             TogglePrecise => self.precise,
