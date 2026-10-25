@@ -181,8 +181,10 @@ pub(crate) const WATCHED: &[(&str, Kind, Tell)] = &[
     ("video-params/gamma", Kind::Text, Tell::Loud),
     ("video-params/primaries", Kind::Text, Tell::Loud),
     ("container-fps", Kind::Number, Tell::Loud),
-    ("frame-drop-count", Kind::Number, Tell::Loud),
-    ("vo-drop-frame-count", Kind::Number, Tell::Loud),
+    // Frames dropped: read as each is drawn, never a reason to draw. Under
+    // load they climb with every frame, and each would be a drawing.
+    ("frame-drop-count", Kind::Number, Tell::Quiet),
+    ("vo-drop-frame-count", Kind::Number, Tell::Quiet),
     ("decoder-frame-drop-count", Kind::Number, Tell::Quiet),
     // The tracks and chapters as a whole, as JSON: read a property at a
     // time, they were a wait on the player for each of ten things about
