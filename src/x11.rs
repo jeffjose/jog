@@ -264,6 +264,9 @@ pub struct VideoWindow {
     flush: unsafe extern "C" fn(Display) -> c_int,
     place: [i32; 4],
     shown: bool,
+    /// Made before jog's window, on a connection of its own, which it
+    /// closes when it goes: to be put inside jog's once that is up.
+    own_display: Option<unsafe extern "C" fn(Display) -> c_int>,
 }
 
 impl VideoWindow {
@@ -273,34 +276,78 @@ impl VideoWindow {
         let (display, parent) = xlib(window)?;
         // SAFETY: as in `mark_fullscreen`; the window made is a child of a
         // live window, on the display it belongs to.
+        unsafe { Self::made(Library::new("libX11.so.6").ok()?, display, parent, None) }
+    }
+
+    /// One made before jog's window is, on a connection of its own to the
+    /// display, hidden: for the player to set itself up in meanwhile, and
+    /// to be put inside jog's window with `adopt` once that is up. `None`
+    /// without an X11 display.
+    pub fn early() -> Option<VideoWindow> {
+        // SAFETY: as in `mark_fullscreen`; the connection is this one's own,
+        // used on this thread alone and closed when it goes.
         unsafe {
             let x11 = Library::new("libX11.so.6").ok()?;
-            macro_rules! symbol {
-                ($name:literal) => {
-                    *x11.get(concat!($name, "\0").as_bytes()).ok()?
-                };
-            }
-            let create: unsafe extern "C" fn(Display, c_ulong, c_int, c_int, c_uint, c_uint, c_uint, c_ulong, c_ulong) -> c_ulong = symbol!("XCreateSimpleWindow");
-            let flush: unsafe extern "C" fn(Display) -> c_int = symbol!("XFlush");
-            let id = create(display, parent, 0, 0, 1, 1, 0, 0, 0);
-            if id == 0 {
+            let open: unsafe extern "C" fn(*const c_char) -> Display = *x11.get(b"XOpenDisplay\0").ok()?;
+            let root: unsafe extern "C" fn(Display) -> c_ulong = *x11.get(b"XDefaultRootWindow\0").ok()?;
+            let close: unsafe extern "C" fn(Display) -> c_int = *x11.get(b"XCloseDisplay\0").ok()?;
+            let display = open(std::ptr::null());
+            if display.is_null() {
                 return None;
             }
-            flush(display);
-            Some(VideoWindow {
-                map: symbol!("XMapWindow"),
-                unmap: symbol!("XUnmapWindow"),
-                move_resize: symbol!("XMoveResizeWindow"),
-                raise: symbol!("XRaiseWindow"),
-                destroy: symbol!("XDestroyWindow"),
-                flush,
-                display,
-                id,
-                place: [0, 0, 1, 1],
-                shown: false,
-                _x11: x11,
-            })
+            let made = Self::made(x11, display, root(display), Some(close));
+            if made.is_none() {
+                close(display);
+            }
+            made
         }
+    }
+
+    /// Put inside `window`, made before it was: from then on as one made
+    /// in it. Whether it could be.
+    pub fn adopt(&mut self, window: &Window) -> bool {
+        let Some((_, parent)) = xlib(window) else { return false };
+        // SAFETY: as in `mark_fullscreen`; both windows are live, and this
+        // one is on its own connection, which the call goes over.
+        unsafe {
+            let Ok(reparent) = self._x11.get::<unsafe extern "C" fn(Display, c_ulong, c_ulong, c_int, c_int) -> c_int>(b"XReparentWindow\0") else { return false };
+            reparent(self.display, self.id, parent, 0, 0);
+            (self.flush)(self.display);
+        }
+        true
+    }
+
+    /// A hidden black window inside `parent`.
+    ///
+    /// # Safety
+    /// `display` is a live connection, and `parent` a window on it.
+    unsafe fn made(x11: Library, display: Display, parent: c_ulong, own_display: Option<unsafe extern "C" fn(Display) -> c_int>) -> Option<VideoWindow> {
+        macro_rules! symbol {
+            ($name:literal) => {
+                *x11.get(concat!($name, "\0").as_bytes()).ok()?
+            };
+        }
+        let create: unsafe extern "C" fn(Display, c_ulong, c_int, c_int, c_uint, c_uint, c_uint, c_ulong, c_ulong) -> c_ulong = symbol!("XCreateSimpleWindow");
+        let flush: unsafe extern "C" fn(Display) -> c_int = symbol!("XFlush");
+        let id = create(display, parent, 0, 0, 1, 1, 0, 0, 0);
+        if id == 0 {
+            return None;
+        }
+        flush(display);
+        Some(VideoWindow {
+            map: symbol!("XMapWindow"),
+            unmap: symbol!("XUnmapWindow"),
+            move_resize: symbol!("XMoveResizeWindow"),
+            raise: symbol!("XRaiseWindow"),
+            destroy: symbol!("XDestroyWindow"),
+            flush,
+            display,
+            id,
+            place: [0, 0, 1, 1],
+            shown: false,
+            own_display,
+            _x11: x11,
+        })
     }
 
     /// Its X11 id, for the player's `wid`.
@@ -342,10 +389,14 @@ impl VideoWindow {
 
 impl Drop for VideoWindow {
     fn drop(&mut self) {
-        // SAFETY: the window made in `new`, destroyed once.
+        // SAFETY: the window made in `new`, destroyed once; and the
+        // connection, when its own, closed after it.
         unsafe {
             (self.destroy)(self.display, self.id);
             (self.flush)(self.display);
+            if let Some(close) = self.own_display {
+                close(self.display);
+            }
         }
     }
 }

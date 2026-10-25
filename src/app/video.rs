@@ -58,6 +58,47 @@ impl App {
         });
     }
 
+    /// The first file a video: the main player started, and the video
+    /// opened in it paused, before jog's window is made, in a window of its
+    /// own to be put inside jog's once that is up. Making the window takes
+    /// as long as the player setting itself up does, on a busy machine half
+    /// a second, which the player otherwise waited out. What is out of the
+    /// ordinary is left to the usual way.
+    pub fn open_first_video_early(&mut self) {
+        let id = self.id();
+        let ordinary = self.snapshot.is_none() && self.bench.is_none() && self.options.filter.is_none() && self.options.sessions.is_empty() && !self.options.edit;
+        let plain = self.playable(id) && crate::mpv::crashed_on(&self.files[id]).is_none() && self.kept_tracks(id).is_none();
+        if !ordinary || !plain || self.player_asked || !crate::mpv::gpu_video() {
+            return;
+        }
+        let Some(window) = x11::VideoWindow::early() else { return };
+        // Where it begins, as `start_video` will have it.
+        let from = self.enter_at.or_else(|| self.resume_from(id));
+        let keyframe = self.enter_at.is_none() && from.is_some();
+        let (wid, path, index) = (window.id(), self.files[id].clone(), self.active);
+        let (audio, subtitles) = tracks::read_prefs();
+        self.early_window = Some(window);
+        self.early_open = Some((id, from));
+        self.player_asked = true;
+        let proxy = self.proxy.clone();
+        let debug = self.options.debug;
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let wake = proxy.clone();
+            let player = Player::new(Role::Playback { silent: false, gpu: true }, move |signal| drop(wake.send_event(Event::Video(index, signal))));
+            if let Ok(player) = &player {
+                player.set("wid", &wid.to_string());
+                player.set("alang", audio.as_deref().unwrap_or_default());
+                player.set("slang", subtitles.as_deref().unwrap_or_default());
+                player.play(&path, from, true, keyframe);
+                if debug {
+                    eprintln!("jog: {:>7.1?} video asked for, ahead of the window", started.elapsed());
+                }
+            }
+            let _ = proxy.send_event(Event::Player(player));
+        });
+    }
+
     /// The players besides the main one, the one for previews and the
     /// spare, started once the first video is showing: started with it,
     /// they slowed its first frame, setting themselves up as it did.
@@ -366,6 +407,8 @@ impl App {
         // What was drawn over the video goes with the player that had it,
         // which may now be the spare: drawn again for the one taking over.
         self.clear_video_layer();
+        // Opened already, before the window was up, just as it would be now.
+        let ahead = self.early_open.take() == Some((id, from));
         if let Some(player) = &mut self.player {
             let started = Instant::now();
             // Seeking one that is held somewhere else takes longer than
@@ -373,6 +416,8 @@ impl App {
             // begin is taken.
             let start = from.unwrap_or(0.0);
             match self.spare.as_mut().filter(|spare| spare.id == Some(id) && (start - spare.from).abs() < 0.01) {
+                // Paused there, it only has to go on.
+                None if ahead => player.set("pause", if paused { "yes" } else { "no" }),
                 // The spare player has it open already, and takes over.
                 Some(spare) => {
                     std::mem::swap(player, &mut spare.player);
@@ -595,7 +640,7 @@ impl App {
                 video_started = Some(took);
                 video.shown_at.get_or_insert_with(Instant::now);
                 if self.options.debug {
-                    eprintln!("jog: {took:>7.1?} video start {}", self.files[video.id].display());
+                    eprintln!("jog: {took:>7.1?} video start {}, {:.1?} since the loop began", self.files[video.id].display(), self.perf.arrived.elapsed());
                 }
                 if self.options.verbose {
                     let codec = player.text("video-format").unwrap_or_default();

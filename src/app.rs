@@ -1122,6 +1122,11 @@ pub struct App {
     /// Where the players draw videos on the GPU (`mpv::gpu_video`): one
     /// for each, by the index the player is known by, the playing one's shown.
     video_windows: [Option<x11::VideoWindow>; 2],
+    /// The first video's window, made before jog's was, waiting to be put
+    /// inside it; and that video, opened in the player meanwhile, with
+    /// where it was opened at.
+    early_window: Option<x11::VideoWindow>,
+    early_open: Option<(usize, Option<f64>)>,
     /// What is drawn over the video in that window, handed to the player.
     video_layer: video_layer::Layer,
     backdrop_done: bool,
@@ -1927,6 +1932,8 @@ impl App {
             repainted: Cell::new(false),
             backdrop: None,
             video_windows: [None, None],
+            early_window: None,
+            early_open: None,
             video_layer: Default::default(),
             backdrop_done: false,
             focused_once: false,
@@ -4163,6 +4170,10 @@ impl ApplicationHandler<Event> for App {
             x11::mark_fullscreen(&window);
         }
         self.window = Some(window.clone());
+        // The first video's window, made before this one, put inside it.
+        if self.early_window.is_some() {
+            self.video_window_id(usize::from(self.active));
+        }
         if self.options.debug {
             eprintln!(
                 "jog: {:>7.1?} start window made ({created:.1?} to create, {:.1?} to connect and show), {:.1?} since the loop began",

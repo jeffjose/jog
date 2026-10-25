@@ -318,8 +318,12 @@ impl App {
             return None;
         }
         let slot = self.video_windows.get_mut(index)?;
+        let window = self.window.as_ref()?;
         if slot.is_none() {
-            *slot = self.window.as_ref().and_then(|window| x11::VideoWindow::new(window));
+            // The one the first video was opened in ahead of the window is
+            // this player's: put inside the window, rather than made anew.
+            let early = self.early_window.take().filter(|_| index == usize::from(self.active));
+            *slot = early.and_then(|mut early| early.adopt(window).then_some(early)).or_else(|| x11::VideoWindow::new(window));
         }
         slot.as_ref().map(x11::VideoWindow::id)
     }

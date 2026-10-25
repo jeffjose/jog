@@ -270,6 +270,8 @@ fn main() -> ExitCode {
     if choosing {
         app.choose_session();
     }
+    // A video first: opened while the window is being made.
+    app.open_first_video_early();
     let result = event_loop.run_app(&mut app);
     let leaving = std::time::Instant::now();
     app.save_session();
