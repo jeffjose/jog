@@ -1,7 +1,9 @@
-//! The volume as a slider over its button on the seek bar: up while the
-//! pointer is on the button or the slider, or the slider is held; a click
-//! or a drag along it sets the volume, the wheel over it moves it. A click
-//! on the button itself mutes, as it always has.
+//! The seek bar's own controls of how a video plays. The volume, as a
+//! slider over its button: up while the pointer is on the button or the
+//! slider, or the slider is held; a click or a drag along it sets the
+//! volume, the wheel over it moves it, and a click on the button itself
+//! mutes, as it always has. And the cog's menu, of speeds and tracks,
+//! standing above the cog.
 
 use super::*;
 
@@ -83,5 +85,22 @@ impl App {
         canvas.round_fill(middle - handle / 2, track_top + track_h - filled - handle / 2, handle, handle, handle / 2, TEXT_COLOR, 256);
         let said = if self.muted { commands::icons::VOLUME_X.to_string() } else { format!("{volume:.0}") };
         labels.push((middle, y + unit / 2, Ordering::Equal, said));
+    }
+}
+
+impl App {
+    /// The cog's menu, standing above the cog with its right edge at the
+    /// cog's: clear of it, not over it.
+    pub(super) fn open_playback_menu(&mut self) {
+        let bar = self.seek_bar();
+        let Some(which) = self.bar_buttons().iter().position(|command| *command == Command::PlaybackSettings) else {
+            return self.open_menu(commands::PLAYBACK_MENU, None);
+        };
+        let (left, top, side) = bar.button(which as i32);
+        let mut menu = self.build_menu(commands::PLAYBACK_MENU, None, (0, 0));
+        let (width, _) = self.window_size();
+        menu.x = (left + side - menu.width).clamp(0, (width as i32 - menu.width).max(0));
+        menu.y = (top - bar.unit / 2 - menu.height).max(0);
+        self.menu = Some(menu);
     }
 }

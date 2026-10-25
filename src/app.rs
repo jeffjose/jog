@@ -3115,7 +3115,7 @@ impl App {
             SpeedReset => self.change_speed(None),
             SetSpeed(at) => self.set_speed(SPEEDS[usize::from(at).min(SPEEDS.len() - 1)]),
             PlaybackSettings => {
-                self.open_menu(commands::PLAYBACK_MENU, None);
+                self.open_playback_menu();
                 self.redraw();
             }
             PlayPause => self.video_action(VideoAction::Pause),
