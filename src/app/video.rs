@@ -415,11 +415,11 @@ impl App {
         }
     }
 
-    /// Whether the file is a video that will be picked up where it was
-    /// left, rather than played from its start.
-    pub(super) fn resumes(&self, id: usize) -> bool {
+    /// Where the file, a video, will be picked up, when that is not its
+    /// start: where it was left.
+    pub(super) fn resume_point(&self, id: usize) -> Option<f64> {
         if !self.options.resume || !files::is_video(&self.files[id]) {
-            return false;
+            return None;
         }
         if let Some(known) = self.resumes_known.borrow().get(&id) {
             return *known;
@@ -429,8 +429,8 @@ impl App {
             Some(positions) => positions.get(path),
             None => Positions::load().get(path),
         };
-        self.resumes_known.borrow_mut().insert(id, left.is_some());
-        left.is_some()
+        self.resumes_known.borrow_mut().insert(id, left);
+        left
     }
 
     /// Where a video was left, when those places are being remembered.

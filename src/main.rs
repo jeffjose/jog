@@ -203,12 +203,12 @@ fn main() -> ExitCode {
     }
     if let Some(screen) = screen::remembered().filter(|_| options.filter.is_none() && options.sessions.is_empty()) {
         let mut first = App::first_request(files.len(), playlist.start, screen, options.auto_zoom, options.hdr, loader.workers());
-        // A video to be picked up where it was left gets no still, here as
-        // once the window is up: that would be its opening frame, shown and
-        // then jumped from.
-        let resumes = |path: &std::path::Path| options.resume && files::is_video(path) && positions::Positions::load().get(path).is_some();
-        if files.get(playlist.start).is_some_and(|path| resumes(path)) {
-            first.wanted.retain(|id| *id != playlist.start);
+        // A video to be picked up where it was left has for its still the
+        // keyframe playback begins on there, here as once the window is up:
+        // not its opening frame, shown and then jumped from.
+        let left = |path: &std::path::Path| (options.resume && files::is_video(path)).then(|| positions::Positions::load().get(path)).flatten();
+        if let Some(seconds) = files.get(playlist.start).and_then(|path| left(path)) {
+            first.starts.push((playlist.start, (seconds * 1000.0) as u64));
         }
         loader.request(first);
     }

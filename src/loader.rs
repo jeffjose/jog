@@ -35,6 +35,10 @@ pub struct Request {
     pub thumb_size: (u32, u32),
     /// Which rendition of Ultra HDR pictures to show.
     pub hdr: Hdr,
+    /// Videos to be picked up where they were left, by how many seconds
+    /// in, in milliseconds: their stills are the keyframes playback
+    /// begins on there.
+    pub starts: Vec<(usize, u64)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -196,7 +200,10 @@ impl State {
         // A thumbnail is the ordinary rendition, whatever is on view.
         let thumbnail = matches!(job, Job::Thumb(_));
         let hdr = if thumbnail { Hdr::Sdr } else { self.request.hdr };
-        let spec = Spec { target, enlarge, transform, background, thumbnail, hdr };
+        // A video picked up where it was left: its still is the keyframe
+        // playback begins on there.
+        let start = (!thumbnail).then(|| self.request.starts.iter().find(|(at, _)| *at == id).map(|(_, ms)| *ms as f64 / 1000.0)).flatten();
+        let spec = Spec { target, enlarge, transform, background, thumbnail, hdr, start };
 
         // A thumbnail is made from the fitted frame only when that is the
         // ordinary rendition.
@@ -347,6 +354,13 @@ impl Loader {
         }
         if state.source.as_ref().is_some_and(|(id, _)| !request.wanted.contains(id)) {
             state.source = None;
+        }
+        // A video whose still was of another start has it made again.
+        for (id, seconds) in &request.starts {
+            let had = state.request.starts.iter().find(|(at, _)| at == id).map(|(_, was)| *was);
+            if had != Some(*seconds) {
+                state.fitted.remove(id);
+            }
         }
         state.request = request;
         drop(state);
