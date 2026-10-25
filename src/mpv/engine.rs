@@ -231,6 +231,10 @@ impl Engine {
                 ("hwdec", "no"),
                 ("input-default-bindings", "no"),
                 ("osc", "no"),
+                // mpv's own scripts, stats, console, ytdl and the rest: none
+                // of them is used, and each is loaded as the player starts.
+                ("load-scripts", "no"),
+                ("ytdl", "no"),
                 ("terminal", "no"),
                 ("audio-client-name", "jog"),
                 // After a seek the player otherwise waits for its first
@@ -290,7 +294,14 @@ impl Engine {
             // with commas between: for trying things out.
             let tried = std::env::var("JOG_MPV").unwrap_or_default();
             let tried = tried.split(',').filter_map(|pair| pair.split_once('='));
-            for (name, value) in options.iter().chain(&extra).copied().chain(tried) {
+            // `JOG_MPV_LOG`, a folder: each player's own log there, by role
+            // and process, every step timed: what it spends its start on.
+            let log = std::env::var_os("JOG_MPV_LOG").map(|folder| {
+                let path = std::path::Path::new(&folder).join(format!("mpv-{}-{}.log", role.word(), std::process::id()));
+                path.to_string_lossy().into_owned()
+            });
+            let log = log.iter().map(|path| ("log-file", path.as_str()));
+            for (name, value) in options.iter().chain(&extra).copied().chain(tried).chain(log) {
                 (api.set_option_string)(handle, c_string(name).as_ptr(), c_string(value).as_ptr());
             }
             if (api.initialize)(handle) < 0 {
