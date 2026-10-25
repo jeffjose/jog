@@ -20,7 +20,7 @@ jog --help TOPIC shows one of:
 pub const TOPICS: &[(&str, &str, &str)] = &[
     ("window", "Window", "
   -F, --fullscreen           start fullscreen (the default)
-  -w, --windowed             start in a window
+  -w, --windowed             start in a window (also --no-fullscreen)
   -g, --geometry WxH         start in a window of this size
   -x, --borderless           no window decorations
   -B, --image-bg COLOR       background: black, white or RRGGBB
@@ -602,7 +602,7 @@ fn takes_value(name: &str) -> bool {
 
 fn is_switch(name: &str) -> bool {
     let switches = [
-        "fullscreen", "windowed", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
+        "fullscreen", "windowed", "no-fullscreen", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "random",
         "newest", "oldest", "videos", "video", "images", "image", "pictures", "picture",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
@@ -779,7 +779,7 @@ fn apply(
 ) -> Result<(), String> {
     match name {
         "fullscreen" => *fullscreen = Some(true),
-        "windowed" => *fullscreen = Some(false),
+        "windowed" | "no-fullscreen" => *fullscreen = Some(false),
         "geometry" => options.geometry = Some(parse_geometry(&value()?)?),
         "borderless" => options.borderless = true,
         "image-bg" => options.background = parse_color(&value()?)?,
