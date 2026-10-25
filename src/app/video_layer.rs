@@ -29,6 +29,9 @@ pub struct Layer {
     white_for: Option<[i32; 4]>,
     /// The picture last sent, to leave it be when unchanged.
     sent: Option<Picture>,
+    /// How opaque each pixel drawn over the video is, kept as it is drawn:
+    /// nothing all over between drawings.
+    alpha: Vec<u8>,
     /// Both buffers were being copied when it changed: to be sent again.
     due: bool,
     /// Told by the window's drawing, for the next: whether the buffer it
@@ -82,34 +85,51 @@ impl App {
         // What of the frame paused on is outside BT.709, if asked: a blend
         // over the picture as the rest is, and so laid over it the same way.
         let gamut = self.draw_gamut(pixels, window);
-        let mut canvas = Canvas::new(pixels, window.0, window.1).counting();
+        // How opaque each pixel drawn is, kept as it is drawn: nothing at
+        // all as a drawing begins, and put back so after it.
+        let mut alpha = std::mem::take(&mut self.video_layer.alpha);
+        if alpha.len() != pixels.len() {
+            alpha = vec![0; pixels.len()];
+        }
+        let mut canvas = Canvas::new(pixels, window.0, window.1).counting().keeping_alpha(&mut alpha);
         self.draw_overlays(&mut canvas);
+        // Kept, the opacity is what is handed over. With the pixels handed
+        // out whole, or the gamut's tint laid on outside the canvas, it says
+        // nothing of them, and it is all drawn again over white to tell.
+        let kept = !canvas.raw_used() && gamut.is_none();
         // Only the rows drawn in, over black or over white, can hold
         // anything: the rest are passed over without being looked at,
         // most of the window, which under a busy CPU took the longest.
         let mut drawn = canvas.touched().unwrap_or_default();
-        // Over white, in a buffer of this one's own, which keeps what was
-        // drawn in it: white over all of it only when it is new, of another
-        // size, or the video's part of the window has moved; otherwise it is
-        // white already but where something was drawn last time, which was
-        // whitened again then.
         let mut white = std::mem::take(&mut self.video_layer.white);
-        if white.len() != pixels.len() || self.video_layer.white_for != Some(place) {
-            ui::size_for(&mut white, pixels.len());
-            ui::fill_all(&mut white, 0xFFFFFF);
-            self.video_layer.white_for = Some(place);
+        if !kept {
+            // Over white, in a buffer of this one's own, which keeps what
+            // was drawn in it: white over all of it only when it is new, of
+            // another size, or the video's part of the window has moved;
+            // otherwise it is white already but where something was drawn
+            // last time, which was whitened again then.
+            if white.len() != pixels.len() || self.video_layer.white_for != Some(place) {
+                ui::size_for(&mut white, pixels.len());
+                ui::fill_all(&mut white, 0xFFFFFF);
+                self.video_layer.white_for = Some(place);
+            }
+            // The same rows as over black.
+            let _ = self.draw_gamut(&mut white, window);
+            let mut canvas = Canvas::new(&mut white, window.0, window.1).counting();
+            self.draw_overlays(&mut canvas);
+            for (row, over_white) in drawn.iter_mut().zip(canvas.touched().unwrap_or_default()) {
+                *row |= over_white;
+            }
+            for y in gamut.into_iter().flatten() {
+                drawn[y as usize] = true;
+            }
         }
-        // The same rows as over black.
-        let _ = self.draw_gamut(&mut white, window);
-        let mut canvas = Canvas::new(&mut white, window.0, window.1).counting();
-        self.draw_overlays(&mut canvas);
-        for (row, over_white) in drawn.iter_mut().zip(canvas.touched().unwrap_or_default()) {
-            *row |= over_white;
+        let opacity = if kept { Opacity::Kept(&alpha) } else { Opacity::White(&white) };
+        let picture = picture_of(pixels, opacity, window.0 as usize, place, &drawn);
+        for (row, _) in alpha.chunks_exact_mut(window.0 as usize).zip(&drawn).filter(|(_, drawn)| **drawn) {
+            row.fill(0);
         }
-        for y in gamut.into_iter().flatten() {
-            drawn[y as usize] = true;
-        }
-        let picture = picture_of(pixels, &white, window.0 as usize, place, &drawn);
+        self.video_layer.alpha = alpha;
         // Drawn for the window: what can differ from what it showed last is
         // what was drawn in then or now.
         if reused.is_some() {
@@ -121,7 +141,9 @@ impl App {
         // shows, and left as it was the display is told only of what
         // changed around it.
         for [x, y, w, h] in &picture.parts {
-            Canvas::new(&mut white, window.0, window.1).fill(place[0] + x, place[1] + y, *w, *h, 0xFFFFFF);
+            if !kept {
+                Canvas::new(&mut white, window.0, window.1).fill(place[0] + x, place[1] + y, *w, *h, 0xFFFFFF);
+            }
             Canvas::new(pixels, window.0, window.1).fill(place[0] + x, place[1] + y, *w, *h, 0);
         }
         self.video_layer.white = white;
@@ -151,34 +173,59 @@ impl App {
     }
 }
 
-/// The picture with transparency that drawing over black and over white
-/// make, within `place` (left, top, width, height) of a window `width`
-/// wide: in bands of the rows with something in them, each cut to its
-/// width, premultiplied BGRA, and where each goes in the part. Only the
-/// window's rows flagged as `drawn` in are looked at: nothing is in the rest.
-fn picture_of(black: &[u32], white: &[u32], width: usize, [left, top, w, h]: [i32; 4], drawn: &[bool]) -> Picture {
+/// How opaque what was drawn over black is: told by drawing it again over
+/// white, which shows through as much as it is not; or kept as it was
+/// drawn, a byte a pixel.
+#[derive(Clone, Copy)]
+enum Opacity<'a> {
+    White(&'a [u32]),
+    Kept(&'a [u8]),
+}
+
+impl Opacity<'_> {
+    /// The opacity of the pixel at `at`, which is `black` over black.
+    fn at(self, black: u32, at: usize) -> u32 {
+        match self {
+            Opacity::White(white) => 255 - ((white[at] >> 8 & 255).saturating_sub(black >> 8 & 255)).min(255),
+            Opacity::Kept(alpha) => u32::from(alpha[at]),
+        }
+    }
+
+    /// Whether nothing was drawn in the `len` pixels from `at`: black as
+    /// it was, and white too, or nothing opaque.
+    fn untouched(self, black: &[u32], at: usize, len: usize) -> bool {
+        match self {
+            Opacity::White(white) => black.iter().all(|pixel| *pixel == 0) && white[at..at + len].iter().all(|pixel| *pixel == 0xFFFFFF),
+            Opacity::Kept(alpha) => alpha[at..at + len].iter().all(|a| *a == 0),
+        }
+    }
+}
+
+/// The picture with transparency that drawing over black makes, as opaque
+/// as `opacity` says, within `place` (left, top, width, height) of a
+/// window `width` wide: in bands of the rows with something in them, each
+/// cut to its width, premultiplied BGRA, and where each goes in the part.
+/// Only the window's rows flagged as `drawn` in are looked at: nothing is
+/// in the rest.
+fn picture_of(black: &[u32], opacity: Opacity, width: usize, [left, top, w, h]: [i32; 4], drawn: &[bool]) -> Picture {
     use rayon::prelude::*;
     let (left, top, w, h) = (left as usize, top as usize, w.max(0) as usize, h.max(0) as usize);
-    // How opaque each pixel is: white shows through as much as it is not.
-    let alpha = |b: u32, w: u32| 255 - ((w >> 8 & 255).saturating_sub(b >> 8 & 255)).min(255);
-    let (none_black, none_white) = (vec![0u32; w], vec![0xFFFFFFu32; w]);
-    let rows = |y: usize| {
-        let row = (top + y) * width + left;
-        (&black[row..row + w], &white[row..row + w])
-    };
+    // Where a row of the part begins in the window, and its black pixels.
+    let row_at = |y: usize| (top + y) * width + left;
     // Each row's first and last pixel with anything on it. A row left as
-    // it was, black over black and white over white, is passed over whole
-    // by comparing memory: most rows are. The rest here, unless there are
-    // a great many: handing rows to other threads waits for them to be
-    // woken, which on a busy machine takes longer than the rows do.
+    // it was is passed over whole by comparing memory: most rows are. The
+    // rest here, unless there are a great many: handing rows to other
+    // threads waits for them to be woken, which on a busy machine takes
+    // longer than the rows do.
     let looked: Vec<usize> = (0..h).filter(|y| drawn.get(top + y) == Some(&true)).collect();
     let span_of = |&y: &usize| {
-        let (b, wh) = rows(y);
-        if b == none_black.as_slice() && wh == none_white.as_slice() {
+        let at = row_at(y);
+        let row = &black[at..at + w];
+        if opacity.untouched(row, at, w) {
             return None;
         }
-        let first = (0..w).find(|x| alpha(b[*x], wh[*x]) > 0)?;
-        let last = (first..w).rev().find(|x| alpha(b[*x], wh[*x]) > 0).unwrap_or(first);
+        let first = (0..w).find(|x| opacity.at(row[*x], at + x) > 0)?;
+        let last = (first..w).rev().find(|x| opacity.at(row[*x], at + x) > 0).unwrap_or(first);
         Some((first, last + 1))
     };
     let found: Vec<Option<(usize, usize)>> = match looked.len() * w < SHARED_FROM {
@@ -205,10 +252,10 @@ fn picture_of(black: &[u32], white: &[u32], width: usize, [left, top, w, h]: [i3
             if spans[y].is_none() {
                 return;
             }
-            let (b, wh) = rows(y);
+            let from = row_at(y) + *x0 as usize;
             for (x, pixel) in out.iter_mut().enumerate() {
-                let (b, wh) = (b[*x0 as usize + x], wh[*x0 as usize + x]);
-                let a = alpha(b, wh);
+                let b = black[from + x];
+                let a = opacity.at(b, from + x);
                 // The color over black is the color times its opacity
                 // already; never more than the opacity, which rounding
                 // could make it.
@@ -268,7 +315,7 @@ mod tests {
             pixels
         };
         let (black, white) = (draw(0), draw(0xFFFFFF));
-        let picture = picture_of(&black, &white, width, [0, 0, 4, 2], &[true; 2]);
+        let picture = picture_of(&black, Opacity::White(&white), width, [0, 0, 4, 2], &[true; 2]);
         // Cut down to the second row, from its second pixel.
         assert_eq!(picture.parts, [[1, 1, 3, 1]]);
         let a = |p: u32| p >> 24;
@@ -276,7 +323,7 @@ mod tests {
         assert!((127..=129).contains(&a(picture.pixels[1])) && (picture.pixels[1] & 0xFF) == a(picture.pixels[1]));
         assert!((63..=65).contains(&a(picture.pixels[2])) && (picture.pixels[2] >> 16 & 0xFF) == 0);
         // Nothing drawn is nothing to show.
-        assert!(picture_of(&draw(0)[..4], &draw(0xFFFFFF)[..4], width, [0, 0, 4, 1], &[true]).parts.is_empty());
+        assert!(picture_of(&draw(0)[..4], Opacity::White(&draw(0xFFFFFF)[..4]), width, [0, 0, 4, 1], &[true]).parts.is_empty());
     }
 
     #[test]
@@ -289,11 +336,49 @@ mod tests {
             black[row * 4 + 1] = 0xFF0000;
         }
         let white = white_of(&black);
-        assert_eq!(picture_of(&black, &white, 4, [0, 0, 4, 4], &[false, true, true, false]).parts, [[1, 1, 1, 2]]);
-        assert_eq!(picture_of(&black, &white, 4, [0, 0, 4, 4], &[true; 4]).parts, [[1, 0, 1, 4]]);
+        assert_eq!(picture_of(&black, Opacity::White(&white), 4, [0, 0, 4, 4], &[false, true, true, false]).parts, [[1, 1, 1, 2]]);
+        assert_eq!(picture_of(&black, Opacity::White(&white), 4, [0, 0, 4, 4], &[true; 4]).parts, [[1, 0, 1, 4]]);
         // Told of no rows, or none drawn in: nothing.
-        assert!(picture_of(&black, &white, 4, [0, 0, 4, 4], &[]).parts.is_empty());
-        assert!(picture_of(&black, &white, 4, [0, 0, 4, 4], &[false; 4]).parts.is_empty());
+        assert!(picture_of(&black, Opacity::White(&white), 4, [0, 0, 4, 4], &[]).parts.is_empty());
+        assert!(picture_of(&black, Opacity::White(&white), 4, [0, 0, 4, 4], &[false; 4]).parts.is_empty());
+    }
+
+    #[test]
+    fn opacity_kept_as_drawn_is_as_drawing_again_over_white_tells() {
+        let (width, height) = (200usize, 120usize);
+        // What goes over a video: panels with shadows, see-through and
+        // opaque, a bar, the shade under it, a dimmed patch, and a part
+        // copied and laid back half over what was drawn there since.
+        let draw = |canvas: &mut Canvas| {
+            canvas.fade_down(0, 70, 200, 50, 70);
+            canvas.soft_shadow(20, 10, 80, 30, 15, 12);
+            canvas.round_fill(20, 10, 80, 30, 15, 0x1C1D21, 256);
+            canvas.round_outline(20, 10, 80, 30, 15, 1, 0x3A3C43);
+            canvas.round_fill(120, 15, 60, 40, 8, 0x000000, 170);
+            canvas.pill(10, 95, 180, 8, 0xF4F4F4, 72, 180);
+            canvas.pill(10, 95, 180, 8, 0xF4F4F4, 256, 90);
+            canvas.shade(150, 60, 40, 20, 128);
+            let kept = canvas.copy(30, 50, 40, 20);
+            canvas.fill(30, 50, 40, 20, 0xFF8000);
+            canvas.dissolve(30, 50, 40, 20, &kept, 128);
+        };
+        let (mut black, mut white, mut alpha) = (vec![0u32; width * height], vec![0xFFFFFFu32; width * height], vec![0u8; width * height]);
+        let mut canvas = Canvas::new(&mut black, width as u32, height as u32).counting().keeping_alpha(&mut alpha);
+        draw(&mut canvas);
+        assert!(!canvas.raw_used());
+        let drawn = canvas.touched().unwrap();
+        draw(&mut Canvas::new(&mut white, width as u32, height as u32));
+        let place = [0, 0, width as i32, height as i32];
+        let kept = picture_of(&black, Opacity::Kept(&alpha), width, place, &drawn);
+        let told = picture_of(&black, Opacity::White(&white), width, place, &drawn);
+        assert_eq!(kept.parts, told.parts);
+        // Each layer rounds down, the twenty rings of a shadow one on another
+        // too, and not in the same places the two ways: a few levels apart.
+        let near = |a: u32, b: u32| (0..4).all(|byte| (a >> (byte * 8) & 255).abs_diff(b >> (byte * 8) & 255) <= 4);
+        let off = kept.pixels.iter().zip(&told.pixels).filter(|(a, b)| !near(**a, **b)).count();
+        assert_eq!(off, 0, "{off} of {} pixels differ by more than rounding", kept.pixels.len());
+        // Nothing drawn, nothing opaque.
+        assert!(alpha.iter().zip(&black).all(|(a, pixel)| *a > 0 || *pixel == 0));
     }
 
     #[test]

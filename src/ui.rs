@@ -19,11 +19,60 @@ pub struct Canvas<'a> {
     /// Which rows have been drawn in, a flag a row, when asked to keep
     /// count: all that has to be looked at to tell what was drawn.
     touched: Option<Vec<bool>>,
+    /// How opaque each pixel is, when kept, a byte a pixel: drawn over a
+    /// video, what is drawn is handed over with its opacity, kept here as
+    /// it is drawn rather than found by drawing it all a second time.
+    alpha: Option<&'a mut [u8]>,
+    /// The pixels were handed out whole, and what was done to them is not
+    /// known: the opacity kept says nothing of them.
+    raw: bool,
+}
+
+/// `a` taken `amount`/256 of the way to `to`, as a blend takes a pixel.
+fn toward(a: u8, to: u8, amount: u32) -> u8 {
+    ((u32::from(a) * (256 - amount) + u32::from(to) * amount) >> 8) as u8
 }
 
 impl<'a> Canvas<'a> {
     pub fn new(pixels: &'a mut [u32], width: u32, height: u32) -> Self {
-        Canvas { pixels, width: width as i32, height: height as i32, band: None, touched: None }
+        Canvas { pixels, width: width as i32, height: height as i32, band: None, touched: None, alpha: None, raw: false }
+    }
+
+    /// One that keeps how opaque each pixel is in `alpha`, as it draws.
+    pub fn keeping_alpha(mut self, alpha: &'a mut [u8]) -> Self {
+        self.alpha = (alpha.len() == self.pixels.len()).then_some(alpha);
+        self
+    }
+
+    /// Whether the pixels were handed out whole while the opacity was
+    /// kept: then it cannot be gone by.
+    pub fn raw_used(&self) -> bool {
+        self.raw
+    }
+
+    /// The opacity of a rectangle's pixels on the canvas taken `amount`/256
+    /// of the way to `to`: set to it, at 256.
+    fn alpha_rect(&mut self, x: i32, y: i32, w: i32, h: i32, to: u8, amount: u32) {
+        let Some(alpha) = self.alpha.as_deref_mut() else { return };
+        let (x0, x1) = (x.clamp(0, self.width) as usize, (x + w).clamp(0, self.width) as usize);
+        let (y0, y1) = (y.clamp(0, self.height) as usize, (y + h).clamp(0, self.height) as usize);
+        let width = self.width.max(1) as usize;
+        for row in alpha.chunks_exact_mut(width).skip(y0).take(y1.saturating_sub(y0)) {
+            let row = &mut row[x0..x1.max(x0)];
+            match amount >= 256 {
+                true => row.fill(to),
+                false => row.iter_mut().for_each(|a| *a = toward(*a, to, amount)),
+            }
+        }
+    }
+
+    /// One pixel's opacity, as `alpha_rect` does a rectangle's; the pixel
+    /// on the canvas.
+    fn alpha_at(&mut self, x: i32, y: i32, to: u8, amount: u32) {
+        if let Some(alpha) = self.alpha.as_deref_mut() {
+            let a = &mut alpha[(y * self.width + x) as usize];
+            *a = if amount >= 256 { to } else { toward(*a, to, amount) };
+        }
     }
 
     /// One that keeps count of the rows drawn in.
@@ -58,14 +107,38 @@ impl<'a> Canvas<'a> {
         rows.skip(y0).take(y1.saturating_sub(y0)).map(move |row| &mut row[x0..x1.max(x0)])
     }
 
-    pub fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
-        self.rows(x, y, w, h).for_each(|row| row.fill(color));
+    /// `rows`, each with its row of opacities when they are kept.
+    fn rows_and_alpha(&mut self, x: i32, y: i32, w: i32, h: i32) -> impl Iterator<Item = (&mut [u32], Option<&mut [u8]>)> {
+        let (x0, x1) = (x.clamp(0, self.width) as usize, (x + w).clamp(0, self.width) as usize);
+        let (y0, y1) = (y.clamp(0, self.height) as usize, (y + h).clamp(0, self.height) as usize);
+        if x0 < x1 {
+            self.touch(y0 as i32, y1 as i32);
+        }
+        let (width, count) = (self.width.max(1) as usize, y1.saturating_sub(y0));
+        let pixels = self.pixels.chunks_exact_mut(width).skip(y0).take(count).map(move |row| &mut row[x0..x1.max(x0)]);
+        let mut alpha = self.alpha.as_deref_mut().map(|alpha| alpha.chunks_exact_mut(width).skip(y0).take(count).map(move |row| &mut row[x0..x1.max(x0)]));
+        pixels.map(move |row| (row, alpha.as_mut().and_then(Iterator::next)))
     }
 
-    /// What is in a rectangle now, to be laid back over it with `dissolve`.
+    pub fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
+        for (row, alpha) in self.rows_and_alpha(x, y, w, h) {
+            row.fill(color);
+            if let Some(alpha) = alpha {
+                alpha.fill(255);
+            }
+        }
+    }
+
+    /// What is in a rectangle now, to be laid back over it with `dissolve`;
+    /// with the opacity kept, that too, in the byte above the colors.
     pub fn copy(&mut self, x: i32, y: i32, w: i32, h: i32) -> Vec<u32> {
         let mut out = Vec::with_capacity(w.max(0) as usize * h.max(0) as usize);
-        self.rows(x, y, w, h).for_each(|row| out.extend_from_slice(row));
+        for (row, alpha) in self.rows_and_alpha(x, y, w, h) {
+            match alpha {
+                Some(alpha) => out.extend(row.iter().zip(alpha.iter()).map(|(pixel, a)| pixel & 0xFFFFFF | u32::from(*a) << 24)),
+                None => out.extend_from_slice(row),
+            }
+        }
         out
     }
 
@@ -75,8 +148,18 @@ impl<'a> Canvas<'a> {
         if amount >= 256 {
             return self.paste(x, y, w, h, was);
         }
-        for (pixel, was) in self.rows(x, y, w, h).flatten().zip(was) {
-            *pixel = mix(*pixel, *was, amount);
+        let mut rest = was;
+        for (row, alpha) in self.rows_and_alpha(x, y, w, h) {
+            let n = row.len().min(rest.len());
+            for (pixel, was) in row[..n].iter_mut().zip(rest) {
+                *pixel = mix(*pixel, *was, amount);
+            }
+            if let Some(alpha) = alpha {
+                for (a, was) in alpha[..n].iter_mut().zip(rest) {
+                    *a = toward(*a, (was >> 24) as u8, amount);
+                }
+            }
+            rest = &rest[n..];
         }
     }
 
@@ -84,10 +167,17 @@ impl<'a> Canvas<'a> {
     /// row at a time, which is a plain copy of memory.
     pub fn paste(&mut self, x: i32, y: i32, w: i32, h: i32, was: &[u32]) {
         let mut rest = was;
-        for row in self.rows(x, y, w, h) {
+        for (row, alpha) in self.rows_and_alpha(x, y, w, h) {
             let n = row.len().min(rest.len());
-            row[..n].copy_from_slice(&rest[..n]);
-            rest = &rest[row.len().min(rest.len())..];
+            match alpha {
+                Some(alpha) => {
+                    for ((pixel, a), was) in row[..n].iter_mut().zip(alpha.iter_mut()).zip(rest) {
+                        (*pixel, *a) = (was & 0xFFFFFF, (was >> 24) as u8);
+                    }
+                }
+                None => row[..n].copy_from_slice(&rest[..n]),
+            }
+            rest = &rest[n..];
         }
     }
 
@@ -100,6 +190,8 @@ impl<'a> Canvas<'a> {
             let n = row.len().min(n);
             row[..n].copy_from_slice(&from[..n]);
         }
+        // What is laid there is a picture of its own: opaque.
+        self.alpha_rect(x, y, n as i32, h.min((was.len() / was_w) as i32), 255, 256);
     }
 
     /// Draws `frame` scaled to a rectangle, on every core: made larger, by
@@ -125,6 +217,7 @@ impl<'a> Canvas<'a> {
             .collect();
         let width = self.width as usize;
         self.touch(y, y + h);
+        self.alpha_rect(x0, y, x1 - x0, h, 255, 256);
         self.pixels.par_chunks_exact_mut(width).enumerate().for_each(|(py, row)| {
             let dy = py as i32 - y;
             if dy < 0 || dy >= h {
@@ -146,6 +239,7 @@ impl<'a> Canvas<'a> {
     /// Everything on the canvas.
     pub fn all(&mut self) -> &mut [u32] {
         self.touch(0, self.height);
+        self.raw |= self.alpha.is_some();
         self.pixels
     }
 
@@ -165,7 +259,8 @@ impl<'a> Canvas<'a> {
             for (at, was) in was.iter().enumerate() {
                 let (px, py) = (cx + at as i32 % radius, cy + at as i32 / radius);
                 let outside = 1.0 - rounded_cover(px, py, x, y, w, h, radius, 0.0);
-                self.cover(px, py, *was, (outside * 256.0) as u32);
+                // As it was: its opacity too, kept in the byte above.
+                self.cover_toward(px, py, *was, (outside * 256.0) as u32, (*was >> 24) as u8);
             }
         }
     }
@@ -186,18 +281,30 @@ impl<'a> Canvas<'a> {
         // the level worked out once for the row, in sixteenths, so that
         // the dither is a whole number added.
         self.touch(y0 as i32, y1 as i32);
-        let rows = self.pixels[y0 * width..y1.max(y0) * width].par_chunks_exact_mut(width);
-        rows.enumerate().for_each(|(row, pixels)| {
+        let amounts = |row: usize| -> [u32; 4] {
             let down = (f64::from(top + row as i32 - y) / f64::from(h.max(1))).clamp(0.0, 1.0);
             // Gently at first and at the last, as a shadow falls off.
             let eased = down * down * (3.0 - 2.0 * down);
             let level = ((256.0 - (256.0 - f64::from(keep)) * eased) * 16.0) as u32;
             let tile = &TILE[(top as usize + row) % 4];
-            let amounts: [u32; 4] = std::array::from_fn(|column| ((level + tile[column]) / 16).min(256));
+            std::array::from_fn(|column| ((level + tile[column]) / 16).min(256))
+        };
+        let rows = self.pixels[y0 * width..y1.max(y0) * width].par_chunks_exact_mut(width);
+        rows.enumerate().for_each(|(row, pixels)| {
+            let amounts = amounts(row);
             for (column, pixel) in pixels[x0..x1.max(x0)].iter_mut().enumerate() {
                 *pixel = mix(0, *pixel, amounts[column % 4]);
             }
         });
+        // Darkened is black laid over it: that much the more opaque.
+        if let Some(alpha) = self.alpha.as_deref_mut() {
+            alpha[y0 * width..y1.max(y0) * width].par_chunks_exact_mut(width).enumerate().for_each(|(row, alpha)| {
+                let amounts = amounts(row);
+                for (column, a) in alpha[x0..x1.max(x0)].iter_mut().enumerate() {
+                    *a = toward(*a, 255, 256 - amounts[column % 4]);
+                }
+            });
+        }
     }
 
     /// Darkens a rectangle, keeping `keep`/256 of the brightness.
@@ -205,6 +312,7 @@ impl<'a> Canvas<'a> {
         for pixel in self.rows(x, y, w, h).flatten() {
             *pixel = mix(0, *pixel, keep);
         }
+        self.alpha_rect(x, y, w, h, 255, 256 - keep.min(256));
     }
 
     /// Blends in a bar with fully rounded ends, `amount`/256 opaque. Only the
@@ -227,6 +335,7 @@ impl<'a> Canvas<'a> {
             for px in left..right {
                 let pixel = &mut self.pixels[(py * self.width + px) as usize];
                 *pixel = mix(*pixel, color, amount);
+                self.alpha_at(px, py, 255, amount);
             }
         }
     }
@@ -363,14 +472,21 @@ impl<'a> Canvas<'a> {
                     false => row.iter_mut().for_each(|pixel| *pixel = mix(*pixel, color, amount)),
                 }
             }
+            self.alpha_rect(x + inset, py, w - 2 * inset, 1, 255, amount);
         }
     }
 
     fn cover(&mut self, x: i32, y: i32, color: u32, amount: u32) {
+        self.cover_toward(x, y, color, amount, 255);
+    }
+
+    /// `cover`, the pixel's opacity taken toward `to` as its color is.
+    fn cover_toward(&mut self, x: i32, y: i32, color: u32, amount: u32, to: u8) {
         if amount > 0 && x >= 0 && y >= 0 && x < self.width && y < self.height {
             self.touch(y, y + 1);
             let pixel = &mut self.pixels[(y * self.width + x) as usize];
             *pixel = mix(*pixel, color, amount.min(256));
+            self.alpha_at(x, y, to, amount.min(256));
         }
     }
 
@@ -406,6 +522,7 @@ impl<'a> Canvas<'a> {
             }
         };
         self.touch(y0, y1);
+        self.alpha_rect(x0, y0, x1 - x0, y1 - y0, 255, 256);
         let rows = self.pixels[y0 as usize * width..y1 as usize * width].chunks_exact_mut(width);
         // A large picture has its rows done each on its own core; a small
         // one is quicker drawn than handed out.
@@ -462,6 +579,9 @@ impl<'a> Canvas<'a> {
         let (top, bottom) = (blits.iter().map(|b| b.y0).min().unwrap_or(0), blits.iter().map(|b| b.y1).max().unwrap_or(0));
         let stride = width as usize;
         self.touch(top, bottom);
+        for blit in &blits {
+            self.alpha_rect(blit.x0 as i32, blit.y0, (blit.x1 - blit.x0) as i32, blit.y1 - blit.y0, 255, 256);
+        }
         let rows = self.pixels[top as usize * stride..bottom as usize * stride].par_chunks_exact_mut(stride);
         rows.enumerate().for_each(|(row, out)| {
             let py = top + row as i32;
@@ -482,6 +602,7 @@ impl<'a> Canvas<'a> {
             let pixel = &mut self.pixels[(y * self.width + x) as usize];
             let amount = u32::from(coverage) + u32::from(coverage >> 7);
             *pixel = mix(*pixel, color, amount);
+            self.alpha_at(x, y, 255, amount);
         }
     }
 }
