@@ -642,8 +642,9 @@ impl App {
         // Read closely, not glanced at: hardly smaller than the rest.
         let small = (px * 11 / 12).max(12);
         let small_line = Text::line_height(small);
-        let width = (canvas.width * 3 / 4).clamp((px as i32 * 40).min(canvas.width - 2 * pad), canvas.width - 2 * pad);
-        let height = (canvas.height * 7 / 8).min(canvas.height - 2 * pad);
+        // About an eighth less of the window than it was: room around it.
+        let width = (canvas.width * 7 / 10).clamp((px as i32 * 40).min(canvas.width - 2 * pad), canvas.width - 2 * pad);
+        let height = (canvas.height * 13 / 16).min(canvas.height - 2 * pad);
         // In the middle, or where it was moved to by its heading.
         let (left, top) = self.place_dialog("convert", (canvas.width, canvas.height), (width, height), pad * 2 + line);
         panel_box(canvas, left, top, width, height, pad);
