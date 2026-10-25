@@ -594,6 +594,7 @@ impl App {
         self.tend_frame_save();
         let Some(player) = &self.player else { return };
         let mut video_started = None;
+        let mut seek_landed = None;
         // Whether the time along is written anywhere: on the seek bar, in
         // the info line, under the grid, or along the scenes. Elsewhere
         // its moving on with every frame changes nothing in the window.
@@ -654,6 +655,7 @@ impl App {
                 // Every seek ends with the player announcing frames again.
                 if let Some(asked) = video.seek_asked.take() {
                     video.seek_took = Some(asked.elapsed());
+                    seek_landed = video.seek_took;
                     if self.options.debug {
                         eprintln!("jog: {:>7.1?} seek", asked.elapsed());
                     }
@@ -709,8 +711,14 @@ impl App {
         if video_started.is_some() {
             self.warm_helpers();
         }
-        if let (Some(took), Some("video")) = (video_started, self.bench_scene()) {
-            self.bench_note("video", "start to first frame", took);
+        // A benchmark's videos: how long each took to show, by scene.
+        if let Some(scene) = self.bench_scene() {
+            if let Some(took) = video_started {
+                self.bench_note(scene, "start to first frame", took);
+            }
+            if let Some(took) = seek_landed {
+                self.bench_note(scene, "key to frame", took);
+            }
         }
     }
 

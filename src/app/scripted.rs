@@ -152,33 +152,59 @@ impl App {
     pub fn start_benchmark(&mut self, launched: Instant) {
         let mut scenes: VecDeque<(&'static str, &'static str, Duration)> = VecDeque::new();
         let mut scene = |name, keys, ms| scenes.push_back((name, keys, Duration::from_millis(ms)));
-        // On through the files at a reader's pace, so that each is decoded
-        // ahead; then faster than they decode; then back over ones decoded.
-        for _ in 0..15 {
-            scene("step", "{Right}", 250);
+        // Pictures to go through: none, and the folder is of videos only.
+        if self.files.iter().any(|file| !files::is_video(file)) {
+            // On through the files at a reader's pace, so that each is decoded
+            // ahead; then faster than they decode; then back over ones decoded.
+            for _ in 0..15 {
+                scene("step", "{Right}", 250);
+            }
+            for _ in 0..40 {
+                scene("fast", "{Right}", 40);
+            }
+            scene("", "", 1500);
+            for _ in 0..15 {
+                scene("back", "{Left}", 250);
+            }
+            scene("", "", 400);
+            for _ in 0..3 {
+                scene("zoom", "{Up}", 350);
+            }
+            for _ in 0..3 {
+                scene("zoom", "{Down}", 350);
+            }
+            scene("zoom", "0", 400);
+            scene("grid", "g", 2000);
+            scene("grid", "{PageDown}", 800);
+            scene("grid", "{PageDown}", 800);
+            scene("grid", "{PageUp}", 800);
+            scene("grid", "g", 600);
         }
-        for _ in 0..40 {
-            scene("fast", "{Right}", 40);
-        }
-        scene("", "", 1500);
-        for _ in 0..15 {
-            scene("back", "{Left}", 250);
-        }
-        scene("", "", 400);
-        for _ in 0..3 {
-            scene("zoom", "{Up}", 350);
-        }
-        for _ in 0..3 {
-            scene("zoom", "{Down}", 350);
-        }
-        scene("zoom", "0", 400);
-        scene("grid", "g", 2000);
-        scene("grid", "{PageDown}", 800);
-        scene("grid", "{PageDown}", 800);
-        scene("grid", "{PageUp}", 800);
-        scene("grid", "g", 600);
-        if self.files.iter().any(|file| files::is_video(file)) {
+        let videos = self.files.iter().filter(|file| files::is_video(file)).count();
+        if videos > 0 {
             scene("video", "@video", 3000);
+            // About in it: five seconds on and back, as the arrows go, and
+            // a long way along, as a click on the seek bar does.
+            for _ in 0..6 {
+                scene("seek", "{Right}", 800);
+            }
+            for _ in 0..6 {
+                scene("seek back", "{Left}", 800);
+            }
+            for at in ["@jump:0.8", "@jump:0.2", "@jump:0.6", "@jump:0.4"] {
+                scene("jump", at, 1200);
+            }
+        }
+        if videos > 1 {
+            // From one video to the next, held ready, and back, which is not.
+            for _ in 0..5 {
+                scene("next video", "{PageDown}", 1500);
+            }
+            for _ in 0..3 {
+                scene("previous video", "{PageUp}", 1500);
+            }
+        }
+        if videos > 0 {
             scene("", "{Right}", 500);
         }
         self.bench = Some(Bench { scenes, scene: "", at: None, samples: Vec::new(), launched, begun: false });
@@ -214,6 +240,12 @@ impl App {
                     self.go_to(pos, true);
                 }
             }
+            // That far along the video, as a click on the seek bar.
+            keys if keys.starts_with("@jump:") => {
+                if let Ok(fraction) = keys["@jump:".len()..].parse() {
+                    self.seek_to(fraction, true);
+                }
+            }
             keys => self.play_keys(keys, event_loop),
         }
     }
@@ -233,11 +265,13 @@ impl App {
         println!("{:<24} {:<32} {:>8} {:>8} {:>8} {:>5}", "scene", "metric", "median", "p90", "max", "n");
         // Scenes in the order they were played; within one, the metrics
         // in the order a reader wants them.
-        const METRICS: [&str; 8] = [
+        const METRICS: [&str; 10] = [
             "launch to first picture",
+            "launch to first frame",
             "key to picture",
             "decode, read and fit",
             "start to first frame",
+            "key to frame",
             "scale the picture, rough",
             "scale the picture, smooth",
             "draw the page",

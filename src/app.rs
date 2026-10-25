@@ -4328,6 +4328,11 @@ impl App {
                 // from its first frame instead.
                 if self.video.as_ref().is_some_and(|video| video.showing && video.id == self.id()) {
                     self.start_snapshot(event_loop);
+                    // A benchmark's likewise, with no picture to begin on.
+                    if let Some(bench) = self.bench.as_ref().filter(|bench| !bench.begun && !self.bench_step_due) {
+                        self.bench_note("start", "launch to first frame", bench.launched.elapsed());
+                        self.bench_step_due = true;
+                    }
                 }
                 self.tend_back();
                 self.tend_gamut();
