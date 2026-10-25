@@ -16,17 +16,44 @@ pub struct Canvas<'a> {
     /// When set, rounded rectangles are drawn only in these rows: the
     /// curved top and bottom of a panel whose middle is laid in whole.
     pub band: Option<std::ops::Range<i32>>,
+    /// Which rows have been drawn in, a flag a row, when asked to keep
+    /// count: all that has to be looked at to tell what was drawn.
+    touched: Option<Vec<bool>>,
 }
 
 impl<'a> Canvas<'a> {
     pub fn new(pixels: &'a mut [u32], width: u32, height: u32) -> Self {
-        Canvas { pixels, width: width as i32, height: height as i32, band: None }
+        Canvas { pixels, width: width as i32, height: height as i32, band: None, touched: None }
+    }
+
+    /// One that keeps count of the rows drawn in.
+    pub fn counting(mut self) -> Self {
+        self.touched = Some(vec![false; self.height.max(0) as usize]);
+        self
+    }
+
+    /// Which rows were drawn in, a flag a row; none when not counted.
+    pub fn touched(self) -> Option<Vec<bool>> {
+        self.touched
+    }
+
+    /// Rows `y0` to `y1` drawn in, as much of them as is on the canvas.
+    fn touch(&mut self, y0: i32, y1: i32) {
+        if let Some(rows) = &mut self.touched {
+            let (y0, y1) = (y0.max(0) as usize, y1.clamp(0, self.height) as usize);
+            if y0 < y1 {
+                rows[y0..y1].fill(true);
+            }
+        }
     }
 
     /// Rows of the part of a rectangle that is on the canvas.
     fn rows(&mut self, x: i32, y: i32, w: i32, h: i32) -> impl Iterator<Item = &mut [u32]> {
         let (x0, x1) = (x.clamp(0, self.width) as usize, (x + w).clamp(0, self.width) as usize);
         let (y0, y1) = (y.clamp(0, self.height) as usize, (y + h).clamp(0, self.height) as usize);
+        if x0 < x1 {
+            self.touch(y0 as i32, y1 as i32);
+        }
         let rows = self.pixels.chunks_exact_mut(self.width.max(1) as usize);
         rows.skip(y0).take(y1.saturating_sub(y0)).map(move |row| &mut row[x0..x1.max(x0)])
     }
@@ -97,6 +124,7 @@ impl<'a> Canvas<'a> {
             })
             .collect();
         let width = self.width as usize;
+        self.touch(y, y + h);
         self.pixels.par_chunks_exact_mut(width).enumerate().for_each(|(py, row)| {
             let dy = py as i32 - y;
             if dy < 0 || dy >= h {
@@ -117,6 +145,7 @@ impl<'a> Canvas<'a> {
 
     /// Everything on the canvas.
     pub fn all(&mut self) -> &mut [u32] {
+        self.touch(0, self.height);
         self.pixels
     }
 
@@ -156,6 +185,7 @@ impl<'a> Canvas<'a> {
         // most of a million pixels on every frame: a row per core, and
         // the level worked out once for the row, in sixteenths, so that
         // the dither is a whole number added.
+        self.touch(y0 as i32, y1 as i32);
         let rows = self.pixels[y0 * width..y1.max(y0) * width].par_chunks_exact_mut(width);
         rows.enumerate().for_each(|(row, pixels)| {
             let down = (f64::from(top + row as i32 - y) / f64::from(h.max(1))).clamp(0.0, 1.0);
@@ -193,6 +223,7 @@ impl<'a> Canvas<'a> {
             let inset = (radius - (radius * radius - from_middle * from_middle).max(0.0).sqrt()).round() as i32;
             let left = (x + inset).max(0);
             let right = (x + w - inset).min(x + upto).min(self.width);
+            self.touch(py, py + 1);
             for px in left..right {
                 let pixel = &mut self.pixels[(py * self.width + px) as usize];
                 *pixel = mix(*pixel, color, amount);
@@ -297,6 +328,7 @@ impl<'a> Canvas<'a> {
 
     fn cover(&mut self, x: i32, y: i32, color: u32, amount: u32) {
         if amount > 0 && x >= 0 && y >= 0 && x < self.width && y < self.height {
+            self.touch(y, y + 1);
             let pixel = &mut self.pixels[(y * self.width + x) as usize];
             *pixel = mix(*pixel, color, amount.min(256));
         }
@@ -333,6 +365,7 @@ impl<'a> Canvas<'a> {
                 *pixel = source[column];
             }
         };
+        self.touch(y0, y1);
         let rows = self.pixels[y0 as usize * width..y1 as usize * width].chunks_exact_mut(width);
         // A large picture has its rows done each on its own core; a small
         // one is quicker drawn than handed out.
@@ -388,6 +421,7 @@ impl<'a> Canvas<'a> {
         }
         let (top, bottom) = (blits.iter().map(|b| b.y0).min().unwrap_or(0), blits.iter().map(|b| b.y1).max().unwrap_or(0));
         let stride = width as usize;
+        self.touch(top, bottom);
         let rows = self.pixels[top as usize * stride..bottom as usize * stride].par_chunks_exact_mut(stride);
         rows.enumerate().for_each(|(row, out)| {
             let py = top + row as i32;
@@ -404,6 +438,7 @@ impl<'a> Canvas<'a> {
 
     fn blend(&mut self, x: i32, y: i32, color: u32, coverage: u8) {
         if x >= 0 && x < self.width && y >= 0 && y < self.height {
+            self.touch(y, y + 1);
             let pixel = &mut self.pixels[(y * self.width + x) as usize];
             let amount = u32::from(coverage) + u32::from(coverage >> 7);
             *pixel = mix(*pixel, color, amount);
@@ -502,28 +537,34 @@ const MOST_PARTS: usize = 48;
 /// rectangles of left, top, width and height, bringing the other up to
 /// date as it goes. Handing the display only these is what keeps a small
 /// change cheap on a large window: the whole of a 4K frame is 33 MB.
-pub fn changed(now: &[u32], was: &mut [u32], width: usize) -> Vec<[u32; 4]> {
+/// Given the rows that can have changed, a flag a row, only their bands are
+/// looked at; the rest are the same as they were.
+pub fn changed(now: &[u32], was: &mut [u32], width: usize, only: Option<&[bool]>) -> Vec<[u32; 4]> {
     if width == 0 || now.len() != was.len() {
         return Vec::new();
     }
+    let looked = |band: usize| only.is_none_or(|rows| rows.iter().skip(band * BAND).take(BAND).any(|row| *row));
     // For each band of rows, the columns between which something changed.
-    let bands: Vec<Option<(usize, usize)>> = now
-        .par_chunks(width * BAND)
-        .zip(was.par_chunks_mut(width * BAND))
-        .map(|(now, was)| {
-            if now == was {
-                return None;
-            }
-            let mut span: Option<(usize, usize)> = None;
-            for (now, was) in now.chunks(width).zip(was.chunks(width)) {
-                let Some(first) = now.iter().zip(was).position(|(a, b)| a != b) else { continue };
-                let last = now.iter().zip(was).rposition(|(a, b)| a != b).unwrap_or(first);
-                span = Some(span.map_or((first, last), |(left, right)| (left.min(first), right.max(last))));
-            }
-            was.copy_from_slice(now);
-            span
-        })
-        .collect();
+    let scan = |(band, (now, was)): (usize, (&[u32], &mut [u32]))| {
+        if !looked(band) || now == was {
+            return None;
+        }
+        let mut span: Option<(usize, usize)> = None;
+        for (now, was) in now.chunks(width).zip(was.chunks(width)) {
+            let Some(first) = now.iter().zip(was).position(|(a, b)| a != b) else { continue };
+            let last = now.iter().zip(was).rposition(|(a, b)| a != b).unwrap_or(first);
+            span = Some(span.map_or((first, last), |(left, right)| (left.min(first), right.max(last))));
+        }
+        was.copy_from_slice(now);
+        span
+    };
+    // A few rows told of are done here: handing them to other cores is
+    // a wait for those to be woken, which on a busy machine is the most
+    // of it. The whole window, a band to a core.
+    let bands: Vec<Option<(usize, usize)>> = match only {
+        Some(_) => now.chunks(width * BAND).zip(was.chunks_mut(width * BAND)).enumerate().map(scan).collect(),
+        None => now.par_chunks(width * BAND).zip(was.par_chunks_mut(width * BAND)).enumerate().map(scan).collect(),
+    };
     let height = now.len() / width;
     let mut parts: Vec<[u32; 4]> = Vec::new();
     let mut open: Option<(usize, usize, usize)> = None;
@@ -755,15 +796,74 @@ mod change_tests {
         let (width, height) = (200, 100);
         let mut was = vec![0u32; width * height];
         let mut now = was.clone();
-        assert!(changed(&now, &mut was, width).is_empty());
+        assert!(changed(&now, &mut was, width, None).is_empty());
         // A dot near the top and a bar lower down, in different bands.
         now[3 * width + 10] = 1;
         now[70 * width + 50..70 * width + 90].fill(2);
-        assert_eq!(changed(&now, &mut was, width), [[10, 0, 1, 32], [50, 64, 40, 32]]);
+        assert_eq!(changed(&now, &mut was, width, None), [[10, 0, 1, 32], [50, 64, 40, 32]]);
         assert_eq!(was, now);
-        assert!(changed(&now, &mut was, width).is_empty());
+        assert!(changed(&now, &mut was, width, None).is_empty());
         // Rows of a last band that is short of full are counted as they are.
         now[99 * width + 199] = 3;
-        assert_eq!(changed(&now, &mut was, width), [[199, 96, 1, 4]]);
+        assert_eq!(changed(&now, &mut was, width, None), [[199, 96, 1, 4]]);
+    }
+
+    #[test]
+    fn told_which_rows_changed_only_their_bands_are_looked_at() {
+        let (width, height) = (200, 100);
+        let mut was = vec![0u32; width * height];
+        let mut now = was.clone();
+        now[3 * width + 10] = 1;
+        now[70 * width + 50] = 2;
+        // Told only of row 70: the dot near the top is not looked for, and
+        // is still to be told of.
+        let mut rows = vec![false; height];
+        rows[70] = true;
+        assert_eq!(changed(&now, &mut was, width, Some(&rows)), [[50, 64, 1, 32]]);
+        assert_eq!(changed(&now, &mut was, width, None), [[10, 0, 1, 32]]);
+        // Told of none: nothing.
+        now[3 * width + 11] = 1;
+        assert!(changed(&now, &mut was, width, Some(&[false; 100])).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod touched_tests {
+    use super::Canvas;
+
+    /// The rows flagged as drawn in, as ranges.
+    fn spans(rows: &[bool]) -> Vec<std::ops::Range<usize>> {
+        let mut spans: Vec<std::ops::Range<usize>> = Vec::new();
+        for (y, _) in rows.iter().enumerate().filter(|(_, drawn)| **drawn) {
+            match spans.last_mut() {
+                Some(last) if last.end == y => last.end = y + 1,
+                _ => spans.push(y..y + 1),
+            }
+        }
+        spans
+    }
+
+    #[test]
+    fn a_canvas_knows_the_rows_drawn_in() {
+        let mut pixels = vec![0u32; 100 * 50];
+        // Not asked to keep count, it keeps none.
+        let mut canvas = Canvas::new(&mut pixels, 100, 50);
+        canvas.fill(5, 20, 10, 3, 1);
+        assert_eq!(canvas.touched(), None);
+        let mut canvas = Canvas::new(&mut pixels, 100, 50).counting();
+        // Wholly off the canvas, or no width: nothing.
+        canvas.fill(-20, 10, 10, 5, 1);
+        canvas.fill(10, 60, 10, 5, 1);
+        canvas.round_fill(10, 10, 0, 5, 2, 1, 256);
+        // A fill, a pill off the bottom and a ring: each its own rows,
+        // with the rows between left out.
+        canvas.fill(5, 20, 10, 3, 1);
+        canvas.pill(5, 40, 30, 20, 1, 256, 30);
+        canvas.round_ring(5, 2, 30, 4, 2, 1, 1, 256);
+        assert_eq!(spans(&canvas.touched().unwrap()), [2..6, 20..23, 40..50]);
+        // Handed the whole of it, all of it may be drawn in.
+        let mut canvas = Canvas::new(&mut pixels, 100, 50).counting();
+        let _ = canvas.all();
+        assert_eq!(spans(&canvas.touched().unwrap()), [0..50]);
     }
 }

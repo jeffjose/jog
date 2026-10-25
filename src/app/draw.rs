@@ -26,8 +26,17 @@ impl App {
                 if let Ok(mut buffer) = surface.buffer_mut() {
                     let started = Instant::now();
                     let waited = started.duration_since(entered);
+                    // Over a video, what was drawn last time is known, and
+                    // only that need be gone over again, in this buffer
+                    // when it is the one shown last.
+                    self.video_layer.reused = Some(buffer.age() == 1);
                     self.paint(&mut buffer, (size.width, size.height));
+                    // Not over a video, or the loupe over it too: nothing known.
+                    if self.video_layer.reused.take().is_some() || self.loupe.is_some() {
+                        self.video_layer.forget_drawn();
+                    }
                     self.draw_loupe(&mut buffer, (size.width, size.height));
+                    let only = self.video_layer.changed.take();
                     // Whether the window still shows what was last handed
                     // it, and so only what differs need be told of; not
                     // when the whole picture was just painted afresh.
@@ -47,7 +56,7 @@ impl App {
                     // the whole of a large window is what takes it longest,
                     // several times as long as drawing the frame did.
                     let parts = match kept {
-                        true => Some(ui::changed(&buffer, &mut self.presented, size.width as usize)),
+                        true => Some(ui::changed(&buffer, &mut self.presented, size.width as usize, only.as_deref())),
                         false => {
                             ui::copy_all(&mut self.presented, &buffer);
                             None
@@ -289,7 +298,7 @@ impl App {
                 self.scene_live = false;
                 let overlays = Instant::now();
                 // What of the frame paused on is outside BT.709, if asked.
-                self.draw_gamut(pixels, window);
+                let _ = self.draw_gamut(pixels, window);
                 self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
                 if self.options.debug {
                     eprintln!("jog: {:>7.1?} draw  video  overlays {:>7.1?}", self.perf.render, overlays.elapsed());

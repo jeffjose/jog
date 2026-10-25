@@ -164,17 +164,17 @@ impl App {
     }
 
     /// The frame paused on, with what is outside BT.709 tinted over it;
-    /// nothing while it plays, or of another frame.
-    pub(super) fn draw_gamut(&self, pixels: &mut [u32], window: (u32, u32)) {
+    /// nothing while it plays, or of another frame. The rows tinted, if any.
+    pub(super) fn draw_gamut(&self, pixels: &mut [u32], window: (u32, u32)) -> Option<std::ops::Range<i32>> {
         if !self.checks[2] {
-            return;
+            return None;
         }
-        let Some(mask) = &self.gamut else { return };
-        let Some(video) = self.video.as_ref().filter(|video| video.id == mask.id) else { return };
+        let Some(mask) = &self.gamut else { return None };
+        let Some(video) = self.video.as_ref().filter(|video| video.id == mask.id) else { return None };
         let paused = self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true));
         let at = self.video_time().map(|(at, _)| at);
         if !paused || at.is_none_or(|at| (at - mask.at).abs() > 0.05) {
-            return;
+            return None;
         }
         let native = self.size_of(video.id).unwrap_or((mask.width, mask.height));
         let layout = self.layout_of(native);
@@ -182,7 +182,7 @@ impl App {
         let (x0, y0) = (layout.x.max(0), layout.y.max(0));
         let (x1, y1) = ((layout.x + layout.width as i32).min(w), (layout.y + layout.height as i32).min(h));
         if x1 <= x0 || y1 <= y0 {
-            return;
+            return None;
         }
         pixels.par_chunks_mut(w as usize).enumerate().skip(y0 as usize).take((y1 - y0) as usize).for_each(|(y, row)| {
             let my = ((y as i32 - layout.y) as i64 * i64::from(mask.height) / i64::from(layout.height.max(1))).clamp(0, i64::from(mask.height) - 1) as usize;
@@ -196,6 +196,7 @@ impl App {
                 }
             }
         });
+        Some(y0..y1)
     }
 
     /// The Color tab's checks on the picture, as toggles.
