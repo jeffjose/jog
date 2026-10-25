@@ -36,9 +36,6 @@ pub struct Spec {
     /// Which rendition of an Ultra HDR picture to show; for any other
     /// picture, and for a thumbnail, it makes no difference.
     pub hdr: Hdr,
-    /// For a video's still, not a thumbnail: how far in playback is to
-    /// begin, for the still to be the keyframe it begins on.
-    pub start: Option<f64>,
 }
 
 /// A decoded file at full resolution, flattened to RGB but not yet turned
@@ -76,7 +73,7 @@ pub fn read(path: &Path, spec: Spec) -> Result<Source> {
         true => (None, false),
         false => (files::sniff_file(path), files::is_jpeg(path) && ultrahdr::is_ultra_hdr(&head_of(path))),
     };
-    let Decoded { image, orientation, frames, delays } = decode_file(path, spec.target, spec.thumbnail, spec.start)?;
+    let Decoded { image, orientation, frames, delays } = decode_file(path, spec.target, spec.thumbnail)?;
     let animation = (!frames.is_empty()).then(|| SourceAnimation {
         frames: frames.into_iter().map(|frame| flatten(DynamicImage::ImageRgba8(frame), spec.background)).collect(),
         delays,
@@ -128,9 +125,9 @@ const DEFAULT_DELAY: Duration = Duration::from_millis(100);
 
 /// Decodes whatever kind of file `path` is. `target` picks the preview of
 /// a RAW file and `thumbnail` the still of a video.
-fn decode_file(path: &Path, target: Option<(u32, u32)>, thumbnail: bool, start: Option<f64>) -> Result<Decoded> {
+fn decode_file(path: &Path, target: Option<(u32, u32)>, thumbnail: bool) -> Result<Decoded> {
     if files::is_video(path) {
-        return decode(&video_still(path, thumbnail, start)?).map(Decoded::still);
+        return decode(&video_still(path, thumbnail)?).map(Decoded::still);
     }
     if files::needs_ffmpeg(path) {
         return decode(&ffmpeg_image(path)?).map(Decoded::still);
@@ -222,31 +219,19 @@ fn transform_for(orientation: Orientation) -> Transform {
 
 /// A still from a video, as an encoded image. A thumbnail is taken one
 /// second in, where there is usually more to see than in the opening frame.
-/// Otherwise it is the frame playback begins on, so that the still shown
-/// while the player starts is that picture: the opening one, or for a
-/// video picked up `start` seconds in, the keyframe before, where the
-/// player starts it.
-fn video_still(path: &Path, thumbnail: bool, start: Option<f64>) -> Result<Vec<u8>> {
-    let at = start.filter(|seconds| *seconds > 0.0 && !thumbnail).map(|seconds| format!("{seconds:.3}"));
-    let seeks: Vec<&str> = match (&at, thumbnail) {
-        (Some(at), _) => vec![at.as_str(), "0"],
-        (None, true) => vec!["1", "0"],
-        (None, false) => vec!["0"],
-    };
-    // The keyframe before, not the very moment, as the player starts
-    // there too; and only keyframes put out, as otherwise ffmpeg decodes
-    // on from where it lands, seconds of 4K.
-    let keyframe: &[&str] = if at.is_some() { &["-noaccurate_seek", "-skip_frame", "nokey"] } else { &[] };
+/// Otherwise it is the opening frame, so that the still shown while the
+/// player starts is the picture playback begins on.
+fn video_still(path: &Path, thumbnail: bool) -> Result<Vec<u8>> {
+    let seeks: &[&str] = if thumbnail { &["1", "0"] } else { &["0"] };
     // One frame needs no decoding threads, and a quick look at the start
     // of the file is enough to find the video stream in nearly every
     // file; the thorough look is the fallback.
     let quick = ["-threads", "1", "-probesize", "32k", "-analyzeduration", "0"];
     for options in [&quick[..], &[]] {
-        for seek in &seeks {
+        for seek in seeks {
             let output = Command::new("ffmpeg")
                 .args(["-v", "error"])
                 .args(options)
-                .args(keyframe)
                 .args(["-ss", seek, "-i"])
                 .arg(path)
                 .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "bmp", "-"])
@@ -322,7 +307,7 @@ pub fn open_guarded(path: &Path) -> Result<DynamicImage> {
 }
 
 pub fn open(path: &Path) -> Result<DynamicImage> {
-    let Decoded { mut image, orientation, .. } = decode_file(path, None, false, None)?;
+    let Decoded { mut image, orientation, .. } = decode_file(path, None, false)?;
     image.apply_orientation(orientation);
     Ok(image)
 }
@@ -565,7 +550,7 @@ mod tests {
     use image::{ImageFormat, Rgb};
 
     fn spec(target: Option<(u32, u32)>) -> Spec {
-        Spec { target, enlarge: false, transform: Transform::default(), background: 0, thumbnail: false, hdr: Hdr::Sdr, start: None }
+        Spec { target, enlarge: false, transform: Transform::default(), background: 0, thumbnail: false, hdr: Hdr::Sdr }
     }
 
     fn rgb(pixel: u32) -> (u32, u32, u32) {

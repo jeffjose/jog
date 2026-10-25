@@ -212,15 +212,8 @@ impl App {
                 return self.draw_overlays(&mut Canvas::new(pixels, window.0, window.1));
             }
         }
-        // The player's window just put up has nothing in it yet: the still
-        // goes on being drawn under it, which it shows through, until mpv
-        // has its first frame up there; then this draws over the video.
-        let fresh = self.video_window_fresh();
-        if fresh {
-            self.redraw();
-        }
-        let playing = self.grid.is_none() && self.video.as_ref().is_some_and(|video| video.showing) && !fresh;
-        if self.video_window_shown() && full.is_some() && !fresh {
+        let playing = self.grid.is_none() && self.video.as_ref().is_some_and(|video| video.showing);
+        if self.video_window_shown() && full.is_some() {
             return self.paint_over_video(pixels, window);
         }
         self.clear_video_layer();

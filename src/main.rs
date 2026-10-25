@@ -203,12 +203,11 @@ fn main() -> ExitCode {
     }
     if let Some(screen) = screen::remembered().filter(|_| options.filter.is_none() && options.sessions.is_empty()) {
         let mut first = App::first_request(files.len(), playlist.start, screen, options.auto_zoom, options.hdr, loader.workers());
-        // A video to be picked up where it was left has for its still the
-        // keyframe playback begins on there, here as once the window is up:
-        // not its opening frame, shown and then jumped from.
-        let left = |path: &std::path::Path| (options.resume && files::is_video(path)).then(|| positions::Positions::load().get(path)).flatten();
-        if let Some(seconds) = files.get(playlist.start).and_then(|path| left(path)) {
-            first.starts.push((playlist.start, (seconds * 1000.0) as u64));
+        // A video that plays gets no still, here as once the window is up:
+        // black until the player has its first frame. Not in a scripted run,
+        // as when the window is up.
+        if std::env::var_os("JOG_SNAPSHOT").is_none() {
+            first.wanted.retain(|id| !files.get(*id).is_some_and(|path| files::is_video(path) && mpv::crashed_on(path) != Some(mpv::Crash::Software)));
         }
         loader.request(first);
     }

@@ -264,14 +264,10 @@ pub struct VideoWindow {
     flush: unsafe extern "C" fn(Display) -> c_int,
     place: [i32; 4],
     shown: bool,
-    /// When it was last put up: mpv draws into it a moment after.
-    shown_at: Option<std::time::Instant>,
 }
 
 impl VideoWindow {
-    /// One inside `window`, hidden, with no background of its own: put up,
-    /// it leaves what was under it until mpv draws, rather than flash
-    /// black first. `None` on another windowing
+    /// One inside `window`, hidden, black. `None` on another windowing
     /// system, or without libX11.
     pub fn new(window: &Window) -> Option<VideoWindow> {
         let (display, parent) = xlib(window)?;
@@ -286,13 +282,10 @@ impl VideoWindow {
             }
             let create: unsafe extern "C" fn(Display, c_ulong, c_int, c_int, c_uint, c_uint, c_uint, c_ulong, c_ulong) -> c_ulong = symbol!("XCreateSimpleWindow");
             let flush: unsafe extern "C" fn(Display) -> c_int = symbol!("XFlush");
-            let background: unsafe extern "C" fn(Display, c_ulong, c_ulong) -> c_int = symbol!("XSetWindowBackgroundPixmap");
             let id = create(display, parent, 0, 0, 1, 1, 0, 0, 0);
             if id == 0 {
                 return None;
             }
-            // No background: `None` is 0.
-            background(display, id, 0);
             flush(display);
             Some(VideoWindow {
                 map: symbol!("XMapWindow"),
@@ -305,7 +298,6 @@ impl VideoWindow {
                 id,
                 place: [0, 0, 1, 1],
                 shown: false,
-                shown_at: None,
                 _x11: x11,
             })
         }
@@ -331,7 +323,6 @@ impl VideoWindow {
                         (self.map)(self.display, self.id);
                         (self.raise)(self.display, self.id);
                         self.shown = true;
-                        self.shown_at = Some(std::time::Instant::now());
                     }
                 }
                 None if self.shown => {
@@ -346,11 +337,6 @@ impl VideoWindow {
 
     pub fn shown(&self) -> bool {
         self.shown
-    }
-
-    /// How long it has been up, if it is.
-    pub fn up_for(&self) -> Option<std::time::Duration> {
-        self.shown_at.filter(|_| self.shown).map(|at| at.elapsed())
     }
 }
 

@@ -11,10 +11,6 @@
 
 use super::*;
 
-/// How long the player's window is left to show what was under it, once
-/// put up, for mpv to draw its first frame there.
-const VIDEO_WINDOW_SETTLE: Duration = Duration::from_millis(150);
-
 /// What is drawn over the video: bands of rows with something in them,
 /// each cut to its own width, their pixels one after another.
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -259,13 +255,6 @@ impl App {
                 window.show(place.filter(|_| index == active));
             }
         }
-    }
-
-    /// Whether the playing player's window has only just been put up:
-    /// mpv has not drawn into it yet, and the still is left under it.
-    pub(super) fn video_window_fresh(&self) -> bool {
-        let window = self.video_windows.get(usize::from(self.active)).and_then(Option::as_ref);
-        window.and_then(x11::VideoWindow::up_for).is_some_and(|up| up < VIDEO_WINDOW_SETTLE)
     }
 
     /// Whether the playing player's window is up.

@@ -428,24 +428,6 @@ impl App {
         }
     }
 
-    /// Where the file, a video, will be picked up, when that is not its
-    /// start: where it was left.
-    pub(super) fn resume_point(&self, id: usize) -> Option<f64> {
-        if !self.options.resume || !files::is_video(&self.files[id]) {
-            return None;
-        }
-        if let Some(known) = self.resumes_known.borrow().get(&id) {
-            return *known;
-        }
-        let path = &self.files[id];
-        let left = match &self.positions {
-            Some(positions) => positions.get(path),
-            None => Positions::load().get(path),
-        };
-        self.resumes_known.borrow_mut().insert(id, left);
-        left
-    }
-
     /// Where a video was left, when those places are being remembered.
     pub(super) fn resume_from(&mut self, id: usize) -> Option<f64> {
         match self.options.resume {
@@ -543,7 +525,6 @@ impl App {
         let worth_it = length >= RESUME_MIN_LENGTH && position >= RESUME_MARGIN && position <= length - RESUME_MARGIN;
         let path = self.files[video.id].clone();
         self.positions.get_or_insert_with(Positions::load).set(&path, worth_it.then_some(position));
-        self.resumes_known.borrow_mut().clear();
     }
 
     pub(super) fn video_signal(&mut self, signal: Signal) {

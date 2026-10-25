@@ -1175,9 +1175,6 @@ pub struct App {
     folder_memo: RefCell<Option<(PathBuf, std::rc::Rc<str>)>>,
     /// Where videos were left, read the first time one is played.
     positions: Option<Positions>,
-    /// Where each video was left, to be picked up from, if it was: asked
-    /// once a file, and again once a place is noted.
-    resumes_known: RefCell<HashMap<usize, Option<f64>>>,
     /// The videos watched, read when first asked about, and what has been
     /// found out about the files here so far.
     seen: RefCell<Option<Seen>>,
@@ -1954,7 +1951,6 @@ impl App {
             sizes: HashMap::new(),
             folder_memo: RefCell::new(None),
             positions: None,
-            resumes_known: RefCell::new(HashMap::new()),
             seen: RefCell::new(None),
             seen_known: RefCell::new(HashMap::new()),
             confirm: None,
@@ -2379,11 +2375,13 @@ impl App {
             }
         }
         let len = self.list.len() as i64;
-        let wanted = Self::around(&self.list, self.pos, self.forward, self.loader.workers());
-        // A video picked up where it was left: its still is the keyframe
-        // the player begins on there, not its opening frame shown and
-        // then jumped from; and up long before the player has its own.
-        let starts: Vec<(usize, u64)> = self.list.get(self.pos).and_then(|&id| Some((id, (self.resume_point(id)? * 1000.0) as u64))).into_iter().collect();
+        let mut wanted = Self::around(&self.list, self.pos, self.forward, self.loader.workers());
+        // A video that plays gets no still: black until the player has its
+        // first frame, rather than a frame held still and then played on
+        // from, which looks stuck. One the player cannot play keeps its,
+        // and so does every one in a scripted run, whose timetable starts
+        // from the first picture up.
+        wanted.retain(|id| self.snapshot.is_some() || !self.playable(*id));
         // Thumbnails are sized for the monitor, like frames, so they survive
         // window resizes; and for the grid's cells, the larger of the two
         // uses, so that the filmstrip and the grid share them.
@@ -2433,7 +2431,6 @@ impl App {
             thumbs,
             thumb_size,
             hdr: self.hdr,
-            starts,
         };
         // Panning and zooming call this on every pointer move; most of the
         // time nothing has changed and the loader need not be woken.
