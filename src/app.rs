@@ -1583,6 +1583,9 @@ struct Menu {
     selected: Option<usize>,
     /// The menu opened beside the selected item, if it has one.
     sub: Option<Box<Menu>>,
+    /// Opened above what it is for, as the seek bar's cog's: its own
+    /// submenus grow up from their row, not down over the bar.
+    upward: bool,
 }
 
 struct MenuRow {

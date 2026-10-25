@@ -101,6 +101,7 @@ impl App {
         let (width, _) = self.window_size();
         menu.x = (left + side - menu.width).clamp(0, (width as i32 - menu.width).max(0));
         menu.y = (top - bar.unit / 2 - menu.height).max(0);
+        menu.upward = true;
         self.menu = Some(menu);
     }
 }

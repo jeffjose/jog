@@ -19,10 +19,17 @@ impl App {
         let Some(row) = menu.selected.map(|row| &menu.rows[row]) else { return };
         let Some(item) = row.item.filter(|item| !item.sub.is_empty()) else { return };
         let (left, right, top) = (menu.x, menu.x + menu.width - 1, menu.y + row.top - menu.px as i32 / 2);
+        let (upward, row_bottom) = (menu.upward, menu.y + row.top + row.height + menu.px as i32 / 2);
         let mut sub = self.build_menu(item.sub, None, (right, top));
         // Where there is no room to the right, it opens to the left.
         if sub.x < right {
             sub.x = (left - sub.width + 1).max(0);
+        }
+        // From a menu that opened upwards, it ends at its row rather than
+        // starting there.
+        if upward {
+            sub.y = (row_bottom - sub.height).max(0);
+            sub.upward = true;
         }
         if select_first {
             sub.selected = sub.rows.iter().position(|row| row.item.is_some());
@@ -102,6 +109,7 @@ impl App {
             rows,
             title,
             sub: None,
+            upward: false,
         }
     }
 
