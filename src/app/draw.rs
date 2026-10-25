@@ -2750,6 +2750,12 @@ pub(super) fn help_keys<'a>(text: &mut Text, keys: &'a str, px: u32) -> Vec<(&'a
 /// columns of sections, each key on a cap of its own.
 /// Gives back where the panel is.
 pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &str) -> [i32; 4] {
+    draw_help_sized(canvas, text, px, search, true)
+}
+
+/// The overlay at `px`, with the essentials or without, which is how it
+/// first gives way to a window it does not fit: they are in the list too.
+fn draw_help_sized(canvas: &mut Canvas, text: &mut Text, px: u32, search: &str, essentials: bool) -> [i32; 4] {
     // What is typed is looked for, each word of it, in a shortcut's keys,
     // what it does and the heading it is under. Those without it stay
     // where they are, faint, so that nothing moves about.
@@ -2762,6 +2768,16 @@ pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &
     let small = (px * 5 / 6).max(11);
     // As close as it was before lines got their air: it all has to fit.
     let row = Text::line_height(px) + px as i32 / 6;
+    // The whole list is the smaller size and quieter, under the few keys
+    // that matter most, drawn large; looking for something, it is all
+    // there is, and what matches is lit.
+    let searching = !words.is_empty();
+    let list_row = Text::line_height(small) + px as i32 / 6;
+    let cap_h = Text::line_height(px) + px as i32 / 3;
+    let cell_h = cap_h + Text::line_height(px) + px as i32 / 2;
+    let rows_of_essentials = commands::ESSENTIALS.len().div_ceil(5) as i32;
+    let essentials = essentials && !searching;
+    let essentials_h = if essentials { rows_of_essentials * cell_h + row } else { 0 };
     let (pad, gap, between) = (px as i32 * 3 / 2, px as i32, px as i32 / 3);
     let keys_width = |text: &mut Text, keys: &str| -> i32 {
         let parts = help_keys(text, keys, small);
@@ -2773,7 +2789,7 @@ pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &
         .map(|sections| {
             let entries = sections.iter().flat_map(|(_, entries)| entries.iter());
             let keys = entries.clone().map(|(keys, _)| keys_width(text, keys)).max().unwrap_or(0);
-            let labels = entries.map(|(_, label)| text.width(label, px)).max().unwrap_or(0);
+            let labels = entries.map(|(_, label)| text.width(label, small)).max().unwrap_or(0);
             let rows: usize = sections.iter().map(|(_, entries)| entries.len() + 2).sum();
             (keys, labels, rows as i32 - 1)
         })
@@ -2783,13 +2799,17 @@ pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &
         + 2 * pad;
     let (title, hint) = ("Keyboard shortcuts", "Type to search  ·  Esc to close  ·  > in Ctrl+K lists every command");
     let head = row * 2;
-    let height = head + columns.iter().map(|c| c.2).max().unwrap_or(0) * row + row * 3 / 2 + 2 * pad;
+    let height = head + essentials_h + columns.iter().map(|c| c.2).max().unwrap_or(0) * list_row + row * 3 / 2 + 2 * pad;
     // Too big for the window, however large: drawn smaller until it fits.
     let room = (canvas.width - 2 * px as i32, canvas.height - 2 * px as i32);
-    if (width > room.0 || height > room.1) && px > 10 {
+    let too_big = width > room.0 || height > room.1;
+    if too_big && essentials {
+        return draw_help_sized(canvas, text, px, search, false);
+    }
+    if too_big && px > 10 {
         let fit = (f64::from(room.0) / f64::from(width)).min(f64::from(room.1) / f64::from(height));
         let smaller = ((f64::from(px) * fit) as u32).clamp(10, px - 1);
-        return draw_help(canvas, text, smaller, search);
+        return draw_help_sized(canvas, text, smaller, search, false);
     }
     let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
     panel(canvas, left, top, width, height, px as i32);
@@ -2818,27 +2838,56 @@ pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &
         text.draw(canvas, count_left, box_y + (box_h - Text::line_height(small)) / 2, small, DIM_TEXT_COLOR, &count);
     }
 
+    // The essentials, five across: each key on a cap of the larger size,
+    // what it does under it.
+    if essentials {
+        let cell_w = (width - 2 * pad) / 5;
+        let grid_top = top + pad + head;
+        for (at, (keys, label)) in commands::ESSENTIALS.iter().enumerate() {
+            let (cx, cy) = (left + pad + (at % 5) as i32 * cell_w, grid_top + (at / 5) as i32 * cell_h);
+            let mut key_x = cx;
+            for (key, width, cap) in help_keys(text, keys, px) {
+                if cap {
+                    canvas.round_fill(key_x, cy, width, cap_h, px as i32 / 3, PLACEHOLDER_COLOR, 256);
+                    canvas.round_outline(key_x, cy, width, cap_h, px as i32 / 3, 1, KEY_EDGE_COLOR);
+                }
+                let inset = if cap { (width - text.width(key, px)) / 2 } else { 0 };
+                text.draw(canvas, key_x + inset, cy + (cap_h - Text::line_height(px)) / 2, px, TEXT_COLOR, key);
+                key_x += width + between;
+            }
+            text.draw(canvas, cx, cy + cap_h + px as i32 / 4, px, TEXT_COLOR, label);
+        }
+        let rule = grid_top + rows_of_essentials * cell_h + row / 3;
+        canvas.fill(left + pad, rule, width - 2 * pad, 1, MENU_EDGE_COLOR);
+    }
+
     let mut x = left + pad;
     for (sections, (keys_width, labels_width, _)) in commands::HELP.iter().zip(columns) {
-        let mut y = top + pad + head;
+        let mut y = top + pad + head + essentials_h;
         for (title, entries) in sections.iter() {
             let any = entries.iter().any(|(keys, label)| matches(title, keys, label));
-            text.draw_strong(canvas, x, y, px, if any { accent_soft() } else { FAINT_TEXT_COLOR }, title);
-            canvas.fill(x, y + row - row / 5, keys_width + gap + labels_width, 1, MENU_EDGE_COLOR);
-            y += row;
+            text.draw_strong(canvas, x, y, small, if any { accent_soft() } else { FAINT_TEXT_COLOR }, title);
+            canvas.fill(x, y + list_row - list_row / 5, keys_width + gap + labels_width, 1, MENU_EDGE_COLOR);
+            y += list_row;
             for (keys, label) in entries.iter() {
                 let lit = matches(title, keys, label);
                 if lit && !words.is_empty() {
-                    canvas.round_fill(x - px as i32 / 3, y, keys_width + gap + labels_width + px as i32 * 2 / 3, row, px as i32 / 3, TEXT_COLOR, 22);
+                    canvas.round_fill(x - px as i32 / 3, y, keys_width + gap + labels_width + px as i32 * 2 / 3, list_row, px as i32 / 3, TEXT_COLOR, 22);
                 }
                 let mut key_x = x;
                 for (key, width, cap) in help_keys(text, keys, small) {
-                    let key_top = y + (row - Text::line_height(small)) / 2;
+                    let key_top = y + (list_row - Text::line_height(small)) / 2;
                     if !lit {
                         let inset = if cap { (width - text.width(key, small)) / 2 } else { 0 };
                         text.draw(canvas, key_x + inset, key_top, small, FAINT_TEXT_COLOR, key);
+                    } else if cap && !searching {
+                        // Just looking: the key's name, a weight up, with no
+                        // cap; a wall of caps is what makes the list a lot.
+                        text.draw_strong(canvas, key_x, key_top, small, 0xC9CBD1, key);
+                        key_x += text.width_strong(key, small) + between * 2;
+                        continue;
                     } else if cap {
-                        let (cap_top, cap_height) = (y + row / 10, row - row / 5);
+                        let (cap_top, cap_height) = (y + list_row / 10, list_row - list_row / 5);
                         canvas.round_fill(key_x, cap_top, width, cap_height, px as i32 / 4, PLACEHOLDER_COLOR, 256);
                         canvas.round_outline(key_x, cap_top, width, cap_height, px as i32 / 4, 1, KEY_EDGE_COLOR);
                         let inset = (width - text.width(key, small)) / 2;
@@ -2848,11 +2897,12 @@ pub(super) fn draw_help(canvas: &mut Canvas, text: &mut Text, px: u32, search: &
                     }
                     key_x += width + between;
                 }
-                let label_top = y + (row - Text::line_height(px)) / 2;
-                text.draw(canvas, x + keys_width + gap, label_top, px, if lit { TEXT_COLOR } else { FAINT_TEXT_COLOR }, label);
-                y += row;
+                let label_top = y + (list_row - Text::line_height(small)) / 2;
+                let color = if !lit { FAINT_TEXT_COLOR } else if searching { TEXT_COLOR } else { DIM_TEXT_COLOR };
+                text.draw(canvas, x + keys_width + gap, label_top, small, color, label);
+                y += list_row;
             }
-            y += row;
+            y += list_row;
         }
         x += keys_width + gap + labels_width + 2 * pad;
     }

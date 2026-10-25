@@ -1119,6 +1119,21 @@ pub const GRID_ACTIONS: &[(&str, Command)] = &[
     ("More  X", Command::MarkMenu),
 ];
 
+/// The few keys at the head of the `?` overlay, large, before the whole
+/// list: what most of jog is used with.
+pub const ESSENTIALS: &[(&str, &str)] = &[
+    ("Right  Left", "Next / previous"),
+    ("Space", "Play / pause"),
+    ("f", "Fullscreen"),
+    ("g", "Grid"),
+    ("p", "File list"),
+    ("Ctrl+K", "Find a file"),
+    ("Ctrl+P", "Run a command"),
+    ("i", "Info"),
+    ("K", "Convert"),
+    ("Tab", "Menu"),
+];
+
 /// The `?` overlay: columns of sections, each a title and its key list.
 /// Keys are separated by two spaces; each is drawn as a key cap, unless
 /// it is a few words describing something that is not a key.
