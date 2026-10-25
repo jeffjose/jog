@@ -25,7 +25,7 @@ Videos get the same treatment:
 - Under heavy CPU load, jog redraws only the rows that changed and keeps
   small jobs on one thread rather than waiting for others to wake.
 
-```
+```sh
 jog PHOTOS/            # a folder, fullscreen
 jog -r PHOTOS/         # and its subfolders
 jog clip.mp4           # videos play through libmpv
@@ -41,7 +41,7 @@ from a key press to the next image on screen (median of 24 presses).
 Lower is better.
 
 | Image | Metric | jog | feh | mpv | VLC |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | 1080p JPEG | start | 95 ms | 51 ms | 402 ms | 532 ms |
 | | next | 29 ms | 41 ms | 45 ms | 51 ms |
 | 4K JPEG | start | 99 ms | 126 ms | 421 ms | 572 ms |
@@ -56,7 +56,7 @@ the screen, whereas jog scales it to fill the screen.
 
 To measure on your own machine (X11 or Wayland):
 
-```
+```sh
 jog --benchmark PHOTOS/
 ```
 
