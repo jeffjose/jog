@@ -33,7 +33,9 @@ impl App {
     /// it is an ordinary window, not filling the screen.
     pub(super) fn note_window_size(&mut self, size: PhysicalSize<u32>) {
         let Some(window) = &self.window else { return };
-        if window.fullscreen().is_some() || window.is_maximized() || !self.small_beside_screen((size.width, size.height)) {
+        // Not one jog gave it, as it starts or goes small: only the user's.
+        let here = self.sized_here == Some((size.width, size.height));
+        if here || window.fullscreen().is_some() || window.is_maximized() || !self.small_beside_screen((size.width, size.height)) {
             return;
         }
         self.windowed = Some((size.width, size.height));
@@ -41,7 +43,7 @@ impl App {
 
     /// The size of the small window: the one last kept, or a quarter of
     /// the screen, half as wide and half as tall.
-    fn small_size(&self) -> (u32, u32) {
+    pub(super) fn small_size(&self) -> (u32, u32) {
         let (sw, sh) = self.monitor;
         self.windowed.or_else(read).filter(|size| self.small_beside_screen(*size)).unwrap_or((sw / 2, sh / 2))
     }
@@ -65,6 +67,7 @@ impl App {
         // A window manager putting back the size from before fullscreen
         // does so after this; asked again once it has.
         self.small_wanted = Some(size);
+        self.sized_here = Some(size);
     }
 
     /// Asked for the small size again, once, after the window manager

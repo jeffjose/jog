@@ -1196,6 +1196,8 @@ pub struct App {
     /// asked for, to be asked again once a window manager has had its say.
     windowed: Option<(u32, u32)>,
     small_wanted: Option<(u32, u32)>,
+    /// The size jog itself last gave the window: not one to keep.
+    sized_here: Option<(u32, u32)>,
     /// What is on screen and the file it came from. Kept while the next
     /// image decodes, so navigation never flashes to black.
     shown: Option<(usize, Arc<Frame>)>,
@@ -1964,6 +1966,7 @@ impl App {
             monitor: (0, 0),
             windowed: None,
             small_wanted: None,
+            sized_here: None,
             shown: None,
             error: None,
             view: View { zoom: options.zoom, center: None, enlarge: options.auto_zoom },
@@ -4136,8 +4139,10 @@ impl ApplicationHandler<Event> for App {
                 .with_inner_size(PhysicalSize::new(width.max(1), height.max(1)))
                 .with_fullscreen(Some(Fullscreen::Borderless(None)));
         } else {
-            let fallback = (self.monitor.0 * 3 / 5, self.monitor.1 * 3 / 5);
-            let (width, height) = self.options.geometry.unwrap_or(fallback);
+            // The small window, as leaving fullscreen goes to: the size
+            // last given it, or a quarter of the screen.
+            let (width, height) = self.options.geometry.unwrap_or_else(|| self.small_size());
+            self.sized_here = Some((width, height));
             attributes = attributes.with_inner_size(PhysicalSize::new(width.max(1), height.max(1)));
         }
         let creating = Instant::now();
