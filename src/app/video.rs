@@ -151,6 +151,8 @@ impl App {
             (Some(Crash::Software), true) => format!("Not playable · {name} crashes the player"),
             (None, true) => "The player crashed · started again".to_string(),
         });
+        // One no longer played has its still to show instead.
+        self.request();
         self.redraw();
     }
 
@@ -217,7 +219,7 @@ impl App {
             return;
         }
         // Size the picture to the video so that no bars are drawn into it.
-        let native = self.shown.as_ref().map_or((16, 9), |(_, frame)| frame.native);
+        let native = self.size_of(self.id()).unwrap_or((16, 9));
         let unit = ui_px(self.window_size().1);
         let (width, height) = fit_size(native, (unit * 16, unit * 12), true);
         let frame = self.preview_frame.get_or_insert_with(|| Frame::still(width, height, native, Vec::new()));

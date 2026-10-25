@@ -2378,10 +2378,9 @@ impl App {
         let mut wanted = Self::around(&self.list, self.pos, self.forward, self.loader.workers());
         // A video that plays gets no still: black until the player has its
         // first frame, rather than a frame held still and then played on
-        // from, which looks stuck. One the player cannot play keeps its,
-        // and so does every one in a scripted run, whose timetable starts
-        // from the first picture up.
-        wanted.retain(|id| self.snapshot.is_some() || !self.playable(*id));
+        // from, which looks stuck. One the player cannot play keeps its. A
+        // scripted run's timetable starts from the video's first frame then.
+        wanted.retain(|id| !self.playable(*id));
         // Thumbnails are sized for the monitor, like frames, so they survive
         // window resizes; and for the grid's cells, the larger of the two
         // uses, so that the filmstrip and the grid share them.
@@ -2595,7 +2594,23 @@ impl App {
     // ---- View ----------------------------------------------------------
 
     fn native(&self) -> Option<(u32, u32)> {
-        self.shown.as_ref().map(|(_, frame)| frame.native)
+        self.played_size(self.id()).or_else(|| self.shown.as_ref().map(|(_, frame)| frame.native))
+    }
+
+    /// The size of video `id` as it is shown, whichever way it is turned,
+    /// by its maker and by a turn here: the player's, once it has it open.
+    /// A video that plays has no still to tell it.
+    pub(super) fn played_size(&self, id: usize) -> Option<(u32, u32)> {
+        let player = self.player.as_ref().filter(|_| self.video.as_ref().is_some_and(|video| video.id == id))?;
+        let turns = self.transforms.get(&id).copied().unwrap_or_default().turns();
+        let rotate = player.number("video-params/rotate").unwrap_or(0.0) + 90.0 * f64::from(turns);
+        shown_size(player.number("width"), player.number("height"), Some(rotate))
+    }
+
+    /// The size of file `id`: a video's as the player has it, or else its
+    /// still's.
+    pub(super) fn size_of(&self, id: usize) -> Option<(u32, u32)> {
+        self.played_size(id).or_else(|| self.shown.as_ref().filter(|(shown, _)| *shown == id).map(|(_, frame)| frame.native))
     }
 
     /// Moves an animated image on to its next picture, round to the first
@@ -2623,12 +2638,11 @@ impl App {
     }
 
     /// Passes the zoom, pan, rotation and mirroring on to the player, which
-    /// does its own scaling. The still for the video, already turned the
-    /// same way, supplies the size to lay out.
+    /// does its own scaling, laid out at the size the video is shown at.
     fn apply_video_view(&self) {
         let (Some(player), Some(video)) = (&self.player, &self.video) else { return };
         let window = self.window_size();
-        let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map(|(_, frame)| frame.native);
+        let native = self.size_of(video.id);
         let (zoom, pan) = match native {
             // In its corner of the grid it is simply all there.
             Some(native) if window.0 > 0 && window.1 > 0 && self.grid.is_none() => {
@@ -3581,7 +3595,7 @@ impl App {
     /// up: in its own cell there, when that is on the page showing.
     fn pip_place(&self, window: (u32, u32)) -> Option<[i32; 4]> {
         let video = self.video.as_ref().filter(|_| self.pip && self.grid.is_some())?;
-        let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map_or((16, 9), |(_, frame)| frame.native);
+        let native = self.size_of(video.id).unwrap_or((16, 9));
         let area = self.grid_area(&self.grid_layout(window), self.pos, window.1);
         let place = Self::grid_picture(area, native, true);
         (place[0] >= 0 && place[0] + place[2] <= window.0 as i32).then_some(place)
@@ -3592,7 +3606,7 @@ impl App {
     /// its own cell is on the one showing.
     fn pip_small(&self, window: (u32, u32)) -> Option<[i32; 4]> {
         let video = self.video.as_ref().filter(|_| self.pip && self.grid.is_some())?;
-        let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map_or((16, 9), |(_, frame)| frame.native);
+        let native = self.size_of(video.id).unwrap_or((16, 9));
         let unit = ui_px(window.1) as i32;
         let footer = GridLayout::footer_height(window.1);
         // As tall as the line and the margin the grid leaves free above
@@ -3617,7 +3631,7 @@ impl App {
         self.video_kept.set(None);
         if player.render_latest(&mut pixels, w as u32, h as u32) {
             // Its full size is the video's, for when it grows out of the cell.
-            let native = self.shown.as_ref().filter(|(id, _)| *id == self.id()).map_or((w as u32, h as u32), |(_, frame)| frame.native);
+            let native = self.size_of(self.id()).unwrap_or((w as u32, h as u32));
             self.pip_live = Some(Frame::still(w as u32, h as u32, native, pixels));
             self.pip_in_cell = cell.is_some();
         }
@@ -4000,6 +4014,15 @@ fn picture_delay(frame: &Frame, index: usize) -> Duration {
 }
 
 /// A frame rate as it is usually written: 60, 29.97, 23.976.
+/// A video's size on the screen from the player's width, height and
+/// rotation: turned a quarter, as phones record upright video, the other
+/// way round. None until the player knows it.
+fn shown_size(width: Option<f64>, height: Option<f64>, rotate: Option<f64>) -> Option<(u32, u32)> {
+    let (w, h) = width.zip(height).filter(|(w, h)| *w >= 1.0 && *h >= 1.0)?;
+    let turned = rotate.is_some_and(|degrees| (degrees as i64).rem_euclid(180) == 90);
+    Some(if turned { (h as u32, w as u32) } else { (w as u32, h as u32) })
+}
+
 fn fps_words(fps: f64) -> String {
     if (fps - fps.round()).abs() < 0.005 {
         return format!("{:.0}", fps);
@@ -4285,6 +4308,11 @@ impl App {
             Event::EntryFrame(found) => self.entry_frame(found),
             Event::Video(which, signal) if which == self.active => {
                 self.video_signal(signal);
+                // A video has no still: a scripted run's timetable starts
+                // from its first frame instead.
+                if self.video.as_ref().is_some_and(|video| video.showing && video.id == self.id()) {
+                    self.start_snapshot(event_loop);
+                }
                 self.tend_back();
                 self.tend_gamut();
             }
@@ -4645,6 +4673,18 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_videos_size_is_the_players_turned_as_it_is_shown() {
+        // Nothing until the player knows it: zoom has nothing to go by.
+        assert_eq!(shown_size(None, None, None), None);
+        assert_eq!(shown_size(Some(0.0), Some(0.0), None), None);
+        assert_eq!(shown_size(Some(3840.0), Some(2160.0), None), Some((3840, 2160)));
+        assert_eq!(shown_size(Some(3840.0), Some(2160.0), Some(180.0)), Some((3840, 2160)));
+        // A phone's upright video, turned a quarter either way.
+        assert_eq!(shown_size(Some(1920.0), Some(1080.0), Some(90.0)), Some((1080, 1920)));
+        assert_eq!(shown_size(Some(1920.0), Some(1080.0), Some(270.0)), Some((1080, 1920)));
+    }
 
     #[test]
     fn images_around_a_position_favour_the_way_we_go_and_the_decode_threads() {

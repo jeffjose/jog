@@ -408,7 +408,7 @@ impl App {
         let graphing = viewing && self.show_debug && self.scopes.contains(&true);
         let mut graph_cost = Duration::ZERO;
         if graphing {
-            let shown = self.shown.as_ref().filter(|(id, _)| *id == self.id()).map(|(_, frame)| frame.native);
+            let shown = self.size_of(self.id());
             let (left, stage) = self.stage();
             let [x, y, w, h] = match shown.map(|native| self.layout_of(native)) {
                 Some(layout) => [layout.x, layout.y, layout.width as i32, layout.height as i32],

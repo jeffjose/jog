@@ -204,11 +204,8 @@ fn main() -> ExitCode {
     if let Some(screen) = screen::remembered().filter(|_| options.filter.is_none() && options.sessions.is_empty()) {
         let mut first = App::first_request(files.len(), playlist.start, screen, options.auto_zoom, options.hdr, loader.workers());
         // A video that plays gets no still, here as once the window is up:
-        // black until the player has its first frame. Not in a scripted run,
-        // as when the window is up.
-        if std::env::var_os("JOG_SNAPSHOT").is_none() {
-            first.wanted.retain(|id| !files.get(*id).is_some_and(|path| files::is_video(path) && mpv::crashed_on(path) != Some(mpv::Crash::Software)));
-        }
+        // black until the player has its first frame.
+        first.wanted.retain(|id| !files.get(*id).is_some_and(|path| files::is_video(path) && mpv::crashed_on(path) != Some(mpv::Crash::Software)));
         loader.request(first);
     }
 

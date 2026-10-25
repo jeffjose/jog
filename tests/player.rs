@@ -124,3 +124,56 @@ fn a_video_that_crashes_every_decoder_is_left_as_not_playable() {
     assert_eq!(run.said.matches("the player crashed").count(), 2, "tried once on the GPU and once on the CPU, then left be:\n{}", run.said);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// How wide the picture is across the middle of the window: from the
+/// first pixel to the last that is not black.
+fn picture_width(drawn: &RgbImage) -> u32 {
+    let y = drawn.height() / 2;
+    let lit: Vec<u32> = (0..drawn.width()).filter(|x| drawn.get_pixel(*x, y).0.iter().any(|channel| *channel > 40)).collect();
+    lit.last().map_or(0, |last| last + 1 - lit[0])
+}
+
+#[test]
+fn a_video_zooms_with_plus_and_minus_and_ctrl_with_the_wheel() {
+    if !display() || !libmpv() {
+        return;
+    }
+    // A video of one flat color, smaller than the window, and no still of
+    // it: its size is the player's to tell.
+    let dir = std::env::temp_dir().join("jog-player").join("zoom");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("videos")).unwrap();
+    let made = Command::new("ffmpeg")
+        .args(["-v", "error", "-f", "lavfi", "-i", "color=c=0x3080FF:size=320x240:rate=25:duration=3", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+        .arg(dir.join("videos/flat.mp4"))
+        .status();
+    if !made.is_ok_and(|status| status.success()) {
+        return;
+    }
+    let width = |name: &str, keys: &str| {
+        let out = dir.join(format!("{name}.ppm"));
+        let output = Command::new(env!("CARGO_BIN_EXE_jog"))
+            .args(["--no-animations", "--no-positions", "-g", "640x400"])
+            .arg(dir.join("videos"))
+            .env("JOG_CONFIG", "/dev/null")
+            .env("JOG_STATE", dir.join(format!("state-{name}")))
+            .env("JOG_SNAPSHOT", &out)
+            .env("JOG_SNAPSHOT_KEYS", format!("{{Move:320,200}}{keys}{{Wait}}"))
+            .env("JOG_SNAPSHOT_WAIT", "800")
+            .output()
+            .expect("jog runs");
+        assert!(output.status.success(), "{name}: {}", String::from_utf8_lossy(&output.stderr));
+        picture_width(&image::open(&out).unwrap_or_else(|error| panic!("{name}: no snapshot: {error}")).to_rgb8())
+    };
+    let fitted = width("fitted", "");
+    assert!(fitted > 100, "the video is shown: {fitted} wide");
+    for (name, keys) in [("plus", "+"), ("wheel-up", "{Hold:Ctrl}{Wheel:2}")] {
+        let zoomed = width(name, keys);
+        assert!(zoomed > fitted + 20, "{name} zooms in: {zoomed} wide, from {fitted}");
+    }
+    for (name, keys) in [("minus", "-"), ("wheel-down", "{Hold:Ctrl}{Wheel:-2}")] {
+        let zoomed = width(name, keys);
+        assert!(zoomed + 20 < fitted, "{name} zooms out: {zoomed} wide, from {fitted}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -277,7 +277,7 @@ impl App {
         let (target, knobs) = (state.target, self.convert_knobs());
         let span = self.sections.get(&id).and_then(|section| section.span());
         let converting = self.convert_span(id);
-        let native = self.shown.as_ref().filter(|(shown, _)| *shown == id).map(|(_, frame)| frame.native);
+        let native = self.size_of(id);
         let still = self.shown.as_ref().filter(|(shown, _)| *shown == id).map(|(_, frame)| frame.clone());
         let mut drawn: Vec<(Hit, [i32; 4])> = Vec::new();
 

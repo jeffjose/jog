@@ -134,7 +134,7 @@ impl App {
         if known || self.gamut_asked.is_some_and(|(asked, when)| asked == id && (when - at).abs() < 0.02) {
             return;
         }
-        let native = self.shown.as_ref().filter(|(shown, _)| *shown == id).map_or((16, 9), |(_, frame)| frame.native);
+        let native = self.size_of(id).unwrap_or((16, 9));
         let width = MASK_WIDTH.min(native.0.max(2)) / 2 * 2;
         let height = ((f64::from(width) * f64::from(native.1) / f64::from(native.0.max(1))).round() as u32 / 2 * 2).max(2);
         self.gamut_asked = Some((id, at));
@@ -176,7 +176,7 @@ impl App {
         if !paused || at.is_none_or(|at| (at - mask.at).abs() > 0.05) {
             return;
         }
-        let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map_or((mask.width, mask.height), |(_, frame)| frame.native);
+        let native = self.size_of(video.id).unwrap_or((mask.width, mask.height));
         let layout = self.layout_of(native);
         let (w, h) = (window.0 as i32, window.1 as i32);
         let (x0, y0) = (layout.x.max(0), layout.y.max(0));

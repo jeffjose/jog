@@ -72,7 +72,7 @@ impl App {
     /// shrink into its cell of the grid.
     pub(super) fn video_frame(&self, window: (u32, u32)) -> Option<Arc<Frame>> {
         let video = self.video.as_ref().filter(|video| video.showing)?;
-        let native = self.shown.as_ref().filter(|(id, _)| *id == video.id).map(|(_, frame)| frame.native)?;
+        let native = self.size_of(video.id)?;
         // Only the picture, without the bars beside it.
         let place = self.layout_of(native);
         let (w, h) = (place.width.min(window.0).max(1), place.height.min(window.1).max(1));

@@ -196,6 +196,9 @@ pub(crate) const WATCHED: &[(&str, Kind, Tell)] = &[
     // What the info overlay shows of the video and how it plays.
     ("width", Kind::Number, Tell::Quiet),
     ("height", Kind::Number, Tell::Quiet),
+    // Turned a quarter, as phones record upright video, its width and
+    // height on screen are the other way round.
+    ("video-params/rotate", Kind::Number, Tell::Quiet),
     ("video-params/pixelformat", Kind::Text, Tell::Quiet),
     ("video-bitrate", Kind::Number, Tell::Quiet),
     ("hwdec-current", Kind::Text, Tell::Quiet),
