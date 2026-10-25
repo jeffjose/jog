@@ -672,9 +672,21 @@ impl App {
                     // Fullscreen: what pressing it does, out or in.
                     Command::ToggleFullscreen if self.window.as_ref().is_some_and(|window| window.fullscreen().is_some()) => (commands::icons::SHRINK, true),
                     Command::ToggleFullscreen => (commands::icons::EXPAND, true),
-                    Command::SmallWindow => (commands::icons::MONITOR_PLAY, true),
+                    Command::SmallWindow => ("", true),
                     _ => (commands::icons::AUDIO_LINES, true),
                 };
+                // The small window: a window with a smaller one in its
+                // corner, as picture in picture is shown; no letter of the
+                // icon font says it.
+                if command == Command::SmallWindow {
+                    let (w, h) = (side * 6 / 5, side * 9 / 10);
+                    let (x, y) = (left + (side - w) / 2, top + (side - h) / 2);
+                    let stroke = (side / 9).max(1);
+                    canvas.round_outline(x, y, w, h, stroke + 1, stroke, TEXT_COLOR);
+                    let (iw, ih) = (w * 9 / 20, h * 9 / 20);
+                    canvas.round_fill(x + w - iw - stroke - 2, y + h - ih - stroke - 2, iw, ih, 1, TEXT_COLOR, 256);
+                    continue;
+                }
                 buttons.push((left + side / 2, top + (side - line) / 2, icon, if on { TEXT_COLOR } else { DIM_TEXT_COLOR }));
             }
             // Subtitles stand clear of the bar while it is up.
