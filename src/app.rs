@@ -1296,6 +1296,9 @@ pub struct App {
     player: Option<Player>,
     /// Set once the player has been asked for, so that happens only once.
     player_asked: bool,
+    /// Whether the preview and spare players have been asked for, which
+    /// waits on the first video showing.
+    helpers_asked: bool,
     /// Which of the two players that take turns `player` is, and the other
     /// one, which holds the video that comes next ready to play.
     active: u8,
@@ -2022,6 +2025,7 @@ impl App {
             active: 0,
             spare: None,
             player_asked: false,
+            helpers_asked: false,
             video: None,
             preview: None,
             back: None,

@@ -54,8 +54,21 @@ impl App {
         let make = self.player_maker();
         let active = self.active;
         std::thread::spawn(move || {
-            if make(Which::Main(active)) {
-                make(Which::Preview);
+            make(Which::Main(active));
+        });
+    }
+
+    /// The players besides the main one, the one for previews and the
+    /// spare, started once the first video is showing: started with it,
+    /// they slowed its first frame, setting themselves up as it did.
+    fn warm_helpers(&mut self) {
+        if std::mem::replace(&mut self.helpers_asked, true) {
+            return;
+        }
+        let make = self.player_maker();
+        let active = self.active;
+        std::thread::spawn(move || {
+            if make(Which::Preview) {
                 make(Which::Spare(active ^ 1));
             }
         });
@@ -664,6 +677,10 @@ impl App {
         self.settle_aim();
         // At the end of a section looping, back to its start.
         self.relay_section();
+        // The first video showing, the other players can start.
+        if video_started.is_some() {
+            self.warm_helpers();
+        }
         if let (Some(took), Some("video")) = (video_started, self.bench_scene()) {
             self.bench_note("video", "start to first frame", took);
         }
