@@ -1175,6 +1175,9 @@ pub struct App {
     folder_memo: RefCell<Option<(PathBuf, std::rc::Rc<str>)>>,
     /// Where videos were left, read the first time one is played.
     positions: Option<Positions>,
+    /// Whether each video has a place it was left at, to be picked up
+    /// from: asked once a file, and again once a place is noted.
+    resumes_known: RefCell<HashMap<usize, bool>>,
     /// The videos watched, read when first asked about, and what has been
     /// found out about the files here so far.
     seen: RefCell<Option<Seen>>,
@@ -1948,6 +1951,7 @@ impl App {
             sizes: HashMap::new(),
             folder_memo: RefCell::new(None),
             positions: None,
+            resumes_known: RefCell::new(HashMap::new()),
             seen: RefCell::new(None),
             seen_known: RefCell::new(HashMap::new()),
             confirm: None,
@@ -2371,7 +2375,13 @@ impl App {
             }
         }
         let len = self.list.len() as i64;
-        let wanted = Self::around(&self.list, self.pos, self.forward, self.loader.workers());
+        let mut wanted = Self::around(&self.list, self.pos, self.forward, self.loader.workers());
+        // A video picked up where it was left gets no still: that would be
+        // its opening frame, shown and then jumped from. Black until the
+        // player has the frame it resumes at, which comes no later for it.
+        if let Some(&id) = self.list.get(self.pos).filter(|id| self.resumes(**id)) {
+            wanted.retain(|other| *other != id);
+        }
         // Thumbnails are sized for the monitor, like frames, so they survive
         // window resizes; and for the grid's cells, the larger of the two
         // uses, so that the filmstrip and the grid share them.
