@@ -134,6 +134,19 @@ fn main() -> ExitCode {
         }
     }
 
+    // Debugging, each player keeps a timed log of its own, this run's
+    // alone: what a slow start goes on. Set before any thread starts, for
+    // the players' processes to take it up.
+    if (options.debug || options.verbose) && std::env::var_os("JOG_MPV_LOG").is_none() {
+        if let Some(folder) = positions::state_dir().map(|dir| dir.join("player-logs")) {
+            let _ = std::fs::remove_dir_all(&folder);
+            if std::fs::create_dir_all(&folder).is_ok() {
+                eprintln!("jog: player logs in {}", folder.display());
+                std::env::set_var("JOG_MPV_LOG", &folder);
+            }
+        }
+    }
+
     let started = std::time::Instant::now();
     // Shown as soon as the first files are found, the rest listed on other
     // threads and coming in as they are: unless what was asked for needs

@@ -204,8 +204,10 @@ Workspaces are folders with names, set in the config file:
       --benchmark            step, zoom and page through the files by itself,
                              timing each, print the figures and quit
       --verbose              print each file as it comes up: its place in the
-                             list, dimensions, size and how long it took
-      --debug                print decode and video start times (also JOG_DEBUG=1)
+                             list, dimensions, size and how long it took,
+                             and keep each player's log
+      --debug                print decode and video start times (also JOG_DEBUG=1),
+                             and keep each player's log
       --no-hitches           say nothing of late frames and stalls, which are
                              otherwise told of with their likely cause
                              (config: hitches = false)
