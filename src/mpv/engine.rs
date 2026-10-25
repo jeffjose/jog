@@ -275,8 +275,12 @@ impl Engine {
                 // Without NVIDIA's driver, its decoder cannot be had, and
                 // looking for it says "Cannot load libcuda.so.1" on the
                 // terminal: VA-API only, which Intel and AMD decode with.
-                if !std::path::Path::new("/proc/driver/nvidia").exists() {
-                    extra.push(("gpu-hwdec-interop", "vaapi"));
+                // With it, NVIDIA's own only: VA-API is tried first and
+                // always fails there, a quarter of a second with the GPU
+                // busy, and 350 ms of a start under load went with it.
+                match std::path::Path::new("/proc/driver/nvidia").exists() {
+                    true => extra.push(("gpu-hwdec-interop", "cuda-nvdec")),
+                    false => extra.push(("gpu-hwdec-interop", "vaapi")),
                 }
             }
             match role {
