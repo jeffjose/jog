@@ -289,10 +289,50 @@ impl<'a> Canvas<'a> {
     pub fn round_ring(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, thickness: i32, color: u32, amount: u32) {
         let band = radius.max(thickness);
         let only = self.band.clone();
+        // Between the corners, the ring is only near the top and bottom
+        // edges: further in than its thickness and the half pixel blended
+        // at its edge, nothing. A pill is all corner rows, and its shadow
+        // many rings, each gone over whole before, for nothing in most.
+        let (half_w, t) = (f64::from(w) / 2.0, f64::from(thickness));
+        let corner = f64::from(radius).clamp(0.0, half_w.min(f64::from(h) / 2.0).max(0.0));
+        let reach = (half_w - corner).min(half_w - t - 0.5);
+        let middle = f64::from(x) + half_w;
+        let clear = (reach >= 0.0).then(|| ((middle - reach - 0.5).ceil() as i32, (middle + reach - 0.5).floor() as i32 + 1));
         for py in (y..y + h).filter(|py| only.as_ref().is_none_or(|rows| rows.contains(py))) {
             // Away from the top and bottom only the two sides have any.
             let full = py < y + band || py >= y + h - band;
-            let spans = if full { [(x, x + w), (0, 0)] } else { [(x, x + thickness), (x + w - thickness, x + w)] };
+            let in_from_edge = (f64::from(py - y) + 0.5).min(f64::from(y + h - py) - 0.5);
+            let spans = match (full, clear) {
+                (true, Some((from, to))) if in_from_edge >= t + 0.5 => [(x, from.max(x)), (to.max(from).min(x + w), x + w)],
+                (true, _) => [(x, x + w), (0, 0)],
+                (false, _) => [(x, x + thickness), (x + w - thickness, x + w)],
+            };
+            let ring = |px: i32| rounded_cover(px, py, x, y, w, h, radius, 0.0) - rounded_cover(px, py, x, y, w, h, radius, t);
+            // Out from the middle, the edge's distance grows by at most a
+            // pixel a pixel: well inside the ring's inner edge, as many
+            // pixels as there is room for are passed over; past its outer
+            // edge, nothing further out has any. Exact while the inner edge
+            // is the outer one moved in, as with a corner no tighter than
+            // the ring is thick.
+            if corner >= t && spans[1].0 > spans[0].1 {
+                let inner = -(t + 0.5);
+                for (start, end, step) in [(spans[0].1 - 1, spans[0].0 - 1, -1), (spans[1].0, spans[1].1, 1)] {
+                    let mut px = start;
+                    while px != end && (px - end) * step < 0 {
+                        let outside = rounded_outside(px, py, x, y, w, h, radius, 0.0);
+                        if outside >= 0.5 {
+                            break;
+                        }
+                        if outside <= inner {
+                            px += step * ((inner - outside).floor() as i32 + 1);
+                            continue;
+                        }
+                        self.cover(px, py, color, (ring(px) * f64::from(amount)) as u32);
+                        px += step;
+                    }
+                }
+                continue;
+            }
             for (from, to) in spans {
                 for px in from..to {
                     let ring = rounded_cover(px, py, x, y, w, h, radius, 0.0) - rounded_cover(px, py, x, y, w, h, radius, f64::from(thickness));
@@ -469,13 +509,19 @@ fn shrink(frame: &Frame, w: u32, h: u32) -> Option<Vec<u32>> {
 /// Fractions along the edge are what make the curve smooth.
 #[allow(clippy::too_many_arguments)]
 fn rounded_cover(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32, radius: i32, inset: f64) -> f64 {
+    (0.5 - rounded_outside(px, py, x, y, w, h, radius, inset)).clamp(0.0, 1.0)
+}
+
+/// How far the middle of the pixel at `(px, py)` is outside that shape,
+/// less than nothing inside it: as far as it is from the nearest edge.
+#[allow(clippy::too_many_arguments)]
+fn rounded_outside(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32, radius: i32, inset: f64) -> f64 {
     let (half_w, half_h) = (f64::from(w) / 2.0 - inset, f64::from(h) / 2.0 - inset);
     let radius = (f64::from(radius) - inset).clamp(0.0, half_w.min(half_h).max(0.0));
     // Distance from the middle, less the straight part of each side.
     let across = (f64::from(px) + 0.5 - f64::from(x) - f64::from(w) / 2.0).abs() - (half_w - radius);
     let down = (f64::from(py) + 0.5 - f64::from(y) - f64::from(h) / 2.0).abs() - (half_h - radius);
-    let outside = across.max(0.0).hypot(down.max(0.0)) + across.max(down).min(0.0) - radius;
-    (0.5 - outside).clamp(0.0, 1.0)
+    across.max(0.0).hypot(down.max(0.0)) + across.max(down).min(0.0) - radius
 }
 
 pub fn mix(a: u32, b: u32, amount: u32) -> u32 {
@@ -865,5 +911,58 @@ mod touched_tests {
         let mut canvas = Canvas::new(&mut pixels, 100, 50).counting();
         let _ = canvas.all();
         assert_eq!(spans(&canvas.touched().unwrap()), [0..50]);
+    }
+}
+
+#[cfg(test)]
+mod ring_tests {
+    use super::{rounded_cover, Canvas};
+
+    #[test]
+    fn a_ring_is_drawn_as_when_every_pixel_was_gone_over() {
+        // Every pixel of every corner row, as it was done before: what the
+        // ring has to come out as, pixel for pixel.
+        let reference = |pixels: &mut Vec<u32>, [x, y, w, h, radius, thickness]: [i32; 6], amount: u32| {
+            let mut canvas = Canvas::new(pixels, 120, 90);
+            let band = radius.max(thickness);
+            for py in y..y + h {
+                let full = py < y + band || py >= y + h - band;
+                let spans = if full { [(x, x + w), (0, 0)] } else { [(x, x + thickness), (x + w - thickness, x + w)] };
+                for (from, to) in spans {
+                    for px in from..to {
+                        let ring = rounded_cover(px, py, x, y, w, h, radius, 0.0) - rounded_cover(px, py, x, y, w, h, radius, f64::from(thickness));
+                        canvas.cover(px, py, 0x123456, (ring * f64::from(amount)) as u32);
+                    }
+                }
+            }
+        };
+        // Pills, boxes, sharp and rounder than they are tall, odd and even,
+        // thin rings and thick, partly off the canvas.
+        let shapes = [
+            [10, 10, 80, 40, 20, 1],
+            [10, 10, 81, 41, 20, 1],
+            [5, 5, 100, 30, 15, 2],
+            [5, 5, 60, 60, 8, 1],
+            [5, 5, 60, 60, 0, 3],
+            [5, 5, 60, 20, 40, 1],
+            [-10, 70, 50, 30, 15, 1],
+            [20, 20, 7, 7, 3, 2],
+            [3, 3, 90, 12, 1, 4],
+            // The rings of a pill's shadow, as `soft_shadow` draws them.
+            [2, 2, 100, 50, 25, 1],
+            [-3, 1, 106, 56, 28, 1],
+            [-5, -5, 130, 100, 50, 1],
+            [5, 5, 60, 40, 2, 3],
+        ];
+        for shape in shapes {
+            for amount in [44, 256] {
+                let ground: Vec<u32> = (0..120 * 90).map(|at| (at as u32).wrapping_mul(2_654_435_761) & 0xFFFFFF).collect();
+                let (mut want, mut got) = (ground.clone(), ground);
+                reference(&mut want, shape, amount);
+                let [x, y, w, h, radius, thickness] = shape;
+                Canvas::new(&mut got, 120, 90).round_ring(x, y, w, h, radius, thickness, 0x123456, amount);
+                assert!(want == got, "ring {shape:?} at {amount} drawn differently");
+            }
+        }
     }
 }
