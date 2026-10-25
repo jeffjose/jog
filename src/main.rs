@@ -202,7 +202,15 @@ fn main() -> ExitCode {
         eprintln!("jog: {:>7.1?} start loader threads up", started.elapsed());
     }
     if let Some(screen) = screen::remembered().filter(|_| options.filter.is_none() && options.sessions.is_empty()) {
-        loader.request(App::first_request(files.len(), playlist.start, screen, options.auto_zoom, options.hdr, loader.workers()));
+        let mut first = App::first_request(files.len(), playlist.start, screen, options.auto_zoom, options.hdr, loader.workers());
+        // A video to be picked up where it was left gets no still, here as
+        // once the window is up: that would be its opening frame, shown and
+        // then jumped from.
+        let resumes = |path: &std::path::Path| options.resume && files::is_video(path) && positions::Positions::load().get(path).is_some();
+        if files.get(playlist.start).is_some_and(|path| resumes(path)) {
+            first.wanted.retain(|id| *id != playlist.start);
+        }
+        loader.request(first);
     }
 
     let event_loop = match EventLoop::<Event>::with_user_event().build() {
