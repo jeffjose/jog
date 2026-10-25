@@ -11,6 +11,20 @@ the screen is built for speed:
 - The thread that handles your key presses never waits on a decode, a
   resize or the video player.
 
+Videos get the same treatment:
+
+- mpv draws them on the GPU in a window of its own, and jog lays its
+  controls over the top. A frame of controls over a playing video takes
+  about 2 ms to draw.
+- A video you were partway through resumes from the nearest keyframe,
+  with no seeking or decoding up to the exact spot first.
+- The next video is opened in a second player while this one plays, so
+  moving on is a switch rather than a fresh start.
+- Each player runs in its own process: a crashing decoder takes down only
+  that process, and the video goes on, decoded on the CPU.
+- Under heavy CPU load, jog redraws only the rows that changed and keeps
+  small jobs on one thread rather than waiting for others to wake.
+
 ```
 jog PHOTOS/            # a folder, fullscreen
 jog -r PHOTOS/         # and its subfolders
