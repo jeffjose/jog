@@ -235,6 +235,9 @@ impl Engine {
                 // of them is used, and each is loaded as the player starts.
                 ("load-scripts", "no"),
                 ("ytdl", "no"),
+                ("load-stats-overlay", "no"),
+                ("load-osd-console", "no"),
+                ("load-auto-profiles", "no"),
                 ("terminal", "no"),
                 ("audio-client-name", "jog"),
                 // After a seek the player otherwise waits for its first
