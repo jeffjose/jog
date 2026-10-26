@@ -80,7 +80,10 @@ impl App {
         let left = self.video_layer.left.take().filter(|(len, _)| reused == Some(true) && *len == pixels.len());
         match &left {
             Some((_, rows)) => pixels.chunks_exact_mut(window.0 as usize).zip(rows).filter(|(_, drawn)| **drawn).for_each(|(row, _)| row.fill(0)),
-            None => ui::fill_all(pixels, 0),
+            // A new buffer, as at every step of a resize: on this thread,
+            // which on a busy machine is done long before others could be
+            // woken to share it.
+            None => pixels.fill(0),
         }
         // What of the frame paused on is outside BT.709, if asked: a blend
         // over the picture as the rest is, and so laid over it the same way.
