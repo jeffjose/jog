@@ -106,6 +106,9 @@ const SMOOTH_ALWAYS: usize = 12_000_000;
 /// Magnification of the source frame from which scaling stops being smoothed.
 const SHOW_PIXELS_AT: u32 = 4;
 const TOAST: Duration = Duration::from_millis(1500);
+/// How long the seek bar stays up after the pointer leaves the window
+/// through its bottom edge, for it to come back up into.
+const BAR_AFTER_LEAVING: Duration = Duration::from_secs(3);
 /// How long after a thumbnail comes in the grid or strip is drawn with
 /// it: the ones coming in just behind it get into the same frame.
 const THUMBS_REDRAW: Duration = Duration::from_millis(12);
@@ -1079,6 +1082,8 @@ pub struct App {
     /// filmstrip.
     toast_slide: Cell<Glide>,
     bar_rise: Cell<Glide>,
+    /// What --debug last said of the seek bar being drawn.
+    bar_said: RefCell<Option<String>>,
     scenes_rise: Cell<Glide>,
     strip_slide: Cell<Glide>,
     /// The grid cursor's ring on its way to another cell, and whether it
@@ -1921,6 +1926,7 @@ impl App {
             grid_due: None,
             toast_slide: Cell::new(Glide::at(1.0)),
             bar_rise: Cell::new(Glide::at(0.0)),
+            bar_said: RefCell::new(None),
             scenes_rise: Cell::new(Glide::at(0.0)),
             strip_slide: Cell::new(Glide::at(start as f64)),
             ring: std::array::from_fn(|_| Cell::new(Glide::at(0.0))),
@@ -4205,6 +4211,14 @@ impl ApplicationHandler<Event> for App {
                 connected - created,
                 self.perf.arrived.elapsed()
             );
+            // Which display it is on, as winit took it, and so who draws a video.
+            let backend = match window.display_handle().map(|handle| handle.as_raw()) {
+                Ok(winit::raw_window_handle::RawDisplayHandle::Wayland(_)) => "Wayland",
+                Ok(winit::raw_window_handle::RawDisplayHandle::Xlib(_) | winit::raw_window_handle::RawDisplayHandle::Xcb(_)) => "X11",
+                _ => "an unknown display",
+            };
+            let drawn = if crate::mpv::gpu_video() { "by the player, on the GPU, with jog's UI laid over it" } else { "by jog, with its UI" };
+            eprintln!("jog: on {backend} at scale {}: videos drawn {drawn}", window.scale_factor());
         }
         // The buffers a frame goes through are given their size now, as
         // pages the system hands out blank, which cost nothing until they
@@ -4561,7 +4575,19 @@ impl App {
                     return;
                 }
                 if self.options.debug {
-                    eprintln!("jog: window left by the pointer");
+                    eprintln!("jog: window left by the pointer, last at {:.0},{:.0}", self.mouse.0, self.mouse.1);
+                }
+                // Gone out through the bottom over a video, as on to a dock
+                // below a window not filling the screen: the bar was what it
+                // went for, and in one stride it may have passed over it
+                // without once being seen there. Up for a while, to come back
+                // into.
+                let height = f64::from(self.window_size().1);
+                if self.video.is_some() && self.grid.is_none() && self.mouse.1 >= height * 0.75 {
+                    self.time_until = Some(Instant::now() + BAR_AFTER_LEAVING);
+                    if self.options.debug {
+                        eprintln!("jog: seek bar up a while: the pointer left through the bottom");
+                    }
                 }
                 self.pointer_found = input::Arrival::Coming;
                 self.set_strip_hover(false);

@@ -582,6 +582,29 @@ impl App {
         let bar_wanted = viewing && (self.hover.is_some() || self.time_until.is_some());
         // It rises from the bottom edge and sinks back into it.
         let bar_level = self.glide(&self.bar_rise, if bar_wanted { 1.0 } else { 0.0 }, EASE);
+        // Wanted, whether it is drawn, and if not, why not: told once each time it changes.
+        if self.options.debug {
+            let state = match (bar_wanted, self.video_time()) {
+                (false, _) => None,
+                (true, None) => Some(match self.player.as_ref() {
+                    None => "not drawn: no player".to_string(),
+                    Some(player) => format!(
+                        "not drawn: the player has open {:?}, {:?} long, and this is {:?}",
+                        player.text("path"),
+                        player.number("duration"),
+                        self.video.as_ref().map(|video| self.files[video.id].display().to_string())
+                    ),
+                }),
+                (true, Some(_)) if bar_level >= 0.999 => Some(format!("drawn, all the way up, at y {} of a {width}x{height} frame", self.seek_bar().middle)),
+                (true, Some(_)) => Some("rising".to_string()),
+            };
+            if *self.bar_said.borrow() != state {
+                if let Some(state) = &state {
+                    eprintln!("jog: seek bar {state}");
+                }
+                *self.bar_said.borrow_mut() = state;
+            }
+        }
         // Where the bar stands on a strip it comes up from behind it. What
         // the strip shows is kept while the bar is on its way, and put back
         // over whatever of the bar was drawn across it.
