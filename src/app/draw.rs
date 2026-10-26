@@ -588,11 +588,17 @@ impl App {
                 (false, _) => None,
                 (true, None) => Some(match self.player.as_ref() {
                     None => "not drawn: no player".to_string(),
+                    // Where it is, as last told of and as asked now: the one
+                    // missing and the other there, what it says goes untold.
                     Some(player) => format!(
-                        "not drawn: the player has open {:?}, {:?} long, and this is {:?}",
+                        "not drawn: the player has open {:?}, {:?} long, and this is {:?}; at {:?} as told, {:?} asked now; paused {:?}, at the end {:?}",
                         player.text("path"),
                         player.number("duration"),
-                        self.video.as_ref().map(|video| self.files[video.id].display().to_string())
+                        self.video.as_ref().map(|video| self.files[video.id].display().to_string()),
+                        player.number("time-pos"),
+                        player.number_now("time-pos"),
+                        player.flag("pause"),
+                        player.flag("eof-reached"),
                     ),
                 }),
                 (true, Some(_)) if bar_level >= 0.999 => Some(format!("drawn, all the way up, at y {} of a {width}x{height} frame", self.seek_bar().middle)),
