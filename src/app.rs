@@ -4489,10 +4489,12 @@ impl App {
                 self.draw();
             }
             WindowEvent::Moved(at) => self.note_window_moved(at),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } if self.options.debug => eprintln!("jog: window scale now {scale_factor}"),
             WindowEvent::Resized(size) => {
                 self.size.set((size.width, size.height));
                 if self.options.debug {
-                    eprintln!("jog: window resized to {}x{}", size.width, size.height);
+                    let scale = self.window.as_ref().map_or(1.0, |window| window.scale_factor());
+                    eprintln!("jog: window resized to {}x{} at scale {scale}", size.width, size.height);
                 }
                 self.update_monitor();
                 self.settle_small(size);
@@ -4557,6 +4559,9 @@ impl App {
                 let within = self.video_window_shown() && self.window.as_ref().and_then(|window| x11::pointer_over(window)) == Some(true);
                 if within {
                     return;
+                }
+                if self.options.debug {
+                    eprintln!("jog: window left by the pointer");
                 }
                 self.pointer_found = input::Arrival::Coming;
                 self.set_strip_hover(false);

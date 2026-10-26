@@ -327,6 +327,14 @@ impl App {
         let zone = f64::from((bar.middle - bar.unit * 4).min(tools_top).min(reach))..f64::from(bar.middle + bar.unit * 2);
         let fraction = ((x - f64::from(bar.x)) / f64::from(bar.width)).clamp(0.0, 1.0);
         let hover = zone.contains(&y).then_some(fraction);
+        // Whether the bar comes up, and by what it was judged: the pointer,
+        // the window as jog has it, and the part of it the bar answers to.
+        if hover.is_some() != self.hover.is_some() && self.options.debug {
+            let (w, h) = self.window_size();
+            let scale = self.window.as_ref().map_or(1.0, |window| window.scale_factor());
+            let (word, top, bottom) = (if hover.is_some() { "up" } else { "down" }, zone.start, zone.end);
+            eprintln!("jog: seek bar {word}: pointer at {x:.0},{y:.0} in {w}x{h} at scale {scale}, bar answers to y {top:.0} to {bottom:.0}");
+        }
         if hover != self.hover {
             self.hover = hover;
             if let Some(fraction) = hover.filter(|_| !self.bar_busy()) {

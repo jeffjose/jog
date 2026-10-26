@@ -290,11 +290,17 @@ impl App {
         let moved = match self.pointer_found {
             Arrival::Coming => {
                 self.pointer_found = Arrival::At(x, y);
+                if self.options.debug {
+                    eprintln!("jog: pointer came in at {x:.0},{y:.0}: nothing along the bottom until it moves");
+                }
                 false
             }
             Arrival::At(fx, fy) if (x - fx).hypot(y - fy) < POINTER_MOVED => false,
             Arrival::At(..) => {
                 self.pointer_found = Arrival::Moved;
+                if self.options.debug {
+                    eprintln!("jog: pointer moving, at {x:.0},{y:.0}");
+                }
                 true
             }
             Arrival::Moved => true,
