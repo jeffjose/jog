@@ -1337,6 +1337,10 @@ pub struct App {
     /// The next video started opens paused: one the player crashed on, put
     /// back as it was.
     resume_paused: bool,
+    /// Whether the user paused the video, by pausing or stepping a frame:
+    /// the next opens paused only then. The player pauses of itself on the
+    /// last frame, which is no pause asked for.
+    paused_by_user: bool,
     /// When players crashed lately: one that keeps crashing is not started
     /// again and again.
     player_crashes: Vec<Instant>,
@@ -2048,6 +2052,7 @@ impl App {
             preview_busy: None,
             enter_at: options.begin_at,
             resume_paused: false,
+            paused_by_user: false,
             player_crashes: Vec::new(),
             unplayable_said: None,
             pointer_found: input::Arrival::Coming,
@@ -3738,6 +3743,7 @@ impl App {
         if let Some(player) = &self.player {
             player.set("pause", "no");
         }
+        self.paused_by_user = false;
         self.toast(format!("{}  {}x", commands::icons::CHEVRONS_RIGHT, self.playing_speed()));
         // It stays for as long as the hold does.
         if let Some((_, until)) = &mut self.toast {

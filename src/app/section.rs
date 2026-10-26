@@ -357,6 +357,7 @@ impl App {
         if let Some(player) = &self.player {
             player.set("pause", "no");
         }
+        self.paused_by_user = false;
         self.redraw();
     }
 

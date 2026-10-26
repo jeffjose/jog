@@ -77,6 +77,12 @@ impl App {
                         self.mouse_moved(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
                         continue;
                     }
+                    // `{Jump:F}` goes F of the way along the video, as a
+                    // click on the seek bar there does.
+                    if let Some(fraction) = name.strip_prefix("Jump:").and_then(|f| f.parse().ok()) {
+                        self.seek_to(fraction, true);
+                        continue;
+                    }
                     // `{Wheel:N}` turns the wheel N lines, up being positive.
                     if let Some(lines) = name.strip_prefix("Wheel:") {
                         self.mouse_wheel(MouseScrollDelta::LineDelta(0.0, lines.parse().unwrap_or(0.0)));

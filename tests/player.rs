@@ -177,3 +177,63 @@ fn a_video_zooms_with_plus_and_minus_and_ctrl_with_the_wheel() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Two short videos, one after the other, for going from one to the next.
+fn two_videos(name: &str) -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join("jog-player").join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("videos")).ok()?;
+    for file in ["a.mp4", "b.mp4"] {
+        let made = Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=2", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(dir.join("videos").join(file))
+            .status()
+            .ok()?;
+        if !made.success() {
+            return None;
+        }
+    }
+    Some(dir)
+}
+
+/// What jog says with `--debug` as it plays the keys on the two videos.
+fn said_playing(dir: &Path, keys: &str, wait_ms: u32) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_jog"))
+        .args(["--debug", "--no-animations", "--no-positions", "-g", "640x400"])
+        .arg(dir.join("videos"))
+        .env("JOG_CONFIG", "/dev/null")
+        .env("JOG_STATE", dir.join(format!("state-{}", keys.len())))
+        .env("JOG_SNAPSHOT", "/dev/null")
+        .env("JOG_SNAPSHOT_KEYS", keys)
+        .env("JOG_SNAPSHOT_WAIT", wait_ms.to_string())
+        .output()
+        .expect("jog runs");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn the_next_video_is_paused_only_when_the_user_paused() {
+    if !display() || !libmpv() {
+        return;
+    }
+    let Some(dir) = two_videos("paused") else { return };
+    let starts = |said: &str| said.lines().filter(|line| line.contains("video start")).count();
+    // Playing, on to the next: it plays.
+    let said = said_playing(&dir, "{Wait}{Ctrl+Right}{Wait}", 600);
+    assert_eq!(starts(&said), 2, "both videos shown:\n{said}");
+    assert!(!said.contains("opened paused"), "the next is not paused when this one was playing:\n{said}");
+    // Paused by the user, on to the next: paused too.
+    let said = said_playing(&dir, "{Wait}{Space}{Wait}{Ctrl+Right}{Wait}", 600);
+    assert!(said.contains("opened paused"), "the next stays paused after a pause:\n{said}");
+    // Sent to just short of its end while it plays: it plays out, and the
+    // next comes on, playing; not held paused on the last frame.
+    let said = said_playing(&dir, "{Wait}{Jump:0.99}{Wait}{Wait}{Wait}", 600);
+    assert_eq!(starts(&said), 2, "the next came on after the jump to the end:\n{said}");
+    assert!(!said.contains("opened paused"), "and plays:\n{said}");
+    // Played into its end, the next plays, not held on the last frame.
+    let said = said_playing(&dir, "{Wait}{Wait}{Wait}{Wait}{Wait}", 800);
+    assert_eq!(starts(&said), 2, "the next came on of itself:\n{said}");
+    assert!(!said.contains("opened paused"), "and plays:\n{said}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

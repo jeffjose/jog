@@ -282,6 +282,7 @@ impl App {
         let target = fraction.clamp(0.0, 1.0) * length;
         let how: &[u8] = if exact { b"absolute+exact" } else { b"absolute+keyframes" };
         player.command_later(&[b"seek", target.to_string().as_bytes(), how]);
+        let paused = player.flag("pause") == Some(true);
         if let Some(video) = &mut self.video {
             // Where it lands is only known beforehand when that is exact;
             // to a keyframe, the bar stands where it was aimed at meanwhile.
@@ -289,7 +290,7 @@ impl App {
             video.aimed = (!exact).then(|| (Instant::now(), target));
             video.aim_reached = None;
             video.seek_asked.get_or_insert_with(Instant::now);
-            video.to_end = (target >= length - VIDEO_END).then(Instant::now);
+            video.to_end = (target >= length - VIDEO_END && paused).then(Instant::now);
         }
         self.redraw();
     }
@@ -393,8 +394,11 @@ impl App {
         // going back and forth across files to look does not set them
         // playing. Stopped at its end is no pause asked for: the next plays.
         // One put back after the player crashed is as it was.
-        let paused = std::mem::take(&mut self.resume_paused)
-            || self.video.is_some() && self.player.as_ref().is_some_and(|player| player.flag("pause") == Some(true) && player.flag("eof-reached") != Some(true));
+        let paused = std::mem::take(&mut self.resume_paused) || self.video.is_some() && self.paused_by_user;
+        self.paused_by_user = paused;
+        if paused && self.options.debug {
+            eprintln!("jog: video opened paused, as the one before was left");
+        }
         // A seek carried over from the file beside this one says where to
         // begin; otherwise it is where the video was left.
         let carried = self.enter_at.take();
@@ -772,6 +776,7 @@ impl App {
         self.seek_to(0.0, true);
         if let (Some(player), Some(_)) = (&self.player, &self.video) {
             player.set("pause", "no");
+            self.paused_by_user = false;
         }
     }
 
@@ -1111,6 +1116,10 @@ impl App {
         // A step among the frames kept from before the pause, at once; and
         // anything else is from the frame on show, the main player put on
         // it first.
+        // A frame stepped to is paused on: as the user's pause.
+        if matches!(action, VideoAction::Frame(_)) {
+            self.paused_by_user = true;
+        }
         match action {
             VideoAction::Frame(forward) if self.back_step(forward) => return,
             VideoAction::Frame(_) | VideoAction::Volume(_) => {}
@@ -1152,7 +1161,9 @@ impl App {
                 video.seeking = exact.then(|| (Instant::now(), target));
                 video.aimed = (!exact).then(|| (Instant::now(), target));
                 video.aim_reached = None;
-                video.to_end = (target >= length - VIDEO_END).then(Instant::now);
+                // Taken to the end while it plays, it goes on into the next
+                // as it would have; paused, it stays there to be looked at.
+                video.to_end = (target >= length - VIDEO_END && was_paused).then(Instant::now);
                 video.seek_asked.get_or_insert_with(Instant::now);
             }
             // Both leave the video paused on the frame they land on.
@@ -1171,6 +1182,7 @@ impl App {
         // notes; playing again takes the word away.
         if action == VideoAction::Pause {
             let paused = !was_paused;
+            self.paused_by_user = paused;
             match paused {
                 true => self.toast(format!("{}  Paused", commands::icons::PAUSE)),
                 false => self.toast = None,
