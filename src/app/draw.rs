@@ -609,6 +609,13 @@ impl App {
                     eprintln!("jog: seek bar {state}");
                 }
                 *self.bar_said.borrow_mut() = state;
+                self.bar_frames.set(0);
+            }
+            // The first frames drawn while it is wanted, each: whether frames
+            // come at all, and what each found.
+            if bar_wanted && self.bar_frames.get() < 8 {
+                self.bar_frames.set(self.bar_frames.get() + 1);
+                eprintln!("jog: seek bar frame {}: time {:?}, risen {bar_level:.2}, frame {width}x{height}", self.bar_frames.get(), self.video_time());
             }
         }
         // Where the bar stands on a strip it comes up from behind it. What

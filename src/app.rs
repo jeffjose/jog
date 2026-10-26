@@ -1084,6 +1084,8 @@ pub struct App {
     bar_rise: Cell<Glide>,
     /// What --debug last said of the seek bar being drawn.
     bar_said: RefCell<Option<String>>,
+    /// How many frames --debug has told of since the seek bar was wanted.
+    bar_frames: Cell<u32>,
     scenes_rise: Cell<Glide>,
     strip_slide: Cell<Glide>,
     /// The grid cursor's ring on its way to another cell, and whether it
@@ -1927,6 +1929,7 @@ impl App {
             toast_slide: Cell::new(Glide::at(1.0)),
             bar_rise: Cell::new(Glide::at(0.0)),
             bar_said: RefCell::new(None),
+            bar_frames: Cell::new(0),
             scenes_rise: Cell::new(Glide::at(0.0)),
             strip_slide: Cell::new(Glide::at(start as f64)),
             ring: std::array::from_fn(|_| Cell::new(Glide::at(0.0))),
