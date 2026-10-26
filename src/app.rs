@@ -2809,7 +2809,7 @@ impl App {
         };
         let scaled = |v: u32| ((f64::from(v) * scale).round() as u32).max(1);
         let (width, height) = fit_size((scaled(native.0), scaled(native.1)), self.monitor, false);
-        let _ = window.request_inner_size(PhysicalSize::new(width, height));
+        self.ask_size((width, height));
     }
 
     // ---- Commands ------------------------------------------------------
@@ -4507,27 +4507,7 @@ impl App {
             }
             WindowEvent::Moved(at) => self.note_window_moved(at),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } if self.options.debug => eprintln!("jog: scale x{scale_factor}"),
-            WindowEvent::Resized(size) => {
-                self.size.set((size.width, size.height));
-                if self.options.debug {
-                    let scale = self.window.as_ref().map_or(1.0, |window| window.scale_factor());
-                    eprintln!("jog: resize {}x{} x{scale}", size.width, size.height);
-                }
-                self.update_monitor();
-                self.settle_small(size);
-                self.note_window_size(size);
-                self.menu = None;
-                self.request();
-                // A video is drawn at its old size, and with its old zoom and
-                // pan, until this one holds: with a panel docked those change
-                // at every step of a drag, and each change has the player set
-                // its renderer up again. The new ones go once it settles.
-                if self.video.is_some() {
-                    self.resized_at = Some(Instant::now());
-                    self.settle_at = Some(Instant::now() + RESIZE_SETTLE);
-                }
-                self.redraw();
-            }
+            WindowEvent::Resized(size) => self.resized(size),
             // Coming back to the window, all of it is drawn afresh: a part
             // that was covered may have been uncovered while a frame of
             // this program's own asking was already due, and missed.

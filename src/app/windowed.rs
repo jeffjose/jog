@@ -112,7 +112,6 @@ impl App {
             window.set_fullscreen(None);
         }
         window.set_maximized(false);
-        let _ = window.request_inner_size(PhysicalSize::new(size.0, size.1));
         let (sw, sh) = self.monitor;
         let middle = window.current_monitor().map(|monitor| {
             let origin = monitor.position();
@@ -122,9 +121,45 @@ impl App {
             window.set_outer_position(at);
         }
         // A window manager putting back the size from before fullscreen
-        // does so after this; asked again once it has.
+        // does so after this; asked again once it has. Jog's own size, not
+        // one to keep as the user's: said so before asking, as on Wayland
+        // the size is had at once.
         self.small_wanted = Some(size);
         self.sized_here = Some(size);
+        self.ask_size(size);
+    }
+
+    /// The window has a new size: told of by the display, or given at once
+    /// as asked for, which on Wayland is not told of again.
+    pub(super) fn resized(&mut self, size: PhysicalSize<u32>) {
+        self.size.set((size.width, size.height));
+        if self.options.debug {
+            let scale = self.window.as_ref().map_or(1.0, |window| window.scale_factor());
+            eprintln!("jog: resize {}x{} x{scale}", size.width, size.height);
+        }
+        self.update_monitor();
+        self.settle_small(size);
+        self.note_window_size(size);
+        self.menu = None;
+        self.request();
+        // A video is drawn at its old size, and with its old zoom and
+        // pan, until this one holds: with a panel docked those change
+        // at every step of a drag, and each change has the player set
+        // its renderer up again. The new ones go once it settles.
+        if self.video.is_some() {
+            self.resized_at = Some(Instant::now());
+            self.settle_at = Some(Instant::now() + RESIZE_SETTLE);
+        }
+        self.redraw();
+    }
+
+    /// Asks for the window to be this size: when it is so at once, as on
+    /// Wayland, taken as told of.
+    pub(super) fn ask_size(&mut self, size: (u32, u32)) {
+        let given = self.window.as_ref().and_then(|window| window.request_inner_size(PhysicalSize::new(size.0, size.1)));
+        if let Some(size) = given {
+            self.resized(size);
+        }
     }
 
     /// Asked for the small size again, once, after the window manager
@@ -132,9 +167,7 @@ impl App {
     pub(super) fn settle_small(&mut self, size: PhysicalSize<u32>) {
         let Some(wanted) = self.small_wanted.take() else { return };
         if (size.width, size.height) != wanted {
-            if let Some(window) = &self.window {
-                let _ = window.request_inner_size(PhysicalSize::new(wanted.0, wanted.1));
-            }
+            self.ask_size(wanted);
         }
     }
 
