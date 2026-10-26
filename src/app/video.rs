@@ -675,7 +675,7 @@ impl App {
         // any other, and takes its frames the same way.
         if matches!(signal, Signal::Frame) && !video.showing {
             // At the size it last drew at: another has it set itself up anew.
-            let window: (u32, u32) = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
+            let window = self.size.get();
             let (width, height) = self.video_render.unwrap_or(window);
             ui::size_for(&mut self.scene, width as usize * height as usize);
             self.scene_key = None;

@@ -15,7 +15,7 @@ impl App {
             }
         }
         let (Some(window), Some(mut surface)) = (self.window.clone(), self.surface.take()) else { return };
-        let size = window.inner_size();
+        let size = PhysicalSize::from(self.window_size());
         // A frame nobody here asked for is the system's: the window has
         // been uncovered or mapped, and wants all of itself drawn.
         let ours = self.asked.take();
@@ -1945,7 +1945,7 @@ impl App {
             }
         }
         let proxy = self.proxy.clone();
-        let window = self.window.as_ref().map_or((0, 0), |w| w.inner_size().into());
+        let window = self.window_size();
         // A scene of the video on view plays on from where it starts, in
         // its cell of the strip; a video in the grid as a trailer of the
         // whole of it, in its cell there.

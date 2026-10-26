@@ -1198,6 +1198,9 @@ pub struct App {
     /// Size images are fitted to. Using the monitor rather than the window
     /// means resizing or leaving fullscreen never needs a fresh decode.
     monitor: (u32, u32),
+    /// The window's size, as last told of: asked of the display, each is a
+    /// wait on it, many in a frame, and behind a resize a long one.
+    size: Cell<(u32, u32)>,
     /// The window's size when last an ordinary one, and the small size
     /// asked for, to be asked again once a window manager has had its say.
     windowed: Option<(u32, u32)>,
@@ -1976,6 +1979,7 @@ impl App {
             last_request: RefCell::new(None),
             transforms: HashMap::new(),
             monitor: (0, 0),
+            size: Cell::new((0, 0)),
             windowed: None,
             small_wanted: None,
             sized_here: None,
@@ -2246,8 +2250,13 @@ impl App {
         crate::quit_now();
     }
 
+    /// The window's size, as it was last told of; asked of the display
+    /// only until it has been.
     fn window_size(&self) -> (u32, u32) {
-        self.window.as_ref().map_or((0, 0), |w| w.inner_size().into())
+        match self.size.get() {
+            (0, _) | (_, 0) => self.window.as_ref().map_or((0, 0), |w| w.inner_size().into()),
+            size => size,
+        }
     }
 
     fn redraw(&self) {
@@ -2543,7 +2552,7 @@ impl App {
         // With the screen off there may be no monitor, or a stand-in a
         // pixel across; the window is then the guide to the size wanted.
         let monitor = window.current_monitor().map_or(PhysicalSize::new(0, 0), |m| m.size());
-        let inner = window.inner_size();
+        let inner = PhysicalSize::from(self.window_size());
         let size = PhysicalSize::new(monitor.width.max(inner.width), monitor.height.max(inner.height));
         if size.width > 0 && size.height > 0 && self.monitor != (size.width, size.height) {
             self.monitor = (size.width, size.height);
@@ -4177,6 +4186,7 @@ impl ApplicationHandler<Event> for App {
             x11::mark_fullscreen(&window);
         }
         self.window = Some(window.clone());
+        self.size.set(window.inner_size().into());
         // The first video's window, made before this one, put inside it.
         if self.early_window.is_some() {
             self.video_window_id(usize::from(self.active));
@@ -4472,6 +4482,7 @@ impl App {
                 self.draw();
             }
             WindowEvent::Resized(size) => {
+                self.size.set((size.width, size.height));
                 if self.options.debug {
                     eprintln!("jog: window resized to {}x{}", size.width, size.height);
                 }
