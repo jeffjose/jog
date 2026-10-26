@@ -133,7 +133,9 @@ impl App {
     /// The window has a new size: told of by the display, or given at once
     /// as asked for, which on Wayland is not told of again.
     pub(super) fn resized(&mut self, size: PhysicalSize<u32>) {
-        self.size.set((size.width, size.height));
+        if self.on_x11() {
+            self.size.set((size.width, size.height));
+        }
         if self.options.debug {
             let scale = self.window.as_ref().map_or(1.0, |window| window.scale_factor());
             eprintln!("jog: resize {}x{} x{scale}", size.width, size.height);

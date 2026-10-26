@@ -106,9 +106,6 @@ const SMOOTH_ALWAYS: usize = 12_000_000;
 /// Magnification of the source frame from which scaling stops being smoothed.
 const SHOW_PIXELS_AT: u32 = 4;
 const TOAST: Duration = Duration::from_millis(1500);
-/// How long the seek bar stays up after the pointer leaves the window
-/// through its bottom edge, for it to come back up into.
-const BAR_AFTER_LEAVING: Duration = Duration::from_secs(3);
 /// How long after a thumbnail comes in the grid or strip is drawn with
 /// it: the ones coming in just behind it get into the same frame.
 const THUMBS_REDRAW: Duration = Duration::from_millis(12);
@@ -1082,10 +1079,6 @@ pub struct App {
     /// filmstrip.
     toast_slide: Cell<Glide>,
     bar_rise: Cell<Glide>,
-    /// What --debug last said of the seek bar being drawn.
-    bar_said: RefCell<Option<String>>,
-    /// How many frames --debug has told of since the seek bar was wanted.
-    bar_frames: Cell<u32>,
     scenes_rise: Cell<Glide>,
     strip_slide: Cell<Glide>,
     /// The grid cursor's ring on its way to another cell, and whether it
@@ -1928,8 +1921,6 @@ impl App {
             grid_due: None,
             toast_slide: Cell::new(Glide::at(1.0)),
             bar_rise: Cell::new(Glide::at(0.0)),
-            bar_said: RefCell::new(None),
-            bar_frames: Cell::new(0),
             scenes_rise: Cell::new(Glide::at(0.0)),
             strip_slide: Cell::new(Glide::at(start as f64)),
             ring: std::array::from_fn(|_| Cell::new(Glide::at(0.0))),
@@ -2262,13 +2253,21 @@ impl App {
         crate::quit_now();
     }
 
-    /// The window's size, as it was last told of; asked of the display
-    /// only until it has been.
+    /// The window's size. On X11 asking is a round trip to the display,
+    /// many in a frame and behind a resize a long wait: there it is the size
+    /// as last told of. Elsewhere asking costs nothing, and is always right.
     fn window_size(&self) -> (u32, u32) {
         match self.size.get() {
             (0, _) | (_, 0) => self.window.as_ref().map_or((0, 0), |w| w.inner_size().into()),
             size => size,
         }
+    }
+
+    /// Whether the window is on X11, where its size is kept as told of.
+    fn on_x11(&self) -> bool {
+        use winit::raw_window_handle::RawDisplayHandle;
+        let handle = self.window.as_ref().and_then(|window| window.display_handle().ok());
+        handle.is_some_and(|handle| matches!(handle.as_raw(), RawDisplayHandle::Xlib(_) | RawDisplayHandle::Xcb(_)))
     }
 
     fn redraw(&self) {
@@ -4202,7 +4201,9 @@ impl ApplicationHandler<Event> for App {
             x11::mark_fullscreen(&window);
         }
         self.window = Some(window.clone());
-        self.size.set(window.inner_size().into());
+        if self.on_x11() {
+            self.size.set(window.inner_size().into());
+        }
         // The first video's window, made before this one, put inside it.
         if self.early_window.is_some() {
             self.video_window_id(usize::from(self.active));
@@ -4559,21 +4560,6 @@ impl App {
                 }
                 if self.options.debug {
                     eprintln!("jog: ptr out {:.0},{:.0}", self.mouse.0, self.mouse.1);
-                }
-                // Gone out through the bottom over a video, as on to a dock
-                // below a window not filling the screen: the bar was what it
-                // went for, and in one stride it may have passed over it
-                // without once being seen there. Up for a while, to come back
-                // into.
-                // Not when the window went from under a pointer that kept
-                // still, made smaller: last seen inside it, and not resized.
-                let height = f64::from(self.window_size().1);
-                let resizing = self.resized_at.is_some_and(|at| at.elapsed() < RESIZE_SETTLE);
-                if self.video.is_some() && self.grid.is_none() && !resizing && (height * 0.75..height).contains(&self.mouse.1) {
-                    self.time_until = Some(Instant::now() + BAR_AFTER_LEAVING);
-                    if self.options.debug {
-                        eprintln!("jog: bar peek (out bottom)");
-                    }
                 }
                 self.pointer_found = input::Arrival::Coming;
                 self.set_strip_hover(false);

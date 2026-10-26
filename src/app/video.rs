@@ -620,6 +620,8 @@ impl App {
             let key = (at as i64, (f64::from(bar.width) * at / length.max(1e-9)) as i32);
             self.time_key.replace(Some(key)) != Some(key)
         };
+        // The window's size, for a frame taken and let go below.
+        let window = self.window_size();
         let Some(video) = &mut self.video else { return };
         // One held ready by the spare player announced its frame before it
         // was this player, so that has to be looked for.
@@ -683,7 +685,6 @@ impl App {
         // any other, and takes its frames the same way.
         if matches!(signal, Signal::Frame) && !video.showing {
             // At the size it last drew at: another has it set itself up anew.
-            let window = self.size.get();
             let (width, height) = self.video_render.unwrap_or(window);
             ui::size_for(&mut self.scene, width as usize * height as usize);
             self.scene_key = None;
@@ -1235,25 +1236,6 @@ impl App {
     }
 
     /// Where playback is and how long the video is, in seconds.
-    /// For --debug: the step `video_time` gives up at, or none.
-    pub(super) fn video_time_why(&self) -> &'static str {
-        let (Some(player), Some(video)) = (self.player.as_ref(), self.video.as_ref()) else { return "noplayer" };
-        let open = player.text("path");
-        if !open.as_ref().is_some_and(|open| std::path::Path::new(open) == self.files[video.id].as_path()) {
-            return if open.as_ref().is_some_and(|open| open.as_bytes() == self.files[video.id].as_os_str().as_encoded_bytes()) { "path!=(bytes=)" } else { "path!=" };
-        }
-        if player.number("duration").filter(|length| *length > 0.0).is_none() {
-            return "dur";
-        }
-        match (self.back_shown(), video.seeking, video.aimed) {
-            (Some(_), ..) => "ok(back)",
-            (None, Some((at, _)), _) if at.elapsed() < SEEK_SETTLE => "ok(seeking)",
-            (None, _, Some(_)) => "ok(aimed)",
-            _ if player.number("time-pos").is_none() => "pos",
-            _ => "ok",
-        }
-    }
-
     pub(super) fn video_time(&self) -> Option<(f64, f64)> {
         let (player, video) = (self.player.as_ref()?, self.video.as_ref()?);
         // Until the player says it has this file open, what it says of the

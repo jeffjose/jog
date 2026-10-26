@@ -582,50 +582,6 @@ impl App {
         let bar_wanted = viewing && (self.hover.is_some() || self.time_until.is_some());
         // It rises from the bottom edge and sinks back into it.
         let bar_level = self.glide(&self.bar_rise, if bar_wanted { 1.0 } else { 0.0 }, EASE);
-        // Wanted, whether it is drawn, and if not, why not: told once each time it changes.
-        if self.options.debug {
-            let state = match (bar_wanted, self.video_time()) {
-                (false, _) => None,
-                (true, None) => Some(match self.player.as_ref() {
-                    None => "x no player".to_string(),
-                    // Where it is, as last told of and as asked now: the one
-                    // missing and the other there, what it says goes untold.
-                    Some(player) => {
-                        // No names: whether the open file's is this one's, by
-                        // path and by its bytes, and its lengths.
-                        let (open, file) = (player.text("path").unwrap_or_default(), self.video.as_ref().map(|video| self.files[video.id].clone()).unwrap_or_default());
-                        let same = if std::path::Path::new(&open) == file.as_path() { "eq" } else if open.as_bytes() == file.as_os_str().as_encoded_bytes() { "ne,b=" } else { "ne" };
-                        let num = |value: Option<f64>| value.map_or("-".to_string(), |value| format!("{value:.2}"));
-                        let flag = |value: Option<bool>| value.map_or("-", |on| if on { "1" } else { "0" });
-                        format!(
-                            "x p={same} pl={}/{} d={} t={}/{} pz={} eof={}",
-                            open.len(),
-                            file.as_os_str().len(),
-                            num(player.number("duration")),
-                            num(player.number("time-pos")),
-                            num(player.number_now("time-pos")),
-                            flag(player.flag("pause")),
-                            flag(player.flag("eof-reached")),
-                        )
-                    }
-                }),
-                (true, Some(_)) if bar_level >= 0.999 => Some(format!("drawn y{} {width}x{height}", self.seek_bar().middle)),
-                (true, Some(_)) => Some("rising".to_string()),
-            };
-            if *self.bar_said.borrow() != state {
-                if let Some(state) = &state {
-                    eprintln!("jog: bar {state}");
-                }
-                *self.bar_said.borrow_mut() = state;
-                self.bar_frames.set(0);
-            }
-            // The first frames drawn while it is wanted, each: whether frames
-            // come at all, and what each found.
-            if bar_wanted && self.bar_frames.get() < 8 {
-                self.bar_frames.set(self.bar_frames.get() + 1);
-                eprintln!("jog: bar f{} t={} {} l={bar_level:.2}", self.bar_frames.get(), if self.video_time().is_some() { "y" } else { "n" }, self.video_time_why());
-            }
-        }
         // Where the bar stands on a strip it comes up from behind it. What
         // the strip shows is kept while the bar is on its way, and put back
         // over whatever of the bar was drawn across it.
