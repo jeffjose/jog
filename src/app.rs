@@ -4565,8 +4565,11 @@ impl App {
                 // went for, and in one stride it may have passed over it
                 // without once being seen there. Up for a while, to come back
                 // into.
+                // Not when the window went from under a pointer that kept
+                // still, made smaller: last seen inside it, and not resized.
                 let height = f64::from(self.window_size().1);
-                if self.video.is_some() && self.grid.is_none() && self.mouse.1 >= height * 0.75 {
+                let resizing = self.resized_at.is_some_and(|at| at.elapsed() < RESIZE_SETTLE);
+                if self.video.is_some() && self.grid.is_none() && !resizing && (height * 0.75..height).contains(&self.mouse.1) {
                     self.time_until = Some(Instant::now() + BAR_AFTER_LEAVING);
                     if self.options.debug {
                         eprintln!("jog: bar peek (out bottom)");
