@@ -9,6 +9,7 @@ mod files;
 mod frame;
 mod heif;
 mod hdrmeta;
+mod info;
 mod history;
 mod loader;
 mod meta;
@@ -150,8 +151,9 @@ fn main() -> ExitCode {
     let started = std::time::Instant::now();
     // Shown as soon as the first files are found, the rest listed on other
     // threads and coming in as they are: unless what was asked for needs
-    // all of them first, as a file to start at, a filter or a conversion do.
-    let whole_first = options.listing.start_at.is_some() || options.filter.is_some() || options.convert_to.is_some();
+    // all of them first, as a file to start at, a filter, a conversion or
+    // --info do.
+    let whole_first = options.listing.start_at.is_some() || options.filter.is_some() || options.convert_to.is_some() || options.info;
     let mut scanning = None;
     let playlist = if whole_first {
         files::collect(&options.paths, &options.listing)
@@ -167,6 +169,10 @@ fn main() -> ExitCode {
             eprintln!("jog: no images or videos to show");
         }
         return ExitCode::FAILURE;
+    }
+    // --info: a line on each file, and no window.
+    if options.info {
+        return if info::print(&playlist.files) { ExitCode::SUCCESS } else { ExitCode::FAILURE };
     }
     match options.convert_to {
         Some(ConvertTo::Picture(format)) => {

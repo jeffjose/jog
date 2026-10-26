@@ -211,6 +211,8 @@ Workspaces are folders with names, set in the config file:
       --no-hitches           say nothing of late frames and stalls, which are
                              otherwise told of with their likely cause
                              (config: hitches = false)
+  -i, --info                 a line on each file: size, length, codecs, HDR;
+                             no window
   -h, --help [TOPIC]         show this help, or one topic of it
   -v, --version              show the version"),
     ("keys", "Keys", "
@@ -386,6 +388,8 @@ pub struct Options {
     pub benchmark: bool,
     pub debug: bool,
     pub verbose: bool,
+    /// Print a line about each file, what it is, and quit: --info.
+    pub info: bool,
     /// Whether a frame late or a stall is told of on the terminal.
     pub hitches: bool,
     /// Whether videos are decoded by the GPU, where one can.
@@ -577,6 +581,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
         '.' => "scale-down",
         'Z' => "auto-zoom",
         'r' => "recursive",
+        'i' => "info",
         'S' => "sort",
         'n' => "reverse",
         'z' => "random",
@@ -608,7 +613,7 @@ fn is_switch(name: &str) -> bool {
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "random",
         "newest", "oldest", "videos", "video", "images", "image", "pictures", "picture",
         "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
-        "debug", "verbose", "watch", "edit", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "hitches", "no-hitches", "hwdec", "no-hwdec", "gpu-video", "no-gpu-video", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
+        "debug", "verbose", "info", "watch", "edit", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "hitches", "no-hitches", "hwdec", "no-hwdec", "gpu-video", "no-gpu-video", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
     switches.contains(&name)
 }
@@ -665,6 +670,7 @@ fn parse_with(
         benchmark: false,
         debug: std::env::var_os("JOG_DEBUG").is_some(),
         verbose: false,
+        info: false,
         hitches: true,
         hwdec: true,
         gpu_video: true,
@@ -900,6 +906,7 @@ fn apply(
         "gpu-video" => options.gpu_video = true,
         "no-gpu-video" => options.gpu_video = false,
         "verbose" => options.verbose = true,
+        "info" => options.info = true,
         "watch" => options.watch = true,
         "edit" => options.edit = true,
         "positions" => options.resume = true,

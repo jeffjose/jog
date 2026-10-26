@@ -87,6 +87,7 @@ use devtools::{Block, DrawerPane, Pane};
 mod track_editor;
 mod editor;
 mod tracks;
+pub(crate) use tracks::codec_name;
 mod triaging;
 mod video;
 mod workspaces;
@@ -4048,7 +4049,7 @@ fn fps_words(fps: f64) -> String {
 }
 
 /// A playback time as `m:ss`, or `h:mm:ss` from an hour up.
-fn clock(seconds: f64) -> String {
+pub(crate) fn clock(seconds: f64) -> String {
     let total = seconds.max(0.0) as u64;
     let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
     if hours > 0 {
