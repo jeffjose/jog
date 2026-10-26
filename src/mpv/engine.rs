@@ -143,6 +143,9 @@ pub struct Engine {
     /// A file opened at the keyframe before where it was asked for: seeks
     /// are exact again once it is showing.
     keyframe_start: Cell<bool>,
+    /// The path last asked to be opened, as asked: mpv may tell of it in
+    /// another form, made absolute, and it is told of as asked then.
+    asked: RefCell<Option<std::path::PathBuf>>,
     /// The checks' shader for mpv to read, while there is one, drawing on
     /// the GPU: in memory, read by its path under /proc.
     checks_shader: RefCell<Option<std::os::fd::OwnedFd>>,
@@ -344,7 +347,7 @@ impl Engine {
             }
             let known = Mutex::new(vec![None; WATCHED.len()]);
             let watching = matches!(role, Role::Playback { .. });
-            Ok(Engine { api, handle, render, known, watching, hdr: Cell::new(None), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), keyframe_start: Cell::new(false), checks_shader: RefCell::new(None), drawing: std::sync::Arc::new(Mutex::new(())), _wake: wake, _library: library })
+            Ok(Engine { api, handle, render, known, watching, hdr: Cell::new(None), view_filter: RefCell::new(String::new()), next_tracks: RefCell::new(None), keyframe_start: Cell::new(false), asked: RefCell::new(None), checks_shader: RefCell::new(None), drawing: std::sync::Arc::new(Mutex::new(())), _wake: wake, _library: library })
         }
     }
 
@@ -390,9 +393,19 @@ impl Engine {
         unsafe { (self.api.command_async)(self.handle, tag, pointers.as_mut_ptr()) };
     }
 
+    /// The path mpv tells of, as the one asked to open was written, when
+    /// they are the same file; otherwise as told.
+    fn as_asked(&self, told: String) -> String {
+        match &*self.asked.borrow() {
+            Some(asked) if told.as_bytes() != asked.as_os_str().as_bytes() && same_file(Path::new(&told), asked) => asked.to_string_lossy().into_owned(),
+            _ => told,
+        }
+    }
+
     /// Opens a file in place of whatever was open, without changing whether
     /// the player is paused or waiting for it to load.
     pub fn open(&self, path: &Path) {
+        *self.asked.borrow_mut() = Some(path.to_path_buf());
         self.command_later(&[b"loadfile", path.as_os_str().as_bytes()]);
     }
 
@@ -406,6 +419,7 @@ impl Engine {
         self.keyframe_start.set(keyframe && from.is_some());
         let how = if keyframe { ",hr-seek=no" } else { "" };
         let start = from.map(|seconds| format!("start={seconds:.3}{how}"));
+        *self.asked.borrow_mut() = Some(path.to_path_buf());
         let mut arguments: Vec<&[u8]> = vec![b"loadfile", path.as_os_str().as_bytes()];
         if let Some(start) = &start {
             arguments.extend([b"replace".as_slice(), start.as_bytes()]);
@@ -425,6 +439,7 @@ impl Engine {
             self.set(name, value);
         }
         let start = from.map(|seconds| format!("start={seconds:.3}"));
+        *self.asked.borrow_mut() = Some(path.to_path_buf());
         let mut arguments: Vec<&[u8]> = vec![b"loadfile", path.as_os_str().as_bytes()];
         if let Some(start) = &start {
             arguments.extend([b"replace".as_slice(), start.as_bytes()]);
@@ -573,6 +588,13 @@ impl Engine {
                             }
                             _ => None,
                         }
+                    };
+                    // The file open, told of by mpv in its own form, made
+                    // absolute by some: as it was asked by, when it is the
+                    // same file, for what is compared with it.
+                    let value = match value {
+                        Some(Known::Text(told)) if WATCHED[index].0 == "path" => Some(Known::Text(self.as_asked(told))),
+                        other => other,
                     };
                     if WATCHED[index].0 == "eof-reached" && matches!(value, Some(Known::Flag(true))) {
                         events.push(PlayerEvent::AtEnd);
@@ -793,5 +815,40 @@ fn note_render(took: std::time::Duration, size: (u32, u32)) {
         let at = |share: f64| times[((times.len() - 1) as f64 * share) as usize];
         eprintln!("RENDERSTATS size={}x{} render_p50={:.1} render_p95={:.1} render_max={:.1}", size.0, size.1, at(0.5), at(0.95), at(1.0));
         times.clear();
+    }
+}
+
+/// Whether two paths are of the one file: as written, made absolute, or,
+/// failing those, as the file system resolves them.
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b
+        || std::path::absolute(a).ok().zip(std::path::absolute(b).ok()).is_some_and(|(a, b)| a == b)
+        || std::fs::canonicalize(a).ok().zip(std::fs::canonicalize(b).ok()).is_some_and(|(a, b)| a == b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_file;
+    use std::path::Path;
+
+    #[test]
+    fn one_file_however_its_path_is_written() {
+        let dir = std::env::temp_dir().join(format!("jog-same-file-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/a.mp4"), b"").unwrap();
+        std::fs::write(dir.join("b.mp4"), b"").unwrap();
+        let _ = std::os::unix::fs::symlink(dir.join("sub"), dir.join("link"));
+        let a = dir.join("sub/a.mp4");
+        // As mpv may tell of a file: with a . or a .. in its path, or by
+        // the folder a link leads to.
+        let found = [
+            same_file(&dir.join("sub/./a.mp4"), &a),
+            same_file(&dir.join("sub/../sub/a.mp4"), &a),
+            same_file(&dir.join("link/a.mp4"), &a),
+            same_file(&dir.join("b.mp4"), &a),
+            same_file(Path::new("a.mp4"), &a),
+        ];
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found, [true, true, true, false, false]);
     }
 }
