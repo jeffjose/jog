@@ -120,13 +120,14 @@ impl App {
         if let Some(at) = self.small_at(size, window.available_monitors()).or(middle) {
             window.set_outer_position(at);
         }
-        // A window manager putting back the size from before fullscreen
-        // does so after this; asked again once it has. Jog's own size, not
-        // one to keep as the user's: said so before asking, as on Wayland
-        // the size is had at once.
-        self.small_wanted = Some(size);
+        // Jog's own size, not one to keep as the user's: said so before
+        // asking, as on Wayland the size is had at once. A window manager
+        // putting back the size from before fullscreen does so after this,
+        // and it is asked for again once it has: wanted still after the
+        // size had at once.
         self.sized_here = Some(size);
         self.ask_size(size);
+        self.small_wanted = Some(size);
     }
 
     /// The window has a new size: told of by the display, or given at once
