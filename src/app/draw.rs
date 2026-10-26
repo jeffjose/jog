@@ -615,7 +615,7 @@ impl App {
             // come at all, and what each found.
             if bar_wanted && self.bar_frames.get() < 8 {
                 self.bar_frames.set(self.bar_frames.get() + 1);
-                eprintln!("jog: bar f{} t={:?} lvl={bar_level:.2} {width}x{height}", self.bar_frames.get(), self.video_time());
+                eprintln!("jog: bar f{} t={:?} why={} lvl={bar_level:.2} {width}x{height}", self.bar_frames.get(), self.video_time(), self.video_time_why());
             }
         }
         // Where the bar stands on a strip it comes up from behind it. What

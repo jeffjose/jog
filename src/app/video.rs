@@ -1235,6 +1235,25 @@ impl App {
     }
 
     /// Where playback is and how long the video is, in seconds.
+    /// For --debug: the step `video_time` gives up at, or none.
+    pub(super) fn video_time_why(&self) -> &'static str {
+        let (Some(player), Some(video)) = (self.player.as_ref(), self.video.as_ref()) else { return "noplayer" };
+        let open = player.text("path");
+        if !open.as_ref().is_some_and(|open| std::path::Path::new(open) == self.files[video.id].as_path()) {
+            return if open.as_ref().is_some_and(|open| open.as_bytes() == self.files[video.id].as_os_str().as_encoded_bytes()) { "path!=(bytes=)" } else { "path!=" };
+        }
+        if player.number("duration").filter(|length| *length > 0.0).is_none() {
+            return "dur";
+        }
+        match (self.back_shown(), video.seeking, video.aimed) {
+            (Some(_), ..) => "ok(back)",
+            (None, Some((at, _)), _) if at.elapsed() < SEEK_SETTLE => "ok(seeking)",
+            (None, _, Some(_)) => "ok(aimed)",
+            _ if player.number("time-pos").is_none() => "pos",
+            _ => "ok",
+        }
+    }
+
     pub(super) fn video_time(&self) -> Option<(f64, f64)> {
         let (player, video) = (self.player.as_ref()?, self.video.as_ref()?);
         // Until the player says it has this file open, what it says of the
