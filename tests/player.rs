@@ -237,3 +237,78 @@ fn the_next_video_is_paused_only_when_the_user_paused() {
     assert!(!said.contains("opened paused"), "and plays:\n{said}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A 4-second video, made once for the seek bar's tests.
+fn bar_video(name: &str) -> Option<PathBuf> {
+    let dir = std::env::temp_dir().join("jog-player").join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).ok()?;
+    let made = Command::new("ffmpeg")
+        .args(["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=4", "-c:v", "libx264", "-pix_fmt", "yuv420p"])
+        .arg(dir.join("clip.mp4"))
+        .status()
+        .ok()?;
+    made.success().then_some(dir)
+}
+
+/// What jog drew, run in `dir` on `file` (as given: relative or not) with
+/// these keys: the video paused first, so that each picture is of one frame.
+fn bar_shot(dir: &Path, file: &Path, keys: &str) -> RgbImage {
+    let out = dir.join(format!("shot-{}.ppm", keys.len()));
+    let output = Command::new(env!("CARGO_BIN_EXE_jog"))
+        .args(["--no-animations", "--no-positions", "-g", "640x400"])
+        .arg(file)
+        .current_dir(dir)
+        .env("JOG_CONFIG", "/dev/null")
+        .env("JOG_STATE", dir.join("state"))
+        .env("JOG_SNAPSHOT", &out)
+        .env("JOG_SNAPSHOT_KEYS", format!("{{Wait}}{{Space}}{{Wait}}{{Wait}}{{Wait}}{keys}{{Wait}}"))
+        .env("JOG_SNAPSHOT_WAIT", "700")
+        .output()
+        .expect("jog runs");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    image::open(&out).unwrap_or_else(|error| panic!("no snapshot: {error}")).to_rgb8()
+}
+
+/// The share of the bottom rows of `a` and `b` that differ: the seek bar
+/// up in one and not the other.
+fn bottom_differs(a: &RgbImage, b: &RgbImage) -> f64 {
+    let (w, h) = a.dimensions();
+    let rows = (h - h / 8)..h;
+    let differ = rows.clone().flat_map(|y| (0..w).map(move |x| (x, y))).filter(|(x, y)| a.get_pixel(*x, *y).0.iter().zip(b.get_pixel(*x, *y).0).any(|(p, q)| p.abs_diff(q) > 24)).count();
+    differ as f64 / f64::from(w * (rows.end - rows.start))
+}
+
+#[test]
+fn the_seek_bar_comes_up_at_the_bottom_and_not_elsewhere() {
+    if !display() || !libmpv() {
+        return;
+    }
+    let Some(dir) = bar_video("bar") else { return };
+    let clip = dir.join("clip.mp4");
+    let middle = bar_shot(&dir, &clip, "{Move:320,150}{Move:330,160}");
+    let bottom = bar_shot(&dir, &clip, "{Move:320,150}{Move:330,390}");
+    let elsewhere = bar_shot(&dir, &clip, "{Move:320,150}{Move:330,100}");
+    assert!(bottom_differs(&middle, &bottom) > 0.2, "the bar is up with the pointer at the bottom");
+    assert!(bottom_differs(&middle, &elsewhere) < 0.02, "and not with it anywhere else");
+    // Opened by a name relative to where jog runs, as typed.
+    let relative = bar_shot(&dir, Path::new("clip.mp4"), "{Move:320,150}{Move:330,390}");
+    assert!(bottom_differs(&middle, &relative) > 0.2, "the bar is up for a file opened by a relative name");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_seek_bar_follows_the_window_to_a_new_size() {
+    if !display() || !libmpv() {
+        return;
+    }
+    let Some(dir) = bar_video("bar-size") else { return };
+    let clip = dir.join("clip.mp4");
+    // Made smaller, as leaving fullscreen does; the pointer then at the
+    // bottom of the window as it is now.
+    let still = bar_shot(&dir, &clip, "{Size:480x300}{Wait}{Move:240,100}{Move:250,110}");
+    let up = bar_shot(&dir, &clip, "{Size:480x300}{Wait}{Move:240,100}{Move:250,292}");
+    assert_eq!(up.dimensions(), (480, 300), "drawn at the size the window was made");
+    assert!(bottom_differs(&still, &up) > 0.2, "the bar is up at the bottom of the window as it is now");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -77,6 +77,14 @@ impl App {
                         self.mouse_moved(x.parse().unwrap_or(0.0), y.parse().unwrap_or(0.0));
                         continue;
                     }
+                    // `{Size:WxH}` asks for the window to be that size, as
+                    // leaving fullscreen does.
+                    if let Some((w, h)) = name.strip_prefix("Size:").and_then(|size| size.split_once('x')) {
+                        if let (Ok(w), Ok(h)) = (w.parse(), h.parse()) {
+                            self.ask_size((w, h));
+                        }
+                        continue;
+                    }
                     // `{Jump:F}` goes F of the way along the video, as a
                     // click on the seek bar there does.
                     if let Some(fraction) = name.strip_prefix("Jump:").and_then(|f| f.parse().ok()) {
