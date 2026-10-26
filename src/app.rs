@@ -1204,6 +1204,8 @@ pub struct App {
     /// The window's size when last an ordinary one, and the small size
     /// asked for, to be asked again once a window manager has had its say.
     windowed: Option<(u32, u32)>,
+    /// Where the window was last while an ordinary one: its top left.
+    windowed_at: Option<(i32, i32)>,
     small_wanted: Option<(u32, u32)>,
     /// The size jog itself last gave the window: not one to keep.
     sized_here: Option<(u32, u32)>,
@@ -1981,6 +1983,7 @@ impl App {
             monitor: (0, 0),
             size: Cell::new((0, 0)),
             windowed: None,
+            windowed_at: None,
             small_wanted: None,
             sized_here: None,
             shown: None,
@@ -4167,6 +4170,10 @@ impl ApplicationHandler<Event> for App {
             let (width, height) = self.options.geometry.unwrap_or_else(|| self.small_size());
             self.sized_here = Some((width, height));
             attributes = attributes.with_inner_size(PhysicalSize::new(width.max(1), height.max(1)));
+            // Where it was last, while that is on a monitor still.
+            if let Some(at) = self.small_at((width, height), event_loop.available_monitors()) {
+                attributes = attributes.with_position(at);
+            }
         }
         let creating = Instant::now();
         let window = Arc::new(event_loop.create_window(attributes).expect("failed to create window"));
@@ -4481,6 +4488,7 @@ impl App {
                 let _drawing = crate::mpv::drawing();
                 self.draw();
             }
+            WindowEvent::Moved(at) => self.note_window_moved(at),
             WindowEvent::Resized(size) => {
                 self.size.set((size.width, size.height));
                 if self.options.debug {
