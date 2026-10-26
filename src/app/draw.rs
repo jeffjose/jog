@@ -590,16 +590,24 @@ impl App {
                     None => "x no player".to_string(),
                     // Where it is, as last told of and as asked now: the one
                     // missing and the other there, what it says goes untold.
-                    Some(player) => format!(
-                        "x open={:?} dur={:?} file={:?} pos={:?}/{:?} pause={:?} eof={:?}",
-                        player.text("path"),
-                        player.number("duration"),
-                        self.video.as_ref().map(|video| self.files[video.id].display().to_string()),
-                        player.number("time-pos"),
-                        player.number_now("time-pos"),
-                        player.flag("pause"),
-                        player.flag("eof-reached"),
-                    ),
+                    Some(player) => {
+                        // No names: whether the open file's is this one's, by
+                        // path and by its bytes, and its lengths.
+                        let (open, file) = (player.text("path").unwrap_or_default(), self.video.as_ref().map(|video| self.files[video.id].clone()).unwrap_or_default());
+                        let same = if std::path::Path::new(&open) == file.as_path() { "eq" } else if open.as_bytes() == file.as_os_str().as_encoded_bytes() { "ne,b=" } else { "ne" };
+                        let num = |value: Option<f64>| value.map_or("-".to_string(), |value| format!("{value:.2}"));
+                        let flag = |value: Option<bool>| value.map_or("-", |on| if on { "1" } else { "0" });
+                        format!(
+                            "x p={same} pl={}/{} d={} t={}/{} pz={} eof={}",
+                            open.len(),
+                            file.as_os_str().len(),
+                            num(player.number("duration")),
+                            num(player.number("time-pos")),
+                            num(player.number_now("time-pos")),
+                            flag(player.flag("pause")),
+                            flag(player.flag("eof-reached")),
+                        )
+                    }
                 }),
                 (true, Some(_)) if bar_level >= 0.999 => Some(format!("drawn y{} {width}x{height}", self.seek_bar().middle)),
                 (true, Some(_)) => Some("rising".to_string()),
@@ -615,7 +623,7 @@ impl App {
             // come at all, and what each found.
             if bar_wanted && self.bar_frames.get() < 8 {
                 self.bar_frames.set(self.bar_frames.get() + 1);
-                eprintln!("jog: bar f{} t={:?} why={} lvl={bar_level:.2} {width}x{height}", self.bar_frames.get(), self.video_time(), self.video_time_why());
+                eprintln!("jog: bar f{} t={} {} l={bar_level:.2}", self.bar_frames.get(), if self.video_time().is_some() { "y" } else { "n" }, self.video_time_why());
             }
         }
         // Where the bar stands on a strip it comes up from behind it. What
