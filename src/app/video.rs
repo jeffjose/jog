@@ -333,7 +333,7 @@ impl App {
             let (w, h) = self.window_size();
             let scale = self.window.as_ref().map_or(1.0, |window| window.scale_factor());
             let (word, top, bottom) = (if hover.is_some() { "up" } else { "down" }, zone.start, zone.end);
-            eprintln!("jog: seek bar {word}: pointer at {x:.0},{y:.0} in {w}x{h} at scale {scale}, bar answers to y {top:.0} to {bottom:.0}");
+            eprintln!("jog: bar {word} ptr {x:.0},{y:.0} win {w}x{h} x{scale} zone {top:.0}-{bottom:.0}");
         }
         if hover != self.hover {
             self.hover = hover;

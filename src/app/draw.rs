@@ -587,11 +587,11 @@ impl App {
             let state = match (bar_wanted, self.video_time()) {
                 (false, _) => None,
                 (true, None) => Some(match self.player.as_ref() {
-                    None => "not drawn: no player".to_string(),
+                    None => "x no player".to_string(),
                     // Where it is, as last told of and as asked now: the one
                     // missing and the other there, what it says goes untold.
                     Some(player) => format!(
-                        "not drawn: the player has open {:?}, {:?} long, and this is {:?}; at {:?} as told, {:?} asked now; paused {:?}, at the end {:?}",
+                        "x open={:?} dur={:?} file={:?} pos={:?}/{:?} pause={:?} eof={:?}",
                         player.text("path"),
                         player.number("duration"),
                         self.video.as_ref().map(|video| self.files[video.id].display().to_string()),
@@ -601,12 +601,12 @@ impl App {
                         player.flag("eof-reached"),
                     ),
                 }),
-                (true, Some(_)) if bar_level >= 0.999 => Some(format!("drawn, all the way up, at y {} of a {width}x{height} frame", self.seek_bar().middle)),
+                (true, Some(_)) if bar_level >= 0.999 => Some(format!("drawn y{} {width}x{height}", self.seek_bar().middle)),
                 (true, Some(_)) => Some("rising".to_string()),
             };
             if *self.bar_said.borrow() != state {
                 if let Some(state) = &state {
-                    eprintln!("jog: seek bar {state}");
+                    eprintln!("jog: bar {state}");
                 }
                 *self.bar_said.borrow_mut() = state;
                 self.bar_frames.set(0);
@@ -615,7 +615,7 @@ impl App {
             // come at all, and what each found.
             if bar_wanted && self.bar_frames.get() < 8 {
                 self.bar_frames.set(self.bar_frames.get() + 1);
-                eprintln!("jog: seek bar frame {}: time {:?}, risen {bar_level:.2}, frame {width}x{height}", self.bar_frames.get(), self.video_time());
+                eprintln!("jog: bar f{} t={:?} lvl={bar_level:.2} {width}x{height}", self.bar_frames.get(), self.video_time());
             }
         }
         // Where the bar stands on a strip it comes up from behind it. What

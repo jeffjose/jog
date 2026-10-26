@@ -4220,8 +4220,8 @@ impl ApplicationHandler<Event> for App {
                 Ok(winit::raw_window_handle::RawDisplayHandle::Xlib(_) | winit::raw_window_handle::RawDisplayHandle::Xcb(_)) => "X11",
                 _ => "an unknown display",
             };
-            let drawn = if crate::mpv::gpu_video() { "by the player, on the GPU, with jog's UI laid over it" } else { "by jog, with its UI" };
-            eprintln!("jog: on {backend} at scale {}: videos drawn {drawn}", window.scale_factor());
+            let drawn = if crate::mpv::gpu_video() { "gpu" } else { "sw" };
+            eprintln!("jog: {backend} x{} video:{drawn}", window.scale_factor());
         }
         // The buffers a frame goes through are given their size now, as
         // pages the system hands out blank, which cost nothing until they
@@ -4506,12 +4506,12 @@ impl App {
                 self.draw();
             }
             WindowEvent::Moved(at) => self.note_window_moved(at),
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } if self.options.debug => eprintln!("jog: window scale now {scale_factor}"),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } if self.options.debug => eprintln!("jog: scale x{scale_factor}"),
             WindowEvent::Resized(size) => {
                 self.size.set((size.width, size.height));
                 if self.options.debug {
                     let scale = self.window.as_ref().map_or(1.0, |window| window.scale_factor());
-                    eprintln!("jog: window resized to {}x{} at scale {scale}", size.width, size.height);
+                    eprintln!("jog: resize {}x{} x{scale}", size.width, size.height);
                 }
                 self.update_monitor();
                 self.settle_small(size);
@@ -4578,7 +4578,7 @@ impl App {
                     return;
                 }
                 if self.options.debug {
-                    eprintln!("jog: window left by the pointer, last at {:.0},{:.0}", self.mouse.0, self.mouse.1);
+                    eprintln!("jog: ptr out {:.0},{:.0}", self.mouse.0, self.mouse.1);
                 }
                 // Gone out through the bottom over a video, as on to a dock
                 // below a window not filling the screen: the bar was what it
@@ -4589,7 +4589,7 @@ impl App {
                 if self.video.is_some() && self.grid.is_none() && self.mouse.1 >= height * 0.75 {
                     self.time_until = Some(Instant::now() + BAR_AFTER_LEAVING);
                     if self.options.debug {
-                        eprintln!("jog: seek bar up a while: the pointer left through the bottom");
+                        eprintln!("jog: bar peek (out bottom)");
                     }
                 }
                 self.pointer_found = input::Arrival::Coming;

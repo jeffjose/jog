@@ -291,7 +291,7 @@ impl App {
             Arrival::Coming => {
                 self.pointer_found = Arrival::At(x, y);
                 if self.options.debug {
-                    eprintln!("jog: pointer came in at {x:.0},{y:.0}: nothing along the bottom until it moves");
+                    eprintln!("jog: ptr in {x:.0},{y:.0}");
                 }
                 false
             }
@@ -299,7 +299,7 @@ impl App {
             Arrival::At(..) => {
                 self.pointer_found = Arrival::Moved;
                 if self.options.debug {
-                    eprintln!("jog: pointer moving, at {x:.0},{y:.0}");
+                    eprintln!("jog: ptr moving {x:.0},{y:.0}");
                 }
                 true
             }
