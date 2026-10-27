@@ -407,15 +407,26 @@ impl App {
     /// Keeps the tracks and timing of the video on view for the next time
     /// it is opened.
     pub(super) fn remember_tracks(&mut self) {
+        // Picked in the picker, as it has them: the player, told just now,
+        // may not have them on yet.
+        let picked = |kind| self.track_picker.as_ref().and_then(|picker| picker.tracks.iter().find(|t| t.kind == kind && t.selected)).map(|t| t.id);
+        let (aid, sid) = (picked(TrackKind::Audio), picked(TrackKind::Sub));
+        self.remember_tracks_as(aid, sid);
+    }
+
+    /// As `remember_tracks`, with the audio and subtitle tracks just picked
+    /// where they are known: asked of the player straight after it is told
+    /// of them, it says what it had.
+    pub(super) fn remember_tracks_as(&mut self, aid: Option<i64>, sid: Option<i64>) {
         let (Some(player), Some(video)) = (&self.player, &self.video) else { return };
         let path = std::path::absolute(&self.files[video.id]).unwrap_or_else(|_| self.files[video.id].clone());
         let number = |property: &str| player.text(property).and_then(|value| value.parse::<i64>().ok());
         let sid = match self.subtitles {
             false => Some(None),
-            true => number("sid").map(Some),
+            true => sid.or_else(|| number("sid")).map(Some),
         };
         let choice = TrackChoice {
-            aid: number("aid"),
+            aid: aid.or_else(|| number("aid")),
             sid,
             sub_delay: player.number("sub-delay").unwrap_or(0.0),
             audio_delay: player.number("audio-delay").unwrap_or(0.0),
@@ -424,13 +435,13 @@ impl App {
         memory.insert(path, choice);
         write_memory(memory);
         // The info overlay's words for them: from the picker, which knows
-        // what was just picked; otherwise asked of the player again soon.
+        // what was just picked; otherwise said again as the player tells of
+        // the change. How many tracks there are stays: forgotten, the bar's
+        // buttons for them went until the player was asked again, which
+        // paused could be a long while.
         let words = self.track_picker.as_ref().map(|picker| playing_words(&picker.tracks, self.subtitles));
-        if let Some(video) = &mut self.video {
-            match words {
-                Some(words) => video.track_words = words,
-                None => video.tracks = None,
-            }
+        if let (Some(video), Some(words)) = (&mut self.video, words) {
+            video.track_words = words;
         }
     }
 

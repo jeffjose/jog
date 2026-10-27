@@ -635,11 +635,14 @@ impl App {
         // again, the bar on its way up moving the subtitles' margin: a
         // round of frames as fast as the answers come, until it stops.
         let mut changed = matches!(signal, Signal::Frame);
+        // A property told of as changed, the tracks chosen among them.
+        let mut told = false;
         for event in events {
             if event == PlayerEvent::AtEnd {
                 at_end = true;
                 continue;
             }
+            told |= event == PlayerEvent::Changed;
             if event == PlayerEvent::Changed || (event == PlayerEvent::Moved && time_shown && time_moved) {
                 changed = true;
                 continue;
@@ -705,6 +708,10 @@ impl App {
         let asked = video.tracks.is_none() && video.shown_at.is_some_and(|at| at.elapsed() >= TRACKS_AFTER);
         if asked {
             video.tracks = Some((tracks_of(player, "sub").len(), tracks_of(player, "audio").len()));
+        }
+        // Which of them plays is said again as the player tells of a change,
+        // a track picked among them one: how many there are stays as it was.
+        if asked || (told && video.tracks.is_some()) {
             video.track_words = tracks::playing_words(&tracks::track_list(player), self.subtitles);
         }
         let (id, showing) = (video.id, video.showing);
@@ -906,19 +913,28 @@ impl App {
         }
         let showing = tracks.iter().position(|track| track.selected).filter(|_| self.subtitles);
         let next = match showing {
-            None => tracks.first(),
-            Some(at) => tracks.get(at + 1),
+            None => Some(0),
+            Some(at) => Some(at + 1).filter(|next| *next < tracks.len()),
         };
-        if let Some(track) = next {
+        self.pick_subtitles(next);
+    }
+
+    /// The video's subtitle track so many along, or none.
+    pub(super) fn pick_subtitles(&mut self, at: Option<usize>) {
+        let Some(player) = self.player.as_ref().filter(|_| self.video.is_some()) else { return };
+        let tracks = tracks_of(player, "sub");
+        let track = at.and_then(|at| tracks.get(at));
+        if let Some(track) = track {
             player.set("sid", &track.id.to_string());
         }
-        self.subtitles = next.is_some();
-        self.remember_tracks();
-        self.apply_subtitles();
-        self.toast(match next {
+        self.subtitles = track.is_some();
+        let said = match track {
             Some(track) => format!("{}  {}", commands::icons::CAPTIONS, track.name),
             None => format!("{}  Subtitles off", commands::icons::CAPTIONS_OFF),
-        });
+        };
+        self.remember_tracks_as(None, track.map(|track| track.id));
+        self.apply_subtitles();
+        self.toast(said);
     }
 
     /// Steps on to the video's next audio track, and round to the first.
@@ -929,9 +945,17 @@ impl App {
             return self.toast(if tracks.is_empty() { "No sound" } else { "One audio track" });
         }
         let at = tracks.iter().position(|track| track.selected).map_or(0, |at| (at + 1) % tracks.len());
-        player.set("aid", &tracks[at].id.to_string());
-        let said = format!("{}  {}  ·  {} of {}", commands::icons::AUDIO_LINES, tracks[at].name, at + 1, tracks.len());
-        self.remember_tracks();
+        self.pick_audio(at);
+    }
+
+    /// The video's audio track so many along.
+    pub(super) fn pick_audio(&mut self, at: usize) {
+        let Some(player) = self.player.as_ref().filter(|_| self.video.is_some()) else { return };
+        let tracks = tracks_of(player, "audio");
+        let Some(track) = tracks.get(at) else { return };
+        player.set("aid", &track.id.to_string());
+        let said = format!("{}  {}  ·  {} of {}", commands::icons::AUDIO_LINES, track.name, at + 1, tracks.len());
+        self.remember_tracks_as(Some(track.id), None);
         self.toast(said);
     }
 
@@ -952,10 +976,10 @@ impl App {
         // the cog, a menu of speeds and tracks; then how it plays.
         let mut buttons = vec![Command::ToggleFullscreen, Command::PlaybackSettings, Command::CycleLoop, Command::ToggleMute];
         if subtitles > 0 {
-            buttons.push(Command::CycleSubtitles);
+            buttons.push(Command::SubtitleTracks);
         }
         if audio > 1 {
-            buttons.push(Command::CycleAudio);
+            buttons.push(Command::AudioTracks);
         }
         buttons
     }

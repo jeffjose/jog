@@ -95,6 +95,16 @@ pub enum Command {
     CycleSubtitles,
     /// Step through a video's audio tracks.
     CycleAudio,
+    /// A menu of a video's subtitle tracks, over the bar's button for them:
+    /// none, and each track.
+    SubtitleTracks,
+    /// A menu of a video's audio tracks, over the bar's button for them.
+    AudioTracks,
+    /// The video's subtitle track so many along, from the first; or none.
+    PickSubtitles(u8),
+    SubtitlesOff,
+    /// The video's audio track so many along, from the first.
+    PickAudio(u8),
     /// The picker of a video's audio and subtitle tracks.
     TrackPicker,
     /// What the file is made of: its streams, HDR, tags and chapters.
@@ -621,7 +631,7 @@ pub fn command_icon(command: Command) -> &'static str {
         SpeedDown => CHEVRONS_LEFT,
         SpeedReset => GAUGE,
         // A list of speeds: the one playing ticked, the rest plain.
-        SetSpeed(_) => "",
+        SetSpeed(_) | PickSubtitles(_) | SubtitlesOff | PickAudio(_) => "",
         PlaybackSettings => SETTINGS,
         VolumeUp => VOLUME_2,
         VolumeDown => VOLUME_1,
@@ -629,8 +639,8 @@ pub fn command_icon(command: Command) -> &'static str {
         CycleLoop => REPEAT,
         TogglePrecise => SCAN,
         ToggleScenes => CLAPPERBOARD,
-        CycleSubtitles => CAPTIONS,
-        CycleAudio | TrackPicker => AUDIO_LINES,
+        CycleSubtitles | SubtitleTracks => CAPTIONS,
+        CycleAudio | AudioTracks | TrackPicker => AUDIO_LINES,
         Inspect => EYE,
         EditTracks => AUDIO_LINES,
         Edit => EDIT,
@@ -1083,6 +1093,34 @@ const SPEED_MENU: &[Option<MenuItem>] = &[
 pub const PLAYBACK_MENU: &[Option<MenuItem>] = &[
     submenu("Speed", SPEED_MENU, Applies::Videos),
     video_item("Audio and subtitles…", "Ctrl+J", Command::TrackPicker),
+];
+
+/// The bar's subtitles button: none, then each track the video has, the
+/// one showing ticked. Named as the video names them; those past its last
+/// are left out.
+pub const SUBTITLE_TRACKS_MENU: &[Option<MenuItem>] = &[
+    video_item("Off", "", Command::SubtitlesOff),
+    None,
+    video_item("", "", Command::PickSubtitles(0)),
+    video_item("", "", Command::PickSubtitles(1)),
+    video_item("", "", Command::PickSubtitles(2)),
+    video_item("", "", Command::PickSubtitles(3)),
+    video_item("", "", Command::PickSubtitles(4)),
+    video_item("", "", Command::PickSubtitles(5)),
+    video_item("", "", Command::PickSubtitles(6)),
+    video_item("", "", Command::PickSubtitles(7)),
+];
+
+/// The bar's audio button: each audio track the video has, as above.
+pub const AUDIO_TRACKS_MENU: &[Option<MenuItem>] = &[
+    video_item("", "", Command::PickAudio(0)),
+    video_item("", "", Command::PickAudio(1)),
+    video_item("", "", Command::PickAudio(2)),
+    video_item("", "", Command::PickAudio(3)),
+    video_item("", "", Command::PickAudio(4)),
+    video_item("", "", Command::PickAudio(5)),
+    video_item("", "", Command::PickAudio(6)),
+    video_item("", "", Command::PickAudio(7)),
 ];
 
 /// The seek bar right-clicked away from a section: at the time clicked.

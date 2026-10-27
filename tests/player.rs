@@ -312,3 +312,76 @@ fn the_seek_bar_follows_the_window_to_a_new_size() {
     assert!(bottom_differs(&still, &up) > 0.2, "the bar is up at the bottom of the window as it is now");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_bar_keeps_its_track_buttons_when_a_track_is_changed_while_paused() {
+    if !display() || !libmpv() {
+        return;
+    }
+    // Two audio tracks, so that the bar has a button for them.
+    let dir = std::env::temp_dir().join("jog-player").join("bar-tracks");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let made = Command::new("ffmpeg")
+        .args(["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=4"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-f", "lavfi", "-i", "sine=frequency=660:duration=4"])
+        .args(["-map", "0", "-map", "1", "-map", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+        .arg(dir.join("clip.mkv"))
+        .status();
+    if !made.is_ok_and(|status| status.success()) {
+        return;
+    }
+    let clip = dir.join("clip.mkv");
+    let before = bar_shot(&dir, &clip, "{Move:320,150}{Move:330,390}");
+    let after = bar_shot(&dir, &clip, "J{Wait}{Wait}{Wait}{Move:320,150}{Move:330,390}");
+    // The buttons at the right of the bar, as they were: none gone.
+    let (w, h) = before.dimensions();
+    let buttons = |image: &RgbImage| image::imageops::crop_imm(image, w * 3 / 4, h - h / 10, w / 4, h / 10).to_image();
+    let (a, b) = (buttons(&before), buttons(&after));
+    let differ = a.pixels().zip(b.pixels()).filter(|(p, q)| p.0.iter().zip(q.0).any(|(x, y)| x.abs_diff(y) > 24)).count();
+    assert!(differ < (a.width() * a.height()) as usize / 50, "the bar's buttons changed: {differ} pixels");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_track_picked_from_the_bar_is_played_and_kept_for_next_time() {
+    if !display() || !libmpv() {
+        return;
+    }
+    // Two audio tracks, so the bar has its audio button; at 1600x1000 it
+    // stands at 1457,974 (no subtitles, so no button for them beside it),
+    // the menu opening over it.
+    let dir = std::env::temp_dir().join("jog-player").join("bar-pick");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("videos")).unwrap();
+    let made = Command::new("ffmpeg")
+        .args(["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=6"])
+        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=6", "-f", "lavfi", "-i", "sine=frequency=660:duration=6"])
+        .args(["-map", "0", "-map", "1", "-map", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+        .arg(dir.join("videos/clip.mkv"))
+        .status();
+    if !made.is_ok_and(|status| status.success()) {
+        return;
+    }
+    let run = |keys: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_jog"))
+            .args(["--no-animations", "-g", "1600x1000"])
+            .arg(dir.join("videos"))
+            .env("JOG_CONFIG", "/dev/null")
+            .env("JOG_STATE", dir.join("state"))
+            .env("JOG_SNAPSHOT", "/dev/null")
+            .env("JOG_SNAPSHOT_KEYS", format!("{{Wait}}{{Space}}{{Wait}}{{Wait}}{{Wait}}{{Move:800,500}}{{Move:800,960}}{{Wait}}{keys}{{Wait}}"))
+            .env("JOG_SNAPSHOT_WAIT", "600")
+            .output()
+            .expect("jog runs");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        // The audio track kept for the video: the first field of its line.
+        let kept = std::fs::read_to_string(dir.join("state/tracks")).unwrap_or_default();
+        kept.lines().next().and_then(|line| line.split('\t').next()).unwrap_or_default().to_string()
+    };
+    // The second track picked from the menu over the button.
+    assert_eq!(run("{Move:1457,974}{Click}{Wait}{Down}{Down}{Enter}"), "2", "the track picked is kept");
+    // Opened again on it: the next track from there is the first.
+    assert_eq!(run("J"), "1", "opened again, the video plays the track kept");
+    let _ = std::fs::remove_dir_all(&dir);
+}

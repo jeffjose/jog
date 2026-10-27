@@ -180,8 +180,24 @@ impl App {
     /// What a menu item is called. Copying and moving name the folder
     /// they go to, when `-o` has set one.
     pub(super) fn menu_label(&self, item: &MenuItem) -> String {
+        // A track, by the name the video gives it.
+        match item.command {
+            Command::PickAudio(at) => return self.nth_track("audio", at).map(|track| track.name).unwrap_or_default(),
+            Command::PickSubtitles(at) => return self.nth_track("sub", at).map(|track| track.name).unwrap_or_default(),
+            _ => {}
+        }
         let output = self.options.output_dir.as_deref().map(short_dir);
         Self::label_for(item, output.as_deref())
+    }
+
+    /// Whether a menu item is there to be had: a video's track past its
+    /// last is not.
+    pub(super) fn menu_item_there(&self, item: &MenuItem) -> bool {
+        match item.command {
+            Command::PickAudio(at) => self.nth_track("audio", at).is_some(),
+            Command::PickSubtitles(at) => self.nth_track("sub", at).is_some(),
+            _ => true,
+        }
     }
 
     pub(super) fn label_for(item: &MenuItem, output: Option<&str>) -> String {
