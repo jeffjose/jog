@@ -350,7 +350,7 @@ fn a_track_picked_from_the_bar_is_played_and_kept_for_next_time() {
     }
     // Two audio tracks, so the bar has its audio button; at 1600x1000 it
     // stands at 1457,974 (no subtitles, so no button for them beside it),
-    // the menu opening over it.
+    // the picker opening over it.
     let dir = std::env::temp_dir().join("jog-player").join("bar-pick");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("videos")).unwrap();
@@ -379,7 +379,7 @@ fn a_track_picked_from_the_bar_is_played_and_kept_for_next_time() {
         let kept = std::fs::read_to_string(dir.join("state/tracks")).unwrap_or_default();
         kept.lines().next().and_then(|line| line.split('\t').next()).unwrap_or_default().to_string()
     };
-    // The second track picked from the menu over the button.
+    // The second track picked from the picker over the button.
     assert_eq!(run("{Move:1457,974}{Click}{Wait}{Down}{Down}{Enter}"), "2", "the track picked is kept");
     // Opened again on it: the next track from there is the first.
     assert_eq!(run("J"), "1", "opened again, the video plays the track kept");

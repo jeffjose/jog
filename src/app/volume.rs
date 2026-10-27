@@ -91,23 +91,31 @@ impl App {
 impl App {
     /// The playback menu, from the cog at the right of the bar.
     pub(super) fn open_playback_menu(&mut self) {
-        self.open_bar_menu(Command::PlaybackSettings, commands::PLAYBACK_MENU);
+        self.open_bar_menu(Command::PlaybackSettings, commands::PLAYBACK_MENU, Some("Speed".to_string()));
     }
 
     /// A menu from one of the bar's buttons: opened above it, its right
     /// edge in line with the button's, and running upward, so it is
     /// clear of the button and of the seek bar.
-    pub(super) fn open_bar_menu(&mut self, button: Command, items: &'static [Option<MenuItem>]) {
-        let bar = self.seek_bar();
-        let Some(which) = self.bar_buttons().iter().position(|command| *command == button) else {
-            return self.open_menu(items, None);
+    pub(super) fn open_bar_menu(&mut self, button: Command, items: &'static [Option<MenuItem>], title: Option<String>) {
+        let Some((right, bottom)) = self.bar_anchor(button) else {
+            return self.open_menu(items, title);
         };
-        let (left, top, side) = bar.button(which as i32);
-        let mut menu = self.build_menu(items, None, (0, 0));
+        let mut menu = self.build_menu(items, title, (0, 0));
         let (width, _) = self.window_size();
-        menu.x = (left + side - menu.width).clamp(0, (width as i32 - menu.width).max(0));
-        menu.y = (top - bar.unit / 2 - menu.height).max(0);
+        menu.x = (right - menu.width).clamp(0, (width as i32 - menu.width).max(0));
+        menu.y = (bottom - menu.height).max(0);
         menu.upward = true;
         self.menu = Some(menu);
+    }
+
+    /// Where a popover from one of the bar's buttons goes: the right edge
+    /// of the button, and a little above it. None with the button not on
+    /// the bar.
+    pub(super) fn bar_anchor(&self, button: Command) -> Option<(i32, i32)> {
+        let bar = self.seek_bar();
+        let which = self.bar_buttons().iter().position(|command| *command == button)?;
+        let (left, top, side) = bar.button(which as i32);
+        Some((left + side, top - bar.unit / 2))
     }
 }

@@ -3208,11 +3208,8 @@ impl App {
             ToggleScenes => self.cycle_strip(),
             CycleSubtitles => self.cycle_subtitles(),
             CycleAudio => self.cycle_audio(),
-            SubtitleTracks => self.open_bar_menu(SubtitleTracks, commands::SUBTITLE_TRACKS_MENU),
-            AudioTracks => self.open_bar_menu(AudioTracks, commands::AUDIO_TRACKS_MENU),
-            PickSubtitles(at) => self.pick_subtitles(Some(usize::from(at))),
-            SubtitlesOff => self.pick_subtitles(None),
-            PickAudio(at) => self.pick_audio(usize::from(at)),
+            SubtitleTracks => self.open_track_popover(tracks::TrackKind::Sub),
+            AudioTracks => self.open_track_popover(tracks::TrackKind::Audio),
             TrackPicker => self.open_track_picker(),
             Inspect => self.open_inspector(),
             EditTracks => self.open_track_editor(),
@@ -3307,13 +3304,6 @@ impl App {
         }
     }
 
-    /// The video's track of a kind (`"audio"`, `"sub"`) so many along,
-    /// as `tracks_of` gives them.
-    fn nth_track(&self, kind: &str, at: u8) -> Option<Track> {
-        let player = self.player.as_ref().filter(|_| self.video.is_some())?;
-        tracks_of(player, kind).into_iter().nth(usize::from(at))
-    }
-
     fn is_checked(&self, command: Command) -> bool {
         use Command::*;
         match command {
@@ -3336,10 +3326,6 @@ impl App {
             TogglePrecise => self.precise,
             ToggleScenes => self.scenes_on,
             CycleSubtitles | SubtitleTracks => self.subtitles,
-            // Ticked in its menu: the track playing, or none.
-            SubtitlesOff => !self.subtitles,
-            PickSubtitles(at) => self.subtitles && self.nth_track("sub", at).is_some_and(|track| track.selected),
-            PickAudio(at) => self.nth_track("audio", at).is_some_and(|track| track.selected),
             ListPin => self.list_pinned,
             ListPopOut => self.popped(Popped::List),
             SortBy(sort) => self.sort == Some(sort),

@@ -59,7 +59,7 @@ impl App {
         let mut entries: Vec<Option<&'static MenuItem>> = Vec::new();
         for entry in all_entries {
             match entry {
-                Some(item) if applies(item) && self.menu_item_there(item) => entries.push(Some(item)),
+                Some(item) if applies(item) => entries.push(Some(item)),
                 // A separator only after an item, so none double up.
                 None if matches!(entries.last(), Some(Some(_))) => entries.push(None),
                 _ => {}
@@ -69,7 +69,7 @@ impl App {
             entries.pop();
         }
 
-        let labels: Vec<String> = entries.iter().flatten().map(|item| self.menu_label(item)).collect();
+        let output = self.options.output_dir.as_deref().map(short_dir);
         let text = self.text.get_or_insert_with(Text::load);
         let (mut row_height, mut separator_height, pad) = (px as i32 * 2, px as i32 * 4 / 5, px as i32 / 2);
         // Rows with room around them, unless that would not fit the window:
@@ -81,7 +81,7 @@ impl App {
         }
 
         let items = entries.iter().flatten();
-        let label_width = labels.iter().map(|label| text.width(label, px)).max().unwrap_or(0);
+        let label_width = items.clone().map(|i| text.width(&Self::label_for(i, output.as_deref()), px)).max().unwrap_or(0);
         let keys_width = items.map(|i| text.width(i.keys, px)).max().unwrap_or(0);
         let title_width = title.as_ref().map_or(0, |title| text.width(title, px));
         // Padding, a gutter for check marks, the label, a gap and the keys.

@@ -975,7 +975,7 @@ impl App {
                 Looping::List => "Loop  ·  the list",
             }
             .to_string(),
-            Command::PlaybackSettings => "Speed and tracks".to_string(),
+            Command::PlaybackSettings => "Speed".to_string(),
             Command::ToggleFullscreen if self.window.as_ref().is_some_and(|window| window.fullscreen().is_some()) => "Leave fullscreen".to_string(),
             Command::ToggleFullscreen => "Fullscreen".to_string(),
             Command::SmallWindow => "Small window".to_string(),

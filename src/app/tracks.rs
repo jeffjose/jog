@@ -177,6 +177,10 @@ pub struct TrackPicker {
     reread: Option<Instant>,
     drawn: Vec<(usize, [i32; 4])>,
     place: [i32; 4],
+    /// The one kind shown, from the bar's button for it; both from Ctrl+J.
+    only: Option<TrackKind>,
+    /// Where it hangs from: the right edge of that button, above it.
+    anchor: Option<(i32, i32)>,
 }
 
 /// The tracks and timing kept for a video: its audio and subtitle tracks
@@ -270,11 +274,23 @@ pub fn subtitle_files(video: &Path) -> Vec<PathBuf> {
 impl App {
     /// Ctrl+J: the picker of the video's tracks, over it.
     pub(super) fn open_track_picker(&mut self) {
+        self.open_picker(None, None);
+    }
+
+    /// The bar's audio or subtitles button: the picker of those tracks
+    /// alone, over the button.
+    pub(super) fn open_track_popover(&mut self, kind: TrackKind) {
+        let button = if kind == TrackKind::Audio { Command::AudioTracks } else { Command::SubtitleTracks };
+        let anchor = self.bar_anchor(button);
+        self.open_picker(Some(kind), anchor);
+    }
+
+    fn open_picker(&mut self, only: Option<TrackKind>, anchor: Option<(i32, i32)>) {
         let Some(player) = self.player.as_ref().filter(|_| self.video.as_ref().is_some_and(|video| video.showing)) else {
             return self.toast("No video here");
         };
         let tracks = track_list(player);
-        let mut picker = TrackPicker { tracks, rows: Vec::new(), cursor: 0, reread: None, drawn: Vec::new(), place: [0; 4] };
+        let mut picker = TrackPicker { tracks, rows: Vec::new(), cursor: 0, reread: None, drawn: Vec::new(), place: [0; 4], only, anchor };
         self.fill_rows(&mut picker);
         self.menu = None;
         self.track_picker = Some(picker);
@@ -286,10 +302,13 @@ impl App {
     /// The cursor starts on the audio playing.
     fn fill_rows(&self, picker: &mut TrackPicker) {
         let tracks = &picker.tracks;
-        let mut rows: Vec<Row> = tracks.iter().filter(|t| t.kind == TrackKind::Audio).map(|t| Row::Audio(t.id)).collect();
-        rows.push(Row::SubOff);
-        rows.extend(tracks.iter().filter(|t| t.kind == TrackKind::Sub).map(|t| Row::Sub(t.id)));
-        if let Some(video) = &self.video {
+        let (audio, subtitles) = (picker.only != Some(TrackKind::Sub), picker.only != Some(TrackKind::Audio));
+        let mut rows: Vec<Row> = tracks.iter().filter(|t| audio && t.kind == TrackKind::Audio).map(|t| Row::Audio(t.id)).collect();
+        if subtitles {
+            rows.push(Row::SubOff);
+            rows.extend(tracks.iter().filter(|t| t.kind == TrackKind::Sub).map(|t| Row::Sub(t.id)));
+        }
+        if let Some(video) = self.video.as_ref().filter(|_| subtitles) {
             let loaded: Vec<String> = tracks.iter().filter(|t| t.external).filter_map(|t| t.title.clone()).collect();
             for file in subtitle_files(&self.files[video.id]) {
                 let name = file.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
@@ -298,7 +317,11 @@ impl App {
                 }
             }
         }
-        let playing = rows.iter().position(|row| matches!(row, Row::Audio(id) if tracks.iter().any(|t| t.kind == TrackKind::Audio && t.id == *id && t.selected)));
+        let on = |kind, id| tracks.iter().any(|t| t.kind == kind && t.id == id && t.selected);
+        let playing = match picker.only {
+            Some(TrackKind::Sub) => rows.iter().position(|row| matches!(row, Row::Sub(id) if self.subtitles && on(TrackKind::Sub, *id))),
+            _ => rows.iter().position(|row| matches!(row, Row::Audio(id) if on(TrackKind::Audio, *id))),
+        };
         picker.cursor = picker.cursor.min(rows.len().saturating_sub(1));
         if picker.rows.is_empty() {
             picker.cursor = playing.unwrap_or(0);
@@ -488,13 +511,21 @@ impl App {
         let small_line = Text::line_height(small);
         let row_h = line + pad * 2 / 3;
         let heading_h = line + pad / 2;
-        let width = (px as i32 * 30).min(canvas.width - 2 * pad);
+        let width = (px as i32 * if picker.only.is_some() { 24 } else { 30 }).min(canvas.width - 2 * pad);
         let audio_rows = picker.rows.iter().filter(|row| matches!(row, Row::Audio(_))).count() as i32;
         let other_rows = picker.rows.len() as i32 - audio_rows;
+        let (audio, subtitles) = (picker.only != Some(TrackKind::Sub), picker.only != Some(TrackKind::Audio));
         // The keys along the foot, on as many lines as they take.
-        let hints = wrap_hints(text, "↑↓ pick  ·  Enter use  ·  Shift+↑↓ timing ±0.1 s  ·  e edit tracks  ·  Esc close", small, width - 2 * pad);
-        let height = pad + heading_h + audio_rows.max(1) * row_h + pad / 2 + 1 + pad / 2 + heading_h + other_rows * row_h + pad / 2 + small_line * hints.len() as i32 + pad;
-        let (left, top) = (canvas.width - width - pad, (canvas.height - height - pad * 6).max(pad));
+        let keys = if picker.only.is_some() { "Shift+↑↓ timing  ·  e edit" } else { "↑↓ pick  ·  Enter use  ·  Shift+↑↓ timing  ·  e edit" };
+        let hints = wrap_hints(text, keys, small, width - 2 * pad);
+        let audio_h = if audio { heading_h + audio_rows.max(1) * row_h } else { 0 };
+        let subtitles_h = if subtitles { heading_h + other_rows * row_h } else { 0 };
+        let rule_h = if audio && subtitles { pad / 2 + 1 + pad / 2 } else { 0 };
+        let height = pad + audio_h + rule_h + subtitles_h + pad / 2 + small_line * hints.len() as i32 + pad;
+        let (left, top) = match picker.anchor {
+            Some((right, bottom)) => ((right - width).clamp(0, (canvas.width - width).max(0)), (bottom - height).max(0)),
+            None => (canvas.width - width - pad, (canvas.height - height - pad * 6).max(pad)),
+        };
         picker.place = [left, top, width, height];
         panel(canvas, left, top, width, height, pad * 2 / 3);
         let inner = left + pad;
@@ -506,19 +537,23 @@ impl App {
             let kw = text.width(keys, small);
             text.draw(canvas, inner + inner_w - kw, y + (line - small_line) / 2, small, DIM_TEXT_COLOR, keys);
         };
-        heading(canvas, text, y, "Audio", "J cycles");
-        y += heading_h;
-        if audio_rows == 0 {
-            text.draw(canvas, inner, y + (row_h - line) / 2, px, DIM_TEXT_COLOR, "No sound");
-            y += row_h;
+        if audio {
+            heading(canvas, text, y, "Audio", "J cycles");
+            y += heading_h;
+            if audio_rows == 0 {
+                text.draw(canvas, inner, y + (row_h - line) / 2, px, DIM_TEXT_COLOR, "No sound");
+                y += row_h;
+            }
         }
         let mut subs_heading = false;
         for (at, row) in picker.rows.iter().enumerate() {
             if !matches!(row, Row::Audio(_)) && !subs_heading {
                 subs_heading = true;
-                y += pad / 2;
-                canvas.fill(inner, y, inner_w, 1, MENU_EDGE_COLOR);
-                y += 1 + pad / 2;
+                if audio {
+                    y += pad / 2;
+                    canvas.fill(inner, y, inner_w, 1, MENU_EDGE_COLOR);
+                    y += 1 + pad / 2;
+                }
                 heading(canvas, text, y, "Subtitles", "j cycles");
                 y += heading_h;
             }
