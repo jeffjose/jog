@@ -959,6 +959,30 @@ impl App {
         self.toast(said);
     }
 
+    /// What a button at the right of the bar says over it while the
+    /// pointer is on it: for the tracks, the one playing.
+    pub(super) fn bar_button_tip(&self, command: Command) -> String {
+        let playing = |kind| self.player.as_ref().and_then(|player| tracks_of(player, kind).into_iter().find(|track| track.selected)).map(|track| track.name);
+        match command {
+            Command::SubtitleTracks => match playing("sub").filter(|_| self.subtitles) {
+                Some(name) => format!("Subtitles  ·  {name}"),
+                None => "Subtitles  ·  off".to_string(),
+            },
+            Command::AudioTracks => format!("Audio  ·  {}", playing("audio").unwrap_or_default()),
+            Command::CycleLoop => match self.looping {
+                Looping::Off => "Loop  ·  off",
+                Looping::File => "Loop  ·  this video",
+                Looping::List => "Loop  ·  the list",
+            }
+            .to_string(),
+            Command::PlaybackSettings => "Speed and tracks".to_string(),
+            Command::ToggleFullscreen if self.window.as_ref().is_some_and(|window| window.fullscreen().is_some()) => "Leave fullscreen".to_string(),
+            Command::ToggleFullscreen => "Fullscreen".to_string(),
+            Command::SmallWindow => "Small window".to_string(),
+            _ => String::new(),
+        }
+    }
+
     /// Makes subtitles a step larger or smaller.
     pub(super) fn size_subtitles(&mut self, larger: bool) {
         let size = if larger { self.subtitle_size + 10 } else { self.subtitle_size.saturating_sub(10) };

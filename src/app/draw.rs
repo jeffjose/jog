@@ -686,6 +686,13 @@ impl App {
                     _ => (commands::icons::AUDIO_LINES, true),
                 };
                 buttons.push((left + side / 2, top + (side - line) / 2, icon, if on { TEXT_COLOR } else { DIM_TEXT_COLOR }));
+                // Under the pointer, nothing open over it: what it is, said
+                // above it, the tracks' which one plays. Not the sound's, whose
+                // slider comes up in its place.
+                let over = (left..left + side).contains(&(self.mouse.0 as i32)) && (top..top + side).contains(&(self.mouse.1 as i32));
+                if over && !self.bar_busy() && command != Command::ToggleMute {
+                    bar_tip = Some((left + side / 2, top - unit / 3, self.bar_button_tip(command)));
+                }
             }
             // Over the volume button, while the pointer is on it, its slider.
             self.draw_volume(canvas, &bar, &mut labels);
