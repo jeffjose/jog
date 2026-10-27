@@ -138,7 +138,7 @@ impl App {
         }
         if self.options.debug {
             let scale = self.window.as_ref().map_or(1.0, |window| window.scale_factor());
-            eprintln!("jog: resize {}x{} x{scale}", size.width, size.height);
+            eprintln!("jog: window resized to {}x{} at scale {scale}", size.width, size.height);
         }
         self.update_monitor();
         self.settle_small(size);

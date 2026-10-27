@@ -4220,8 +4220,8 @@ impl ApplicationHandler<Event> for App {
                 Ok(winit::raw_window_handle::RawDisplayHandle::Xlib(_) | winit::raw_window_handle::RawDisplayHandle::Xcb(_)) => "X11",
                 _ => "an unknown display",
             };
-            let drawn = if crate::mpv::gpu_video() { "gpu" } else { "sw" };
-            eprintln!("jog: {backend} x{} video:{drawn}", window.scale_factor());
+            let drawn = if crate::mpv::gpu_video() { "by the player, on the GPU, with jog's UI laid over it" } else { "by jog, with its UI" };
+            eprintln!("jog: on {backend} at scale {}: videos drawn {drawn}", window.scale_factor());
         }
         // The buffers a frame goes through are given their size now, as
         // pages the system hands out blank, which cost nothing until they
@@ -4506,7 +4506,7 @@ impl App {
                 self.draw();
             }
             WindowEvent::Moved(at) => self.note_window_moved(at),
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } if self.options.debug => eprintln!("jog: scale x{scale_factor}"),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } if self.options.debug => eprintln!("jog: window scale now {scale_factor}"),
             WindowEvent::Resized(size) => self.resized(size),
             // Coming back to the window, all of it is drawn afresh: a part
             // that was covered may have been uncovered while a frame of
@@ -4558,7 +4558,7 @@ impl App {
                     return;
                 }
                 if self.options.debug {
-                    eprintln!("jog: ptr out {:.0},{:.0}", self.mouse.0, self.mouse.1);
+                    eprintln!("jog: window left by the pointer, last at {:.0},{:.0}", self.mouse.0, self.mouse.1);
                 }
                 self.pointer_found = input::Arrival::Coming;
                 self.set_strip_hover(false);
