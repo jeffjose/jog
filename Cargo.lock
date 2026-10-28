@@ -489,9 +489,9 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "cvvdp-lite"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff00b4fbb7a3f6ef94e3958811a848372615d58ab82074084279884b788a6ad7"
+checksum = "6cf12b07af07fca07e7e72d7c789905a6cb6c07402f0b4998bc04711d9f864e5"
 
 [[package]]
 name = "darling"
@@ -936,9 +936,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jixel"
-version = "0.4.2"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bc0b509580dce6f3160cfe91d9d72b8548239000eb3217502d73dc52f889a1d"
+checksum = "0ce2242dc53f94faa1687d4203204fbf9d2ca555e7d5a4fbbc992c5cf45fe519"
 dependencies = [
  "cvvdp-lite",
  "ssimu2-lite",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "jog"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ab_glyph_rasterizer",
  "bytemuck",

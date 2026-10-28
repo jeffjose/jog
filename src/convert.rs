@@ -659,6 +659,24 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+
+    /// A real screenshot, where an encoder's harder paths are taken that
+    /// small made-up pictures never reach: lossless JPEG XL at each effort
+    /// comes back to the pixel. jixel 0.4 wrote files at medium effort and
+    /// slower that could not be read back.
+    #[test]
+    fn a_real_screenshot_comes_back_to_the_pixel_as_lossless_jpeg_xl() {
+        let png = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/screenshot.png")).unwrap();
+        let image = image::load_from_memory(&png).unwrap();
+        let original = image.to_rgba8();
+        for effort in [Effort::Fast, Effort::Medium, Effort::Slow] {
+            let mut settings = Settings::default();
+            (settings.jxl.lossless, settings.jxl.effort) = (true, effort);
+            let encoded = encode(&image, None, Format::Jxl, &settings).unwrap();
+            let back = decode_encoded(&encoded.bytes, Format::Jxl).unwrap_or_else(|| panic!("{effort:?}: not readable"));
+            assert!(back.to_rgba8() == original, "{effort:?}: pixels changed");
+        }
+    }
     #[test]
     fn nothing_is_overwritten_or_converted_to_itself() {
         let dir = scratch("clobber");
