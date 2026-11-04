@@ -565,8 +565,25 @@ impl App {
                 }
             }
             None => {
+                // All the pictures in one pass, then what goes over them.
+                let thumbs: Vec<Option<Arc<Frame>>> = tiles.iter().map(|tile| self.loader.thumb(self.list[tile.pos])).collect();
+                let mut blits: Vec<(&Frame, [i32; 4])> = Vec::with_capacity(tiles.len());
+                for (tile, thumb) in tiles.iter().zip(&thumbs) {
+                    let id = self.list[tile.pos];
+                    let playing = wall.players.iter().find(|player| player.id == Some(id)).and_then(|player| player.frame.as_ref()).filter(|frame| !frame.pixels.is_empty());
+                    match playing.or(thumb.as_deref()) {
+                        Some(frame) => blits.push((frame, tile.place)),
+                        None => canvas.fill(tile.place[0], tile.place[1], tile.place[2], tile.place[3], PLACEHOLDER_COLOR),
+                    }
+                }
+                canvas.images_cover(&blits);
                 for tile in &tiles {
-                    draw(canvas, tile, 0.0, 1.0);
+                    let [x, y, w, h] = tile.place;
+                    canvas.round_off(x, y, w, h, RADIUS, GRID_COLOR);
+                    if self.marks.contains(&self.list[tile.pos]) {
+                        let dot = (canvas.height / 90).max(8);
+                        canvas.round_fill(x + dot / 2, y + dot / 2, dot, dot, dot / 2, MARK_COLOR, 256);
+                    }
                 }
             }
         }
