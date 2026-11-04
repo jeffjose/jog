@@ -12,6 +12,9 @@ impl App {
     /// Shows more or fewer pictures across the grid, making each smaller
     /// or larger.
     pub(super) fn zoom_grid(&mut self, larger: bool) {
+        if self.wall().is_some() {
+            return self.zoom_wall(larger);
+        }
         let layout = self.grid_layout(self.window_size());
         let columns = (layout.columns + if larger { -1 } else { 1 }).clamp(GRID_COLUMNS.0, GRID_COLUMNS.1);
         self.grid_columns = Some(columns);
@@ -25,7 +28,16 @@ impl App {
         self.redraw();
     }
 
+    /// Opens the grid or closes it; from the wall, the grid takes its place.
     pub(super) fn toggle_grid(&mut self) {
+        match self.wall().is_some() {
+            true => self.wall_to_grid(),
+            false => self.flip_grid(),
+        }
+    }
+
+    /// Opens the gallery or closes it, whichever way it is laid out.
+    pub(super) fn flip_grid(&mut self) {
         let window = self.window_size();
         let layout = self.grid_layout(window);
         let id = self.id();
@@ -60,6 +72,9 @@ impl App {
     /// Where the picture of the file at `pos` is in the grid, if it is on
     /// the page showing.
     pub(super) fn grid_cell(&self, pos: usize, layout: &GridLayout, window: (u32, u32)) -> Option<[i32; 4]> {
+        if self.wall().is_some() {
+            return self.wall_place(pos);
+        }
         let area = self.grid_area(layout, pos, window.1);
         let place = match self.loader.thumb(self.list[pos]) {
             Some(thumb) => Self::grid_picture(area, (thumb.width, thumb.height), false),
@@ -137,6 +152,7 @@ impl App {
         grid.moved = true;
         // At once, so that what happens next finds the right page on show.
         grid.follow(&layout);
+        self.wall_follow();
         self.request();
         self.redraw();
     }
@@ -145,6 +161,16 @@ impl App {
     pub(super) fn point_cursor(&mut self) -> bool {
         let layout = self.grid_layout(self.window_size());
         let (len, (x, y)) = (self.list.len(), self.mouse);
+        if self.wall().is_some() {
+            let Some(pos) = self.wall_tile_at(x, y).filter(|pos| *pos < len) else { return false };
+            let Some(grid) = &mut self.grid else { return false };
+            if pos != grid.cursor {
+                (grid.cursor, grid.moved) = (pos, true);
+            }
+            // The name and the sound follow the pointer from tile to tile.
+            self.redraw();
+            return true;
+        }
         let Some(grid) = &mut self.grid else { return false };
         // Where the grid is sliding to, not where it is: a cell picked
         // out mid-slide must not pull the grid back.

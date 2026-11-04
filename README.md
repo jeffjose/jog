@@ -18,6 +18,9 @@ Videos:
 - The next video is loaded while this one plays.
 - Each player is its own process; a decoder crash falls back to the CPU.
 - Stays responsive under heavy CPU load.
+- `g` shows a folder as a grid with names; `G` as a wall, packed edge to
+  edge with no names and every video on it playing. On the wall, `Space`
+  turns the pages by themselves.
 
 ```sh
 jog PHOTOS/            # a folder, fullscreen

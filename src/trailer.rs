@@ -29,6 +29,9 @@ enum Message {
     /// straight on from a number of seconds in.
     Play(usize, PathBuf, (u32, u32), Option<f64>),
     Stop,
+    /// With its sound, or without: the wall's video under the pointer is
+    /// heard, the rest are not.
+    Sound(bool),
     Player(Signal),
 }
 
@@ -78,8 +81,11 @@ pub struct Trailers {
 
 impl Trailers {
     /// `notify` is called from the trailer thread; it returns whether
-    /// anyone is still listening.
-    pub fn new(notify: impl Fn(Note) -> bool + Send + 'static) -> Trailers {
+    /// anyone is still listening. `fine` decodes at full quality, as the
+    /// wall's large tiles want: a preview otherwise skips the deblocking
+    /// filter and takes other shortcuts, which shows on anything bigger
+    /// than a thumbnail as blocks and smears.
+    pub fn new(fine: bool, notify: impl Fn(Note) -> bool + Send + 'static) -> Trailers {
         let (messages, inbox) = mpsc::channel();
         let latest = Arc::new(Mutex::new(None));
         let (signals, slot) = (Arc::new(Mutex::new(messages.clone())), latest.clone());
@@ -88,6 +94,10 @@ impl Trailers {
                 let signals = signals.clone();
                 let player = Player::new(Role::Preview, move |signal| drop(signals.lock().unwrap_or_else(std::sync::PoisonError::into_inner).send(Message::Player(signal)))).ok()?;
                 player.set("loop-file", "inf");
+                if fine {
+                    player.set("vd-lavc-skiploopfilter", "default");
+                    player.set("vd-lavc-fast", "no");
+                }
                 Some(player)
             };
             // Without a player there are no trailers; the grid does without.
@@ -112,6 +122,7 @@ impl Trailers {
                         while let Ok(later) = inbox.try_recv() {
                             match later {
                                 Message::Player(_) => {}
+                                Message::Sound(on) => player.set("aid", if on { "auto" } else { "no" }),
                                 ask => newest = Some(ask),
                             }
                         }
@@ -149,6 +160,7 @@ impl Trailers {
                             }
                         };
                     }
+                    Ok(Message::Sound(on)) => player.set("aid", if on { "auto" } else { "no" }),
                     Ok(Message::Player(Signal::Events)) => heed(&player, &mut opening, &mut playing),
                     Ok(Message::Player(Signal::Frame)) => {
                         // mpv stalls unless each frame it announces is taken,
@@ -216,6 +228,11 @@ impl Trailers {
 
     pub fn stop(&self) {
         let _ = self.messages.send(Message::Stop);
+    }
+
+    /// Plays on with the sound on, or off.
+    pub fn sound(&self, on: bool) {
+        let _ = self.messages.send(Message::Sound(on));
     }
 
     /// The newest frame, if one has come since the last was taken.

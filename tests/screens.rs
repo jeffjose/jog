@@ -121,6 +121,11 @@ fn grid() {
 }
 
 #[test]
+fn wall() {
+    check("wall", "G{Wait}{Wait}", 500);
+}
+
+#[test]
 fn shortcuts() {
     check("shortcuts", "?{Wait}", 500);
 }

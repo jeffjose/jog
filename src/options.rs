@@ -167,6 +167,7 @@ where they were left unless --no-positions is given.
       --list-pinned          and beside the picture, which is made smaller for
                              it, rather than over it (its pin does the same)
   -G, --grid                 start in the grid, with nothing playing
+  -W, --wall                 start in the wall: packed, no names, every video playing
       --no-grid-titles       leave the names out from under the grid's pictures
                              (config: grid-titles = false; i in the grid toggles)"),
     ("config", "Config file", "
@@ -253,6 +254,9 @@ Workspaces are folders with names, set in the config file:
                              in the grid: Ctrl with + or - for larger or smaller
                              pictures; going past the end of a page slides the
                              next one in from the side
+  G                          wall: packed, no names, every video playing; Space
+                             turns its pages by themselves, Ctrl with + or -
+                             for bigger or smaller tiles
   Tab or right click         menu                h             slideshow
   x                          mark / unmark       c / C         copy file name / full path
   V / M                      copy / move marked files (or the current one) to -o DIR
@@ -378,6 +382,8 @@ pub struct Options {
     pub grid_titles: bool,
     /// Whether to start in the grid.
     pub grid: bool,
+    /// Whether to start in the wall.
+    pub wall: bool,
     pub actions: [Option<String>; 10],
     pub draw_info: bool,
     pub draw_exif: bool,
@@ -573,6 +579,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
     Some(match flag {
         'F' => "fullscreen",
         'G' => "grid",
+        'W' => "wall",
         'w' => "windowed",
         'g' => "geometry",
         'x' => "borderless",
@@ -612,7 +619,7 @@ fn is_switch(name: &str) -> bool {
         "fullscreen", "windowed", "no-fullscreen", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "random",
         "newest", "oldest", "videos", "video", "images", "image", "pictures", "picture",
-        "cycle-once", "autoplay", "no-autoplay", "grid", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
+        "cycle-once", "autoplay", "no-autoplay", "grid", "wall", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
         "debug", "verbose", "info", "watch", "edit", "positions", "no-positions", "resume", "continue", "all", "latest", "subtitles", "no-subtitles", "seen", "no-seen", "animations", "no-animations", "hitches", "no-hitches", "hwdec", "no-hwdec", "gpu-video", "no-gpu-video", "precise-seeking", "no-precise-seeking", "dry-run", "list-right", "list-pinned",
     ];
     switches.contains(&name)
@@ -660,6 +667,7 @@ fn parse_with(
         subtitle_style: SubtitleStyle::Outline,
         grid_titles: true,
         grid: false,
+        wall: false,
         actions: Default::default(),
         draw_info: false,
         draw_exif: false,
@@ -859,6 +867,7 @@ fn apply(
             }
         }
         "grid" => options.grid = true,
+        "wall" => options.wall = true,
         "grid-titles" => options.grid_titles = true,
         "no-grid-titles" => options.grid_titles = false,
         // feh's name for it; here the file name is part of the info overlay.

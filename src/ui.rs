@@ -533,6 +533,56 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Draws `frame` filling a rectangle, as large as it takes to cover
+    /// it, centered, with what overhangs cut off: a tile of the wall.
+    /// Made larger, each pixel blends the four it lies between, as in
+    /// `image_fast`; made smaller, it is the nearest. The frames drawn so
+    /// are mostly made near the size of their tile.
+    pub fn image_cover(&mut self, frame: &Frame, x: i32, y: i32, w: i32, h: i32) {
+        let (sw, sh) = (frame.width as usize, frame.height as usize);
+        if w <= 0 || h <= 0 || sw == 0 || sh == 0 || frame.pixels.len() < sw * sh {
+            return;
+        }
+        // The part of the frame shown: all of one side, the middle of the other.
+        let (fw, fh) = (sw as f64, sh as f64);
+        let scale = (f64::from(w) / fw).max(f64::from(h) / fh);
+        let (cw, ch) = (f64::from(w) / scale, f64::from(h) / scale);
+        let (cx, cy) = ((fw - cw) / 2.0, (fh - ch) / 2.0);
+        let (x0, x1) = (x.max(0), (x + w).min(self.width));
+        let (y0, y1) = (y.max(0), (y + h).min(self.height));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let larger = scale > 1.0;
+        // Where a pixel's middle falls in the frame, as the source pixel
+        // before it, the one after, and how far towards that, out of 256.
+        let along = |at: f64, size: usize| -> (usize, usize, u32) {
+            let at = (at - if larger { 0.5 } else { 0.0 }).clamp(0.0, (size - 1) as f64);
+            let first = at as usize;
+            (first, (first + 1).min(size - 1), if larger { ((at - first as f64) * 256.0) as u32 } else { 0 })
+        };
+        let columns: Vec<(usize, usize, u32)> = (x0..x1).map(|px| along(cx + (f64::from(px - x) + 0.5) * cw / f64::from(w), sw)).collect();
+        let width = self.width as usize;
+        let draw_row = |py: i32, out: &mut [u32]| {
+            let (first, second, down) = along(cy + (f64::from(py - y) + 0.5) * ch / f64::from(h), sh);
+            let (upper, lower) = (&frame.pixels[first * sw..(first + 1) * sw], &frame.pixels[second * sw..(second + 1) * sw]);
+            for (pixel, &(left, right, across)) in out[x0 as usize..x1 as usize].iter_mut().zip(&columns) {
+                *pixel = match larger {
+                    true => mix(mix(upper[left], upper[right], across), mix(lower[left], lower[right], across), down),
+                    false => upper[left],
+                };
+            }
+        };
+        self.touch(y0, y1);
+        self.alpha_rect(x0, y0, x1 - x0, y1 - y0, 255, 256);
+        let rows = self.pixels[y0 as usize * width..y1 as usize * width].chunks_exact_mut(width);
+        if (x1 - x0) as usize * (y1 - y0) as usize >= SHARE {
+            rows.collect::<Vec<_>>().into_par_iter().enumerate().for_each(|(row, out)| draw_row(y0 + row as i32, out));
+        } else {
+            rows.enumerate().for_each(|(row, out)| draw_row(y0 + row as i32, out));
+        }
+    }
+
     /// Draws many frames, each scaled to its rectangle as `image` does,
     /// in one pass over the rows of the canvas, each row on its own core.
     /// Later rectangles are drawn over earlier ones where they overlap.

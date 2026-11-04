@@ -68,6 +68,8 @@ mod draw;
 use draw::*;
 mod edit;
 mod grid;
+mod wall;
+use wall::Wall;
 mod input;
 mod menu;
 mod palette;
@@ -1718,6 +1720,8 @@ struct Grid {
     /// Whether the cursor has been moved since the grid came up by
     /// itself, with `--grid`: until then no trailer plays.
     moved: bool,
+    /// Packed as the wall instead, nameless, every video playing.
+    wall: Option<Wall>,
 }
 
 /// Grid placement: equal cells filling the window above a footer line.
@@ -1788,7 +1792,7 @@ impl Grid {
     /// A grid showing the page `cursor` is on.
     fn at(cursor: usize, layout: &GridLayout) -> Grid {
         let page = layout.page_of(cursor);
-        Grid { cursor, from: page, target: page, since: Instant::now(), moved: true }
+        Grid { cursor, from: page, target: page, since: Instant::now(), moved: true, wall: None }
     }
 
     /// Which page is at the window's left just now, and how far on to the
@@ -2422,7 +2426,9 @@ impl App {
         // uses, so that the filmstrip and the grid share them.
         let mut thumbs = Vec::new();
         let thumb_size = self.grid_layout(self.monitor).thumb_size();
-        if let Some(grid) = &self.grid {
+        if self.wall().is_some() {
+            thumbs.extend(self.wall_wanted().into_iter().map(|at| self.list[at]));
+        } else if let Some(grid) = &self.grid {
             // The page on show, then the pages either side of it.
             let per_page = self.grid_layout(self.window_size()).per_page() as i64;
             let page = grid.target as i64;
@@ -2930,6 +2936,8 @@ impl App {
                 None => self.open_menu(commands::MENU, None),
             },
             ToggleGrid => self.toggle_grid(),
+            ToggleWall => self.toggle_wall(),
+            WallAutoplay => self.wall_autoplay(),
             ToggleHelp => {
                 self.help = !self.help;
                 self.help_search.clear();
@@ -2988,12 +2996,17 @@ impl App {
                     self.list_scroll = first.map(|first| (self.pos, self.list.len(), first));
                 }
             }
+            GridLarger if self.wall().is_some() => self.zoom_wall(true),
+            GridSmaller if self.wall().is_some() => self.zoom_wall(false),
             GridLarger => self.zoom_grid(true),
             GridSmaller => self.zoom_grid(false),
             ToggleGridTitles => self.grid_titles = !self.grid_titles,
             GridMenu => {
                 // At the cell, not wherever the pointer happens to be.
-                if let Some(cursor) = self.grid.as_ref().map(|grid| grid.cursor) {
+                if let Some(place) = self.grid.as_ref().filter(|grid| grid.wall.is_some()).and_then(|grid| self.wall_place(grid.cursor)) {
+                    let [left, top, width, height] = place;
+                    self.menu = Some(self.build_menu(commands::WALL_MENU, None, (left + width / 2, top + height / 2)));
+                } else if let Some(cursor) = self.grid.as_ref().map(|grid| grid.cursor) {
                     let layout = self.grid_layout(self.window_size());
                     let [left, top, width, height] = self.grid_area(&layout, cursor, self.window_size().1);
                     self.menu = Some(self.build_menu(commands::GRID_MENU, None, (left + width / 2, top + height / 2)));
@@ -3319,6 +3332,7 @@ impl App {
             Workspace(which) => which == self.space,
             ToggleList => self.show_list,
             ToggleGridTitles => self.grid_titles,
+            WallAutoplay => self.wall().is_some_and(|wall| wall.auto),
             ToggleMute => self.muted,
             SetSpeed(at) => SPEEDS.get(usize::from(at)).is_some_and(|speed| (speed - self.speed).abs() < 1e-9),
             CycleLoop => self.looping != Looping::Off,
@@ -4244,6 +4258,12 @@ impl ApplicationHandler<Event> for App {
             self.grid = Some(Grid { moved: false, ..Grid::at(self.pos, &layout) });
             self.request();
         }
+        // With --wall the wall is, everything on its first page playing.
+        if std::mem::take(&mut self.options.wall) {
+            let layout = self.grid_layout(self.window_size());
+            self.grid = Some(Grid { wall: Some(Wall::at(self.pos)), ..Grid::at(self.pos, &layout) });
+            self.request();
+        }
         // The first image goes on the window as its background before the
         // window is shown, and the server paints it the moment the window
         // manager shows it. A small file is nearly decoded by now, having
@@ -4465,6 +4485,13 @@ impl App {
             }
             Event::Trailer(Note::Length(id, seconds)) => drop(self.durations.insert(id, Some(seconds))),
             Event::Trailer(Note::Frame) => {
+                // Many players each have a frame ready many times a second:
+                // the wall is drawn with the newest of them all, at most
+                // once every 16 ms.
+                if self.take_wall_frames() {
+                    let due = Instant::now() + Duration::from_millis(16);
+                    self.grid_due = Some(self.grid_due.map_or(due, |at| at.min(due)));
+                }
                 // One of a video the cursor has since left is dropped.
                 let taken = self.trailers.as_ref().and_then(Trailers::take);
                 if let (Some(trailer), Some((id, frame))) = (&mut self.trailer, taken) {
@@ -4658,6 +4685,10 @@ impl App {
         if self.trailer_due.is_some_and(|(_, at)| at <= now) {
             self.tend_trailer();
         }
+        // The wall's page turns by itself.
+        if self.wall().and_then(|wall| wall.next_at).is_some_and(|at| at <= now) {
+            self.turn_wall(true);
+        }
         self.tend_hold();
         if self.anim_due.is_some_and(|due| due <= now) {
             self.anim_due = None;
@@ -4713,7 +4744,7 @@ impl App {
             self.redraw();
         }
         let held_until = held_until.filter(|at| *at > now);
-        let deadlines = [Some(self.session_due), flicker_due, held_until, self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.overview_due, self.back_due, self.hitches.due(), self.bench_quit, self.bench_keys.as_ref().map(|(_, at)| *at)];
+        let deadlines = [Some(self.session_due), flicker_due, held_until, self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.wall().and_then(|wall| wall.next_at), self.overview_due, self.back_due, self.hitches.due(), self.bench_quit, self.bench_keys.as_ref().map(|(_, at)| *at)];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

@@ -591,6 +591,9 @@ impl App {
     }
 
     pub(super) fn grid_key(&mut self, key: Key<&str>, event_loop: &ActiveEventLoop) {
+        if self.wall_key(&key, event_loop) {
+            return;
+        }
         let layout = self.grid_layout(self.window_size());
         match key {
             Key::Named(NamedKey::Escape) => return self.toggle_grid(),
@@ -625,6 +628,7 @@ impl App {
             Some(Command::Action(0)) => self.open_from_grid(),
             Some(
                 command @ (Command::ToggleGrid
+                | Command::ToggleWall
                 | Command::ToggleHelp
                 | Command::ToggleFullscreen
                 | Command::Mark

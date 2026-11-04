@@ -409,6 +409,7 @@ impl App {
         self.keep_video_clear();
         self.tend_story();
         self.tend_trailer();
+        self.tend_wall();
         // The grid replaces the image and everything describing it.
         let viewing = self.grid.is_none() && self.overview.is_none() && self.editor.is_none();
         // The graphs of the picture's colors are counted from it as it is
@@ -781,6 +782,8 @@ impl App {
         // The filmstrip has words of its own: the lengths of its videos.
         let boxes = boxes || self.palette.is_some() || strip.is_some() || scene_strip.is_some() || self.overview.is_some() || self.triage_on;
         let boxes = boxes || self.activity.open || self.activity_running();
+        // The wall names the tile under the pointer.
+        let boxes = boxes || self.wall().is_some();
         if nothing_to_write && !boxes && !self.help {
             // Nothing drawn means no debug overlay, and none of its buttons.
             self.debug_buttons.clear();
@@ -1098,6 +1101,9 @@ impl App {
 
     pub(super) fn draw_grid(&self, canvas: &mut Canvas) {
         let Some(grid) = &self.grid else { return };
+        if grid.wall.is_some() {
+            return self.draw_wall(canvas);
+        }
         let layout = self.grid_layout((canvas.width as u32, canvas.height as u32));
         let edge = (layout.pad / 4).max(2);
         let radius = (layout.cell_w / 36).max(4);
@@ -1197,7 +1203,7 @@ impl App {
         let thick = (ui_px(height) as i32 / 3).max(4);
         let track = width as i32 / 3;
         let y = height as i32 - GridLayout::footer_height(height) - thick;
-        (self.grid.is_some() && pages > 1).then_some(PageBar { x: (width as i32 - track) / 2, y, width: track, height: thick, pages })
+        (self.grid.is_some() && self.wall().is_none() && pages > 1).then_some(PageBar { x: (width as i32 - track) / 2, y, width: track, height: thick, pages })
     }
 
     /// Goes to the page at a spot along the page bar, keeping the cursor in
@@ -1216,7 +1222,7 @@ impl App {
 
     /// The round button at the grid's top right that leaves it.
     pub(super) fn grid_close(&self) -> Option<Button> {
-        self.grid.as_ref()?;
+        self.grid.as_ref().filter(|grid| grid.wall.is_none())?;
         let (width, height) = self.window_size();
         let size = ui_px(height) as i32 * 2;
         // In from the corner a little, both ways.
@@ -1228,7 +1234,7 @@ impl App {
     /// before and the page after: where each is, and whether it goes
     /// forward. Only those with a page to go to.
     pub(super) fn grid_arrows(&self) -> Vec<(Button, bool)> {
-        let Some(grid) = &self.grid else { return Vec::new() };
+        let Some(grid) = self.grid.as_ref().filter(|grid| grid.wall.is_none()) else { return Vec::new() };
         let (width, height) = self.window_size();
         let layout = self.grid_layout((width, height));
         let pages = self.list.len().div_ceil(layout.per_page());
@@ -1249,6 +1255,9 @@ impl App {
     /// on, and in the corner of each video how long it is.
     pub(super) fn draw_grid_labels(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
         let Some(cursor) = self.grid.as_ref().filter(|_| self.overview.is_none()).map(|grid| grid.cursor) else { return };
+        if self.wall().is_some() {
+            return self.draw_wall_labels(canvas, text, px);
+        }
         let layout = self.grid_layout((canvas.width as u32, canvas.height as u32));
         let line = Text::line_height(px);
         for pos in self.grid_shown(&layout) {
@@ -1386,7 +1395,7 @@ impl App {
 
     /// The line under the grid: the image under the cursor and the page.
     pub(super) fn grid_footer(&self) -> Option<String> {
-        let grid = self.grid.as_ref().filter(|_| self.overview.is_none())?;
+        let grid = self.grid.as_ref().filter(|grid| self.overview.is_none() && grid.wall.is_none())?;
         let path = &self.files[self.list[grid.cursor]];
         let name = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy();
         let layout = self.grid_layout(self.window_size());
@@ -1904,7 +1913,8 @@ impl App {
         if self.scenes_shown() {
             return self.scene_at(self.mouse.0, self.mouse.1).map(|index| usize::MAX - index);
         }
-        let grid = self.grid.as_ref().filter(|grid| grid.moved && self.palette.is_none() && self.overview.is_none())?;
+        // The wall plays its videos by players of its own.
+        let grid = self.grid.as_ref().filter(|grid| grid.moved && grid.wall.is_none() && self.palette.is_none() && self.overview.is_none())?;
         let id = self.list[grid.cursor];
         // Not of the one that is playing in its cell as it is.
         let playing = self.pip && self.video.as_ref().is_some_and(|video| video.id == id);
@@ -1965,7 +1975,7 @@ impl App {
             None if id < self.files.len() => (id, self.grid_layout(window).thumb_size(), None),
             None => return,
         };
-        let trailers = self.trailers.get_or_insert_with(|| Trailers::new(move |note| proxy.send_event(Event::Trailer(note)).is_ok()));
+        let trailers = self.trailers.get_or_insert_with(|| Trailers::new(false, move |note| proxy.send_event(Event::Trailer(note)).is_ok()));
         trailers.play(id, self.files[file].clone(), bounds, from);
         self.trailer = Some(Trailer { id, frame: None, since: None, asked: Instant::now() });
         self.trailer_note("started", id, "");

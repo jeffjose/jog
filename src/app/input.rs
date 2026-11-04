@@ -599,6 +599,7 @@ impl App {
                 // A right click on a picture brings up what can be done
                 // with it.
                 (MouseButton::Right, true) => match self.point_cursor() {
+                    true if self.wall().is_some() => self.open_menu(commands::WALL_MENU, None),
                     true => self.open_menu(commands::GRID_MENU, None),
                     // Off the pictures, it is the grid as a whole.
                     false => self.open_menu(commands::GRID_AROUND_MENU, None),
@@ -874,7 +875,9 @@ impl App {
         let steps = self.scrolled.trunc();
         self.scrolled -= steps;
         for _ in 0..steps.abs() as u32 {
-            if self.grid.is_some() {
+            if self.wall().is_some() {
+                self.turn_wall(steps < 0.0);
+            } else if self.grid.is_some() {
                 // A page at a time.
                 let per_page = self.grid_layout(self.window_size()).per_page() as i64;
                 self.move_cursor(if steps < 0.0 { per_page } else { -per_page });
