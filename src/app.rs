@@ -69,7 +69,7 @@ use draw::*;
 mod edit;
 mod grid;
 mod wall;
-use wall::Wall;
+use wall::{TileKey, Wall};
 mod input;
 mod menu;
 mod palette;
@@ -1560,6 +1560,9 @@ pub struct App {
     /// While the window is being resized: the size the wall is laid out
     /// for, scaled to the window meanwhile, and when the last resize came.
     wall_frozen: Option<((u32, u32), Instant)>,
+    /// The wall's tiles as last painted, and what each was painted with.
+    wall_copy: Vec<u32>,
+    wall_kept: Vec<TileKey>,
     drag: Option<Drag>,
     slide_delay: Duration,
     slide_at: Option<Instant>,
@@ -2179,6 +2182,8 @@ impl App {
             last_click: None,
             wall_name: None,
             wall_frozen: None,
+            wall_copy: Vec::new(),
+            wall_kept: Vec::new(),
             drag: None,
             slide_delay,
             slide_at: options.slideshow_delay.map(|_| Instant::now() + slide_delay),

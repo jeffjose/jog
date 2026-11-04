@@ -39,6 +39,8 @@ pub(super) struct Wall {
     heard: Option<usize>,
     /// When `--debug` last said how the players keep up.
     told: Instant,
+    /// The frames taken from the players, all told.
+    stamps: u64,
 }
 
 /// A page turning: the tiles of the page leaving, from when, and which way.
@@ -47,6 +49,17 @@ struct Turn {
     since: Instant,
     forward: bool,
 }
+/// What a tile of the wall was drawn with, to tell whether it needs
+/// drawing again.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) struct TileKey {
+    pos: usize,
+    place: [i32; 4],
+    /// The frame or thumbnail it showed.
+    source: u64,
+    marked: bool,
+}
+
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Tile {
@@ -64,11 +77,14 @@ struct TilePlayer {
     frames: u32,
     /// The size of the tile its frames are drawn for.
     bounds: (u32, u32),
+    /// Which frame it has, counted across the wall's players: what the
+    /// wall drew of it last time tells it whether the tile is drawn again.
+    stamp: u64,
 }
 
 impl Wall {
     pub(super) fn at(start: usize) -> Wall {
-        Wall { start, back: Vec::new(), columns: kept_columns(), auto: false, next_at: None, turn: None, players: Vec::new(), heard: None, told: Instant::now() }
+        Wall { start, back: Vec::new(), columns: kept_columns(), auto: false, next_at: None, turn: None, players: Vec::new(), heard: None, told: Instant::now(), stamps: 0 }
     }
 }
 
@@ -436,7 +452,7 @@ impl App {
         let Some(wall) = self.wall_mut() else { return };
         while wall.players.len() < wanted.len() {
             let proxy = proxy.clone();
-            wall.players.push(TilePlayer { trailers: Trailers::new(true, move |note| proxy.send_event(Event::Trailer(note)).is_ok()), id: None, frame: None, frames: 0, bounds: (0, 0) });
+            wall.players.push(TilePlayer { trailers: Trailers::new(true, move |note| proxy.send_event(Event::Trailer(note)).is_ok()), id: None, frame: None, frames: 0, bounds: (0, 0), stamp: 0 });
         }
         // Those already on a wanted video stay on it; the rest move on.
         let mut free: Vec<usize> = (0..wall.players.len()).filter(|&at| wall.players[at].id.is_none_or(|id| !wanted.iter().any(|(want, _)| *want == id))).collect();
@@ -515,6 +531,8 @@ impl App {
                 if player.id == Some(id) {
                     player.frame = Some(frame);
                     player.frames += 1;
+                    wall.stamps += 1;
+                    player.stamp = wall.stamps;
                     any = true;
                 }
             }
@@ -594,8 +612,77 @@ impl App {
                 }
             }
         }
-        // While the pages turn by themselves, a line along the top fills
-        // up until the next turn.
+    }
+
+    /// Paints the wall into the window. The tiles are kept in a copy of
+    /// their own between frames, and only those whose picture changed are
+    /// drawn again: most frames bring a new picture for one or two of
+    /// them, and drawing every tile each time was most of a frame's paint.
+    /// While a page turns, the window is resized or a picture grows out of
+    /// a tile, it is all drawn afresh.
+    pub(super) fn paint_wall(&mut self, pixels: &mut [u32], window: (u32, u32)) {
+        // Out of the way while the players' frames are drawn into it.
+        let mut copy = std::mem::take(&mut self.wall_copy);
+        let Some(wall) = self.wall() else { return };
+        let len = window.0 as usize * window.1 as usize;
+        let settled = wall.turn.is_none() && self.wall_frozen.is_none() && self.grow.is_none() && pixels.len() == len;
+        if !settled {
+            self.wall_copy = copy;
+            self.wall_kept.clear();
+            ui::fill_all(pixels, GRID_COLOR);
+            return self.draw_wall(&mut Canvas::new(pixels, window.0, window.1));
+        }
+        let tiles = self.wall_page(wall, wall.start, window);
+        // What each tile shows: a player's frame, a thumbnail, or nothing yet.
+        let thumbs: Vec<Option<Arc<Frame>>> = tiles.iter().map(|tile| self.loader.thumb(self.list[tile.pos])).collect();
+        let sources: Vec<(Option<&Frame>, u64)> = tiles
+            .iter()
+            .zip(&thumbs)
+            .map(|(tile, thumb)| {
+                let id = self.list[tile.pos];
+                let player = wall.players.iter().find(|player| player.id == Some(id) && player.frame.as_ref().is_some_and(|frame| !frame.pixels.is_empty()));
+                match (player, thumb) {
+                    (Some(player), _) => (player.frame.as_ref(), (1 << 63) | player.stamp),
+                    (None, Some(thumb)) => (Some(&**thumb), Arc::as_ptr(thumb) as u64),
+                    (None, None) => (None, 0),
+                }
+            })
+            .collect();
+        let keys: Vec<TileKey> = tiles.iter().zip(&sources).map(|(tile, (_, source))| TileKey { pos: tile.pos, place: tile.place, source: *source, marked: self.marks.contains(&self.list[tile.pos]) }).collect();
+        // Another page, size or shape: the copy starts afresh.
+        let same_page = self.wall_kept.len() == keys.len() && self.wall_kept.iter().zip(&keys).all(|(was, now)| was.pos == now.pos && was.place == now.place) && copy.len() == len;
+        if !same_page {
+            ui::size_for(&mut copy, len);
+            ui::fill_all(&mut copy, GRID_COLOR);
+        }
+        let changed: Vec<usize> = (0..keys.len()).filter(|&at| !same_page || self.wall_kept[at] != keys[at]).collect();
+        let mut canvas = Canvas::new(&mut copy, window.0, window.1);
+        let blits: Vec<(&Frame, [i32; 4])> = changed.iter().filter_map(|&at| sources[at].0.map(|frame| (frame, keys[at].place))).collect();
+        for &at in &changed {
+            if sources[at].0.is_none() {
+                let [x, y, w, h] = keys[at].place;
+                canvas.fill(x, y, w, h, PLACEHOLDER_COLOR);
+            }
+        }
+        canvas.images_cover(&blits);
+        for &at in &changed {
+            let [x, y, w, h] = keys[at].place;
+            canvas.round_off(x, y, w, h, RADIUS, GRID_COLOR);
+            if keys[at].marked {
+                let dot = (window.1 as i32 / 90).max(8);
+                canvas.round_fill(x + dot / 2, y + dot / 2, dot, dot, dot / 2, MARK_COLOR, 256);
+            }
+        }
+        drop(canvas);
+        ui::copy_into(pixels, &copy);
+        self.wall_copy = copy;
+        self.wall_kept = keys;
+    }
+
+    /// While the pages turn by themselves, a line along the top that fills
+    /// up until the next turn.
+    pub(super) fn draw_wall_progress(&self, canvas: &mut Canvas) {
+        let Some(wall) = self.wall() else { return };
         if let Some(next) = wall.next_at.filter(|_| wall.auto && wall.turn.is_none()) {
             let left = next.saturating_duration_since(Instant::now()).as_secs_f64() / WALL_HOLD.as_secs_f64();
             let thick = (canvas.height / 400).max(2);

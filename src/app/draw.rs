@@ -329,10 +329,16 @@ impl App {
                 if moved {
                     self.request();
                 }
-                ui::fill_all(pixels, GRID_COLOR);
                 self.scene_live = false;
                 self.render_pip(window);
-                self.draw_grid(&mut Canvas::new(pixels, window.0, window.1));
+                if self.wall().is_some() {
+                    self.paint_wall(pixels, window);
+                    self.draw_wall_progress(&mut Canvas::new(pixels, window.0, window.1));
+                } else {
+                    self.wall_kept.clear();
+                    ui::fill_all(pixels, GRID_COLOR);
+                    self.draw_grid(&mut Canvas::new(pixels, window.0, window.1));
+                }
                 self.draw_shrinking(&mut Canvas::new(pixels, window.0, window.1), &layout);
                 if self.options.debug {
                     eprintln!("jog: {:>7.1?} draw  grid", started.elapsed());
