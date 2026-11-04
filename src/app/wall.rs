@@ -193,10 +193,17 @@ impl App {
 
     /// The tiles of the page from `start`.
     fn wall_page(&self, wall: &Wall, start: usize, window: (u32, u32)) -> Vec<Tile> {
-        let columns = self.wall_columns(wall, window);
+        // While the window is being resized, the layout it had, stretched.
+        let laid = self.wall_frozen.map_or(window, |(kept, _)| kept);
+        let (sx, sy) = (f64::from(window.0) / f64::from(laid.0.max(1)), f64::from(window.1) / f64::from(laid.1.max(1)));
+        let columns = self.wall_columns(wall, laid);
         let ratios = self.list.iter().skip(start).map(|&id| self.wall_ratio(id));
-        let size = (window.0 as i32, window.1 as i32);
-        pack(ratios, size, columns).into_iter().enumerate().map(|(at, (place, step))| Tile { pos: start + at, place, step }).collect()
+        let size = (laid.0 as i32, laid.1 as i32);
+        let stretch = |[x, y, w, h]: [i32; 4]| {
+            let (left, top) = ((f64::from(x) * sx).round() as i32, (f64::from(y) * sy).round() as i32);
+            [left, top, (f64::from(x + w) * sx).round() as i32 - left, (f64::from(y + h) * sy).round() as i32 - top]
+        };
+        pack(ratios, size, columns).into_iter().enumerate().map(|(at, (place, step))| Tile { pos: start + at, place: stretch(place), step }).collect()
     }
 
     /// The tiles of the page on show.

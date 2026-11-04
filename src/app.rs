@@ -1557,6 +1557,9 @@ pub struct App {
     /// Where the wall last drew the name of the tile under the pointer:
     /// a click there copies it.
     wall_name: Option<[i32; 4]>,
+    /// While the window is being resized: the size the wall is laid out
+    /// for, scaled to the window meanwhile, and when the last resize came.
+    wall_frozen: Option<((u32, u32), Instant)>,
     drag: Option<Drag>,
     slide_delay: Duration,
     slide_at: Option<Instant>,
@@ -2175,6 +2178,7 @@ impl App {
             mouse: (0.0, 0.0),
             last_click: None,
             wall_name: None,
+            wall_frozen: None,
             drag: None,
             slide_delay,
             slide_at: options.slideshow_delay.map(|_| Instant::now() + slide_delay),
@@ -4689,6 +4693,12 @@ impl App {
         if self.trailer_due.is_some_and(|(_, at)| at <= now) {
             self.tend_trailer();
         }
+        // The window's size has held: the wall is laid out for it afresh.
+        if self.wall_frozen.is_some_and(|(_, at)| at + RESIZE_SETTLE <= now) {
+            self.wall_frozen = None;
+            self.request();
+            self.redraw();
+        }
         // The wall's page turns by itself.
         if self.wall().and_then(|wall| wall.next_at).is_some_and(|at| at <= now) {
             self.turn_wall(true);
@@ -4748,7 +4758,7 @@ impl App {
             self.redraw();
         }
         let held_until = held_until.filter(|at| *at > now);
-        let deadlines = [Some(self.session_due), flicker_due, held_until, self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.wall().and_then(|wall| wall.next_at), self.overview_due, self.back_due, self.hitches.due(), self.bench_quit, self.bench_keys.as_ref().map(|(_, at)| *at)];
+        let deadlines = [Some(self.session_due), flicker_due, held_until, self.settle_at, toast_until, self.time_until, self.slide_at, snapshot_at, bench_at, self.picture_due, self.font_due, self.grid_due, self.anim_due, toast_leaves, hold_due, self.trailer_due.map(|(_, at)| at), self.wall().and_then(|wall| wall.next_at), self.wall_frozen.map(|(_, at)| at + RESIZE_SETTLE), self.overview_due, self.back_due, self.hitches.due(), self.bench_quit, self.bench_keys.as_ref().map(|(_, at)| *at)];
         let next = deadlines.into_iter().flatten().min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }

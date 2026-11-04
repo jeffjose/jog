@@ -133,6 +133,15 @@ impl App {
     /// The window has a new size: told of by the display, or given at once
     /// as asked for, which on Wayland is not told of again.
     pub(super) fn resized(&mut self, size: PhysicalSize<u32>) {
+        // The wall keeps the layout it has while the size keeps changing,
+        // scaled to the window, and lays itself out afresh once it holds:
+        // otherwise its columns come and go at every step of a drag, and
+        // its videos stop and start with them.
+        let before = self.window_size();
+        if self.wall().is_some() && before != (size.width, size.height) {
+            let kept = self.wall_frozen.map_or(before, |(kept, _)| kept);
+            self.wall_frozen = Some((kept, Instant::now()));
+        }
         if self.on_x11() {
             self.size.set((size.width, size.height));
         }
