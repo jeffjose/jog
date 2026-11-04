@@ -62,8 +62,37 @@ struct TilePlayer {
 
 impl Wall {
     pub(super) fn at(start: usize) -> Wall {
-        Wall { start, back: Vec::new(), columns: None, auto: false, next_at: None, turn: None, players: Vec::new(), heard: None }
+        Wall { start, back: Vec::new(), columns: kept_columns(), auto: false, next_at: None, turn: None, players: Vec::new(), heard: None }
     }
+}
+
+/// How many columns the wall was last set to, kept between runs in the
+/// state folder; read from there once, the first time it is wanted.
+static COLUMNS: std::sync::Mutex<Option<Option<i32>>> = std::sync::Mutex::new(None);
+
+fn columns_file() -> Option<PathBuf> {
+    crate::positions::state_dir().map(|dir| dir.join("wall-columns"))
+}
+
+fn kept_columns() -> Option<i32> {
+    let mut kept = COLUMNS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *kept.get_or_insert_with(|| {
+        let text = std::fs::read_to_string(columns_file()?).ok()?;
+        text.trim().parse().ok().filter(|columns| (2..=16).contains(columns))
+    })
+}
+
+/// Keeps the columns for the next wall and the next run; the file is
+/// written on a thread of its own.
+fn keep_columns(columns: i32) {
+    *COLUMNS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Some(columns));
+    std::thread::spawn(move || {
+        let Some(file) = columns_file() else { return };
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(file, format!("{columns}\n"));
+    });
 }
 
 /// Packs pictures of these shapes, each its width over its height, into
@@ -244,6 +273,7 @@ impl App {
             wall.columns = Some(columns);
             wall.back.clear();
         }
+        keep_columns(columns);
         self.toast(format!("{columns} across"));
         self.request();
         self.redraw();

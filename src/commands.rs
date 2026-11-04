@@ -1267,7 +1267,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("PgDn  PgUp  Wheel", "Next / previous page"),
                 ("Space", "Pages turn by themselves"),
                 ("Pointer on a video", "Its sound and name"),
-                ("Click  Right click", "Play it / menu for the file"),
+                ("Double click  Right click", "Play it / menu for the file"),
             ],
         ),
     ],

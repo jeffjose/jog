@@ -585,13 +585,18 @@ impl App {
                     } else if self.point_cursor() {
                         // Shift marks the run from the last one marked to
                         // here; Ctrl marks this one; a plain click opens it.
+                        // On the wall, where one is watching, it takes a
+                        // double click on the same tile.
                         let cursor = self.focus();
+                        let near = |(at, (cx, cy)): (Instant, (f64, f64))| at.elapsed() < DOUBLE_CLICK && (x - cx).abs() < 8.0 && (y - cy).abs() < 8.0;
                         if self.modifiers.shift_key() {
                             self.mark_range(cursor);
                         } else if self.modifiers.control_key() {
                             self.mark_one(cursor);
-                        } else {
+                        } else if self.wall().is_none() || self.last_click.take().is_some_and(near) {
                             self.open_from_grid();
+                        } else {
+                            self.last_click = Some((Instant::now(), (x, y)));
                         }
                     }
                 }
