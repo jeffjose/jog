@@ -1554,6 +1554,9 @@ pub struct App {
     mouse: (f64, f64),
     /// When and where the image was last clicked, to tell a double click.
     last_click: Option<(Instant, (f64, f64))>,
+    /// Where the wall last drew the name of the tile under the pointer:
+    /// a click there copies it.
+    wall_name: Option<[i32; 4]>,
     drag: Option<Drag>,
     slide_delay: Duration,
     slide_at: Option<Instant>,
@@ -2171,6 +2174,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             mouse: (0.0, 0.0),
             last_click: None,
+            wall_name: None,
             drag: None,
             slide_delay,
             slide_at: options.slideshow_delay.map(|_| Instant::now() + slide_delay),

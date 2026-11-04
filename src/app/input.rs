@@ -582,6 +582,10 @@ impl App {
                         // keeping the button down drags through them.
                         self.drag = Some(Drag::Pages);
                         self.drag_pages(x);
+                    } else if self.wall().is_some() && self.wall_name.is_some_and(|[nx, ny, nw, nh]| (nx..nx + nw).contains(&(x as i32)) && (ny..ny + nh).contains(&(y as i32))) {
+                        // The name at the foot of a wall's tile: copied.
+                        self.point_cursor();
+                        self.execute(Command::CopyName, event_loop);
                     } else if self.point_cursor() {
                         // Shift marks the run from the last one marked to
                         // here; Ctrl marks this one; a plain click opens it.

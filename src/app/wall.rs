@@ -561,6 +561,7 @@ impl App {
     /// The words on the wall: the name of the file under the pointer, at
     /// the foot of its tile, and a speaker on it while it is heard.
     pub(super) fn draw_wall_labels(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
+        self.wall_name = None;
         if self.wall().is_some_and(|wall| wall.turn.is_some()) || !self.pointer_inside() {
             return;
         }
@@ -573,7 +574,17 @@ impl App {
         let band = (line + pad * 3).min(h);
         canvas.fade_down(x + 2, y + h - band, w - 4, band - 2, 70);
         let name = clipped(text, &title_of(&self.files[id]), w - 2 * pad, px);
-        text.draw(canvas, x + pad, y + h - line - pad, px, TEXT_COLOR, &name);
+        let (left, top) = (x + pad, y + h - line - pad);
+        // A click on the name copies it; under the pointer it says so by
+        // a pill behind it.
+        let place = [left - pad / 2, top - pad / 3, text.width(&name, px) + pad, line + pad * 2 / 3];
+        let [px0, py0, pw, ph] = place;
+        let over = (px0..px0 + pw).contains(&(self.mouse.0 as i32)) && (py0..py0 + ph).contains(&(self.mouse.1 as i32));
+        if over {
+            canvas.round_fill(px0, py0, pw, ph, ph / 2, 0x000000, 170);
+        }
+        text.draw(canvas, left, top, px, TEXT_COLOR, &name);
+        self.wall_name = Some(place);
         if self.wall_heard(id) {
             let icon = commands::icons::VOLUME_2;
             let side = line + pad;
