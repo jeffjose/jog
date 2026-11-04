@@ -32,6 +32,8 @@ enum Message {
     /// With its sound, or without: the wall's video under the pointer is
     /// heard, the rest are not.
     Sound(bool),
+    /// New bounds for the frames of the video playing: its tile changed size.
+    Bounds((u32, u32)),
     Player(Signal),
 }
 
@@ -75,6 +77,29 @@ fn heed(player: &Player, playing: &mut Option<Playing>) {
             PlayerEvent::Crashed => *playing = None,
             _ => {}
         }
+    }
+}
+
+/// The size a picture is scaled to to cover `bounds`: as small as it can
+/// be with neither side short, its shape kept, never larger than it is.
+fn cover_size(native: (u32, u32), bounds: (u32, u32)) -> (u32, u32) {
+    let (nw, nh) = (f64::from(native.0.max(1)), f64::from(native.1.max(1)));
+    let scale = (f64::from(bounds.0) / nw).max(f64::from(bounds.1) / nh).min(1.0);
+    (((nw * scale).ceil() as u32).max(1), ((nh * scale).ceil() as u32).max(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cover_size;
+
+    #[test]
+    fn a_cover_leaves_no_side_short() {
+        // A portrait video on a square tile: as wide as the tile.
+        assert_eq!(cover_size((1080, 1920), (264, 264)), (264, 470));
+        // A landscape one on a tall tile: as tall as the tile.
+        assert_eq!(cover_size((1920, 1080), (264, 470)), (836, 470));
+        // Never enlarged: the tile shows it larger itself.
+        assert_eq!(cover_size((320, 240), (640, 640)), (320, 240));
     }
 }
 
@@ -128,6 +153,7 @@ impl Trailers {
                             match later {
                                 Message::Player(_) => {}
                                 Message::Sound(on) => player.set("aid", if on { "auto" } else { "no" }),
+                                Message::Bounds(bounds) => playing.iter_mut().for_each(|playing| playing.bounds = bounds),
                                 ask => newest = Some(ask),
                             }
                         }
@@ -165,6 +191,7 @@ impl Trailers {
                         };
                     }
                     Ok(Message::Sound(on)) => player.set("aid", if on { "auto" } else { "no" }),
+                    Ok(Message::Bounds(bounds)) => playing.iter_mut().for_each(|playing| playing.bounds = bounds),
                     Ok(Message::Player(Signal::Events)) => heed(&player, &mut playing),
                     Ok(Message::Player(Signal::Frame)) => {
                         // mpv stalls unless each frame it announces is taken,
@@ -177,7 +204,9 @@ impl Trailers {
                         };
                         let size = player.number("dwidth").zip(player.number("dheight"));
                         let native = size.map_or((16, 9), |(w, h)| ((w as u32).max(1), (h as u32).max(1)));
-                        let (width, height) = fit_size(native, playing.bounds, true);
+                        // The wall's frames just cover their tile, whatever shape it
+                        // was taken to be before the video's own size was known.
+                        let (width, height) = if fine { cover_size(native, playing.bounds) } else { fit_size(native, playing.bounds, true) };
                         let mut pixels = vec![0; width as usize * height as usize];
                         if player.render(&mut pixels, width, height) {
                             let frame = Frame::still(width, height, native, pixels);
@@ -232,6 +261,11 @@ impl Trailers {
 
     pub fn stop(&self) {
         let _ = self.messages.send(Message::Stop);
+    }
+
+    /// Frames from now on for these bounds, the video playing on.
+    pub fn resize(&self, bounds: (u32, u32)) {
+        let _ = self.messages.send(Message::Bounds(bounds));
     }
 
     /// Plays on with the sound on, or off.

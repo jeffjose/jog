@@ -57,6 +57,14 @@ pub fn main(args: &[String]) -> ExitCode {
     };
     DEBUG.store(args.get(2).is_some_and(|debug| debug == "1"), Ordering::Relaxed);
     super::GPU_VIDEO.store(args.get(3).is_some_and(|on| on == "1"), Ordering::Relaxed);
+    // A preview (the grid's trailer, the wall's tiles, scenes, the seek
+    // bar's picture) has what the cores leave after the window and the
+    // video on view: a wall of them can take every core. Set before mpv
+    // starts a thread, so that its decoders have it too.
+    if role == Role::Preview {
+        // SAFETY: setpriority with 0 changes only this process.
+        unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) };
+    }
     let say = |notice: Notice| {
         if wire::send(socket.as_fd(), &notice.encode(), None).is_err() {
             leave(0);

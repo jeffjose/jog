@@ -62,6 +62,8 @@ struct TilePlayer {
     frame: Option<Frame>,
     /// Frames taken since the last `--debug` line about the wall.
     frames: u32,
+    /// The size of the tile its frames are drawn for.
+    bounds: (u32, u32),
 }
 
 impl Wall {
@@ -427,18 +429,23 @@ impl App {
         let Some(wall) = self.wall_mut() else { return };
         while wall.players.len() < wanted.len() {
             let proxy = proxy.clone();
-            wall.players.push(TilePlayer { trailers: Trailers::new(true, move |note| proxy.send_event(Event::Trailer(note)).is_ok()), id: None, frame: None, frames: 0 });
+            wall.players.push(TilePlayer { trailers: Trailers::new(true, move |note| proxy.send_event(Event::Trailer(note)).is_ok()), id: None, frame: None, frames: 0, bounds: (0, 0) });
         }
         // Those already on a wanted video stay on it; the rest move on.
         let mut free: Vec<usize> = (0..wall.players.len()).filter(|&at| wall.players[at].id.is_none_or(|id| !wanted.iter().any(|(want, _)| *want == id))).collect();
         for ((id, bounds), path) in wanted.iter().zip(paths) {
-            if wall.players.iter().any(|player| player.id == Some(*id)) {
+            if let Some(player) = wall.players.iter_mut().find(|player| player.id == Some(*id)) {
+                // Its tile changed size: the frames follow, the video playing on.
+                if player.bounds != *bounds {
+                    player.bounds = *bounds;
+                    player.trailers.resize(*bounds);
+                }
                 continue;
             }
             let Some(at) = free.pop() else { break };
             let player = &mut wall.players[at];
             player.trailers.play(*id, path, *bounds, None);
-            (player.id, player.frame) = (Some(*id), None);
+            (player.id, player.frame, player.bounds) = (Some(*id), None, *bounds);
             if wall.heard == Some(at) {
                 player.trailers.sound(false);
                 wall.heard = None;
@@ -486,12 +493,10 @@ impl App {
         crate::mpv::crashed_on(&self.files[id]) == Some(crate::mpv::Crash::Software)
     }
 
-    /// How large a tile's video is drawn by its player: just covering the tile.
+    /// The tile a player draws for: its frames just cover it, at the
+    /// shape the video turns out to have.
     fn wall_bounds(&self, tile: &Tile) -> (u32, u32) {
-        let ratio = self.wall_ratio(self.list[tile.pos]);
-        let (w, h) = (f64::from(tile.place[2].max(1)), f64::from(tile.place[3].max(1)));
-        let (w, h) = if ratio > w / h { (h * ratio, h) } else { (w, w / ratio) };
-        (w.ceil().max(1.0) as u32, h.ceil().max(1.0) as u32)
+        (tile.place[2].max(1) as u32, tile.place[3].max(1) as u32)
     }
 
     /// Takes the frames the wall's players have ready. Whether there were any.
