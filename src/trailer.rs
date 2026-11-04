@@ -38,6 +38,7 @@ enum Message {
 /// The video being played and where its trailer has got to.
 struct Playing {
     id: usize,
+    path: PathBuf,
     bounds: (u32, u32),
     /// Where it is played on from, when it is not a trailer of the whole.
     from: Option<f64>,
@@ -54,15 +55,20 @@ struct Playing {
 }
 
 /// Reads the player's events, noting when the video last asked for has
-/// begun to show. `opening` counts the files asked for that have not been
-/// started on yet: frames only count once none are left.
-fn heed(player: &Player, opening: &mut usize, playing: &mut Option<Playing>) {
+/// begun to show: a first frame shown while the file the player holds is
+/// that video's. Counting the files asked for against those started does
+/// not do: a file replaced before it has started never says so, and the
+/// count, never back to nothing, left a trailer dark for good after a
+/// fast run of pages on the wall.
+fn heed(player: &Player, playing: &mut Option<Playing>) {
+    use std::os::unix::ffi::OsStrExt;
     for event in player.events() {
         match event {
-            PlayerEvent::Started => *opening = opening.saturating_sub(1),
-            PlayerEvent::Showing if *opening == 0 => {
+            PlayerEvent::Showing => {
                 if let Some(playing) = playing {
-                    playing.restarts += 1;
+                    if player.text("path").is_some_and(|open| open.as_bytes() == playing.path.as_os_str().as_bytes()) {
+                        playing.restarts += 1;
+                    }
                 }
             }
             // Gone with the video it had: replaced when the next is asked for.
@@ -103,7 +109,6 @@ impl Trailers {
             // Without a player there are no trailers; the grid does without.
             let Some(mut player) = start() else { return };
             let mut playing: Option<Playing> = None;
-            let mut opening = 0;
             // Frames are rendered into this when nobody wants them.
             let mut spare = Vec::new();
             loop {
@@ -128,11 +133,11 @@ impl Trailers {
                         }
                         // Whatever the player said meanwhile was about the
                         // video before.
-                        heed(&player, &mut opening, &mut playing);
+                        heed(&player, &mut playing);
                         // One that crashed on the video before is replaced.
                         if player.gone() {
                             match start() {
-                                Some(started) => (player, opening) = (started, 0),
+                                Some(started) => player = started,
                                 None => return,
                             }
                         }
@@ -140,7 +145,6 @@ impl Trailers {
                         let newest = newest.filter(|message| !matches!(message, Message::Play(_, path, ..) if crate::mpv::crashed_on(path) == Some(crate::mpv::Crash::Software)));
                         playing = match newest {
                             Some(Message::Play(id, path, bounds, from)) => {
-                                opening += 1;
                                 match from {
                                     Some(start) => {
                                         use std::os::unix::ffi::OsStrExt;
@@ -150,7 +154,7 @@ impl Trailers {
                                     None => player.open(&path),
                                 }
                                 player.set("pause", "no");
-                                Some(Playing { id, bounds, from, length: None, stretch: 0, next_at: None, restarts: 0, showing: false })
+                                Some(Playing { id, path: path.clone(), bounds, from, length: None, stretch: 0, next_at: None, restarts: 0, showing: false })
                             }
                             _ => {
                                 player.set("pause", "yes");
@@ -161,7 +165,7 @@ impl Trailers {
                         };
                     }
                     Ok(Message::Sound(on)) => player.set("aid", if on { "auto" } else { "no" }),
-                    Ok(Message::Player(Signal::Events)) => heed(&player, &mut opening, &mut playing),
+                    Ok(Message::Player(Signal::Events)) => heed(&player, &mut playing),
                     Ok(Message::Player(Signal::Frame)) => {
                         // mpv stalls unless each frame it announces is taken,
                         // wanted or not: with nothing playing, or while the

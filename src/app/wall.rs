@@ -37,6 +37,8 @@ pub(super) struct Wall {
     players: Vec<TilePlayer>,
     /// The player whose sound is on.
     heard: Option<usize>,
+    /// When `--debug` last said how the players keep up.
+    told: Instant,
 }
 
 /// A page turning: the tiles of the page leaving, from when, and which way.
@@ -58,11 +60,13 @@ struct TilePlayer {
     trailers: Trailers,
     id: Option<usize>,
     frame: Option<Frame>,
+    /// Frames taken since the last `--debug` line about the wall.
+    frames: u32,
 }
 
 impl Wall {
     pub(super) fn at(start: usize) -> Wall {
-        Wall { start, back: Vec::new(), columns: kept_columns(), auto: false, next_at: None, turn: None, players: Vec::new(), heard: None }
+        Wall { start, back: Vec::new(), columns: kept_columns(), auto: false, next_at: None, turn: None, players: Vec::new(), heard: None, told: Instant::now() }
     }
 }
 
@@ -418,11 +422,12 @@ impl App {
         // Off-screen runs and benchmarks are silent, as the main player is.
         let heard_id = hovered.filter(|_| !self.muted && !*SILENT && self.bench.is_none());
         let proxy = self.proxy.clone();
+        let debug = self.options.debug;
         let paths: Vec<PathBuf> = wanted.iter().map(|(id, _)| self.files[*id].clone()).collect();
         let Some(wall) = self.wall_mut() else { return };
         while wall.players.len() < wanted.len() {
             let proxy = proxy.clone();
-            wall.players.push(TilePlayer { trailers: Trailers::new(true, move |note| proxy.send_event(Event::Trailer(note)).is_ok()), id: None, frame: None });
+            wall.players.push(TilePlayer { trailers: Trailers::new(true, move |note| proxy.send_event(Event::Trailer(note)).is_ok()), id: None, frame: None, frames: 0 });
         }
         // Those already on a wanted video stay on it; the rest move on.
         let mut free: Vec<usize> = (0..wall.players.len()).filter(|&at| wall.players[at].id.is_none_or(|id| !wanted.iter().any(|(want, _)| *want == id))).collect();
@@ -456,6 +461,17 @@ impl App {
             }
             wall.heard = heard;
         }
+        // With --debug, every 2 s: how many frames a second each player
+        // has given, `-` for one with no video.
+        let every = wall.told.elapsed();
+        if debug && every >= Duration::from_secs(2) {
+            let rates: Vec<String> = wall.players.iter_mut().map(|player| {
+                let rate = f64::from(std::mem::take(&mut player.frames)) / every.as_secs_f64();
+                if player.id.is_some() { format!("{rate:.0}") } else { "-".to_string() }
+            }).collect();
+            wall.told = Instant::now();
+            eprintln!("jog: wall    {} players, frames a second: {}", rates.len(), rates.join(" "));
+        }
     }
 
     /// Whether the pointer is over the window.
@@ -486,6 +502,7 @@ impl App {
             if let Some((id, frame)) = player.trailers.take() {
                 if player.id == Some(id) {
                     player.frame = Some(frame);
+                    player.frames += 1;
                     any = true;
                 }
             }
