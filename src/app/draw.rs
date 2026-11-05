@@ -183,6 +183,15 @@ impl App {
         Some(full.unwrap_or_else(|| frame.clone()))
     }
 
+    /// Whether something jog draws in the grid would lie over the video
+    /// playing on in its cell: a menu there, or any of the boxes that come
+    /// up in the middle of the window.
+    fn covers_pip(&self, [x, y, w, h]: [i32; 4]) -> bool {
+        let over = |menu: &Menu| menu.x < x + w && x < menu.x + menu.width && menu.y < y + h && y < menu.y + menu.height;
+        let menu = self.menu.as_ref().is_some_and(|menu| over(menu) || menu.sub.as_deref().is_some_and(over));
+        menu || self.prompt.is_some() || self.confirm.is_some() || self.palette.is_some() || self.help
+    }
+
     pub(super) fn paint(&mut self, pixels: &mut [u32], window: (u32, u32)) {
         // Drawing waits on nothing: see `mpv::drawing`.
         let _drawing = crate::mpv::drawing();
@@ -196,6 +205,9 @@ impl App {
         // picture under the grid, has its window there.
         let showing = self.video.as_ref().is_some_and(|video| video.showing);
         let pip = (self.grid.is_some() && showing).then(|| self.pip_place(window).or_else(|| self.pip_small(window))).flatten();
+        // Its window would cover a menu or a box drawn over it: hidden
+        // meanwhile, its cell showing the still picture.
+        let pip = pip.filter(|place| !self.covers_pip(*place));
         let full = (playing && !stepped_back).then_some([left, 0, stage_w as i32, stage_h as i32]);
         // Over the workspaces or in Edit, nothing of a video is shown.
         let elsewhere = self.overview.is_some() || self.editor.is_some();
@@ -831,7 +843,15 @@ impl App {
             let (across, down) = (panel.width, canvas.height);
             let mut sheet = canvas.copy(panel.left, 0, across, down);
             if sheet.len() == (across * down) as usize {
-                self.draw_list(&mut Canvas::new(&mut sheet, across as u32, down as u32), &mut text, panel);
+                // How opaque each pixel is, kept as the list is drawn and
+                // laid back with it: over a video the player draws on the
+                // GPU that is what is handed over, and without it the list
+                // went over as nothing at all.
+                let mut alpha: Vec<u8> = sheet.iter().map(|pixel| (pixel >> 24) as u8).collect();
+                self.draw_list(&mut Canvas::new(&mut sheet, across as u32, down as u32).keeping_alpha(&mut alpha), &mut text, panel);
+                for (pixel, a) in sheet.iter_mut().zip(&alpha) {
+                    *pixel = *pixel & 0xFFFFFF | u32::from(*a) << 24;
+                }
                 canvas.dissolve(panel.left, 0, across, down, &sheet, 256);
             }
         }
