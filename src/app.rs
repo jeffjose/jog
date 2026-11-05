@@ -1840,6 +1840,8 @@ impl App {
         ACCENT.store(options.accent, atomic::Ordering::Relaxed);
         crate::mpv::DEBUG.store(options.debug, atomic::Ordering::Relaxed);
         crate::mpv::HWDEC.store(options.hwdec, atomic::Ordering::Relaxed);
+        // Given web addresses, the players find pages' videos with yt-dlp.
+        crate::mpv::WEB.store(files.iter().any(|path| files::is_url(path)), atomic::Ordering::Relaxed);
         // Videos drawn on the GPU where they can be, unless asked not to.
         crate::mpv::choose_gpu_video(options.gpu_video, std::env::var_os("JOG_SNAPSHOT").is_some());
         // The workspaces of the config file; and unless one of them was

@@ -95,6 +95,9 @@ pub fn read(path: &Path, spec: Spec) -> Result<Source> {
 fn head_of(path: &Path) -> Vec<u8> {
     use std::io::Read;
     let mut head = Vec::new();
+    if files::is_url(path) {
+        return head;
+    }
     if let Ok(file) = std::fs::File::open(path) {
         let _ = file.take(256 << 10).read_to_end(&mut head);
     }
@@ -132,7 +135,7 @@ fn decode_file(path: &Path, target: Option<(u32, u32)>, thumbnail: bool) -> Resu
     if files::needs_ffmpeg(path) {
         return decode(&ffmpeg_image(path)?).map(Decoded::still);
     }
-    let bytes = std::fs::read(path)?;
+    let bytes = files::read(path)?;
     if files::is_heif(path) {
         // An ffmpeg new enough reads these too, where libheif is missing.
         let image = heif::decode(&bytes).map(|image| (image, Orientation::NoTransforms));

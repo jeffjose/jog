@@ -237,7 +237,8 @@ impl Engine {
                 // mpv's own scripts, stats, console, ytdl and the rest: none
                 // of them is used, and each is loaded as the player starts.
                 ("load-scripts", "no"),
-                ("ytdl", "no"),
+                // But with web addresses given, yt-dlp finds a page's video.
+                ("ytdl", if super::WEB.load(std::sync::atomic::Ordering::Relaxed) { "yes" } else { "no" }),
                 ("load-stats-overlay", "no"),
                 ("load-osd-console", "no"),
                 ("load-auto-profiles", "no"),

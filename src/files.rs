@@ -30,9 +30,48 @@ const VIDEO_EXTS: &[&str] = &[
 ];
 
 fn has_ext(path: &Path, exts: &[&str]) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| exts.iter().any(|x| e.eq_ignore_ascii_case(x)))
+    extension(path).is_some_and(|e| exts.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// Whether a path given is a web address: `http://` or `https://`.
+pub fn is_url(path: &Path) -> bool {
+    path.to_str().is_some_and(|text| text.starts_with("http://") || text.starts_with("https://"))
+}
+
+/// A file's extension; for a web address, of the last part of its path,
+/// whatever comes after it (`?w=800`, `#t=10`).
+fn extension(path: &Path) -> Option<&str> {
+    if !is_url(path) {
+        return path.extension().and_then(|e| e.to_str());
+    }
+    let text = path.to_str()?;
+    let text = text.split(['?', '#']).next()?;
+    let (_, last) = text.rsplit_once('/')?;
+    last.rsplit_once('.').map(|(_, ext)| ext).filter(|ext| !ext.is_empty())
+}
+
+/// A web address with no picture's or video's extension: a page, such as
+/// a YouTube or Reddit one, which the player's yt-dlp hook finds the
+/// video of.
+fn is_page(path: &Path) -> bool {
+    is_url(path) && !(has_ext(path, RASTER_EXTS) || has_ext(path, VIDEO_EXTS) || needs_ffmpeg(path) || is_heif(path) || is_jxl(path) || is_raw(path))
+}
+
+/// The bytes of a file, or of what a web address points at, fetched with
+/// curl. Only ever called on a decoding thread.
+pub fn read(path: &Path) -> std::io::Result<Vec<u8>> {
+    if !is_url(path) {
+        return std::fs::read(path);
+    }
+    let output = std::process::Command::new("curl")
+        .args(["-fsSL", "--max-time", "120", "--"])
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    match output.status.success() {
+        true => Ok(output.stdout),
+        false => Err(std::io::Error::other(format!("curl: {}", String::from_utf8_lossy(&output.stderr).trim()))),
+    }
 }
 
 pub fn is_raw(path: &Path) -> bool {
@@ -40,7 +79,7 @@ pub fn is_raw(path: &Path) -> bool {
 }
 
 pub fn is_video(path: &Path) -> bool {
-    has_ext(path, VIDEO_EXTS)
+    has_ext(path, VIDEO_EXTS) || is_page(path)
 }
 
 pub fn needs_ffmpeg(path: &Path) -> bool {
@@ -141,6 +180,9 @@ fn gather(args: &[PathBuf], listing: &Listing, report: bool) -> Playlist {
             for arg in args {
                 if arg.is_dir() {
                     list_dir(arg, listing.recursive, listing.only, &mut files);
+                } else if is_url(arg) {
+                    // A web address, fetched or streamed when it is shown.
+                    files.push(arg.clone());
                 } else if arg.exists() && !of_kind(arg, listing.only) {
                     // Named, but not of the kind asked for.
                 } else if arg.exists() {
@@ -304,6 +346,9 @@ pub fn scan(args: &[PathBuf], listing: &Listing) -> std::sync::mpsc::Receiver<Ve
     for (at, arg) in args.iter().enumerate() {
         if arg.is_dir() {
             heap.push(Waiting { dir: arg.clone(), rank: vec![at as u32 + 1], soon: soon(arg) });
+        } else if is_url(arg) {
+            // A web address, fetched or streamed when it is shown.
+            named.push((arg.clone(), vec![at as u32 + 1]));
         } else if arg.exists() && !of_kind(arg, listing.only) {
             // Named, but not of the kind asked for.
         } else if arg.exists() {
@@ -593,6 +638,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn web_addresses_go_by_the_end_of_their_path() {
+        let url = |text: &str| PathBuf::from(text);
+        assert!(is_url(&url("https://example.com/a.jpg")) && is_url(&url("http://example.com/")));
+        assert!(!is_url(&url("photos/https.jpg")));
+        // A picture or a video, whatever follows its name.
+        assert!(has_ext(&url("https://i.example.com/photo.JPG?w=800#top"), RASTER_EXTS));
+        assert!(is_video(&url("https://cdn.example.com/v/clip.mp4?token=x.y")));
+        assert!(!is_video(&url("https://i.example.com/photo.png")));
+        // A page: a video for the player's yt-dlp hook to find.
+        assert!(is_video(&url("https://www.youtube.com/watch?v=aqz-KE-bpKQ")));
+        assert!(is_video(&url("https://www.reddit.com/r/videos/comments/abc/some.title/")));
+        assert!(is_video(&url("https://example.com")));
+    }
+
+    #[test]
     fn the_scan_lists_what_the_walk_does_in_its_order() {
         let dir = std::env::temp_dir().join(format!("jog-scan-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -668,6 +728,10 @@ pub fn format_name(path: &Path) -> Option<String> {
 pub fn sniff_file(path: &Path) -> Option<&'static str> {
     use std::io::Read;
     let mut head = [0u8; 48];
+    // Not over the network: a web address goes by its extension.
+    if is_url(path) {
+        return None;
+    }
     let read = std::fs::File::open(path).and_then(|mut file| file.read(&mut head)).ok()?;
     sniff(&head[..read])
 }

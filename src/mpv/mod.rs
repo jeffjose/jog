@@ -46,6 +46,12 @@ pub fn gpu_video() -> bool {
     GPU_VIDEO.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Whether web addresses are among what jog was given: the players then
+/// have mpv's yt-dlp hook, which turns a page's address (YouTube, Reddit
+/// and the like) into its video. Left out otherwise, as it is loaded as
+/// each player starts. Set once, at the start, as `GPU_VIDEO` is.
+pub static WEB: AtomicBool = AtomicBool::new(false);
+
 /// jog's side: drawn on the GPU when asked, on an X11 display, which has
 /// windows inside windows to draw into; never on Wayland, nor in a
 /// scripted run, whose pictures are of jog's window alone.

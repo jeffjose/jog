@@ -26,6 +26,7 @@ Videos:
 jog PHOTOS/            # a folder, fullscreen
 jog -r PHOTOS/         # and its subfolders
 jog clip.mp4           # videos play through libmpv
+jog https://…          # a picture, a video, or a page with one (yt-dlp)
 ```
 
 ## Speed

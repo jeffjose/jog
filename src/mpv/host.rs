@@ -101,6 +101,7 @@ impl Player {
         command.arg(PLAYER_ARG).arg(role.word()).arg(if gpu { "1" } else { "0" }).arg(if debug { "1" } else { "0" });
         // Whether it draws on the GPU, as jog decided.
         command.arg(if super::gpu_video() { "1" } else { "0" });
+        command.arg(if super::WEB.load(std::sync::atomic::Ordering::Relaxed) { "1" } else { "0" });
         command.stdin(Stdio::null()).stdout(Stdio::null());
         // SAFETY: between fork and exec only async-signal-safe calls: dup2
         // and fcntl, on descriptors this process owns.
