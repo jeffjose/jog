@@ -20,22 +20,22 @@ fn info_tells_what_each_file_is() {
     }
     let picture: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests", "screens", "grid.png"].iter().collect();
     let info = |paths: &[&PathBuf]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_jog")).arg("-i").args(paths).env("JOG_CONFIG", "/dev/null").output().expect("jog runs");
+        let output = Command::new(env!("CARGO_BIN_EXE_jog")).arg("-i").args(paths).env("JOG_CONFIG", "/dev/null").env("JOG_STATE", dir.join("state")).output().expect("jog runs");
         let said = String::from_utf8_lossy(&output.stdout).into_owned();
         assert!(output.status.success(), "{said}{}", String::from_utf8_lossy(&output.stderr));
         said
     };
     // One file: a line.
     let said = info(&[&clip]);
-    assert!(said.starts_with(&format!("{}: 320×240 · 0:02 · H.264 · 25 fps", clip.display())), "{said}");
+    assert!(said.starts_with(&format!("{}: 320×240 (4:3) · 0:02 · H.264 · 25 fps", clip.display())), "{said}");
     assert!(said.contains("AAC stereo"), "{said}");
     // More: a table, a heading and a line apiece in order, the names first.
     let said = info(&[&clip, &picture]);
     let lines: Vec<&str> = said.lines().collect();
     assert_eq!(lines.len(), 3, "{said}");
-    assert!(lines[0].starts_with("Name ") && lines[0].contains("W×H  Length  Format"), "{}", lines[0]);
-    assert!(lines[1].starts_with(&clip.display().to_string()) && lines[1].contains("320×240    0:02  H.264") && lines[1].contains("AAC stereo"), "{}", lines[1]);
-    assert!(lines[2].starts_with(&picture.display().to_string()) && lines[2].contains("1280×800          PNG"), "{}", lines[2]);
+    assert!(lines[0].starts_with("Name ") && lines[0].contains("W×H  Ratio  Length  Format"), "{}", lines[0]);
+    assert!(lines[1].starts_with(&clip.display().to_string()) && ["320×240  4:3 ", " 0:02  H.264"].iter().all(|piece| lines[1].contains(piece)) && lines[1].contains("AAC stereo"), "{}", lines[1]);
+    assert!(lines[2].starts_with(&picture.display().to_string()) && lines[2].contains("1280×800  16:10 ") && lines[2].contains(" PNG "), "{}", lines[2]);
     // The columns line up: every line's pixels end where the heading's W×H does.
     let column = |line: &str, text: &str| line.find(text).map(|at| line[..at].chars().count() + text.chars().count());
     let end = column(lines[0], "W×H").unwrap();

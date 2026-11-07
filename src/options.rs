@@ -214,6 +214,12 @@ Workspaces are folders with names, set in the config file:
                              (config: hitches = false)
   -i, --info                 what each file is: size, length, codecs, HDR;
                              a table for more than one; no window
+      --info-sort COLUMN     the table by a column: name, width, height,
+                             pixels, ratio, length, format, fps, hdr, bitrate,
+                             audio, size (numbers largest first; -n reverses)
+      --info-filter TEST     only files that pass, as bitrate>5, ratio<1,
+                             length<=1:30, size>500mb, format=hevc, name~beach
+                             (= != < > <= >= and ~ for contains; repeatable)
   -h, --help [TOPIC]         show this help, or one topic of it
   -v, --version              show the version"),
     ("keys", "Keys", "
@@ -396,6 +402,10 @@ pub struct Options {
     pub verbose: bool,
     /// Print a line about each file, what it is, and quit: --info.
     pub info: bool,
+    /// The column --info's table is sorted by, and the tests a file must
+    /// pass to be in it: --info-sort, --info-filter.
+    pub info_sort: Option<String>,
+    pub info_filters: Vec<String>,
     /// Whether a frame late or a stall is told of on the terminal.
     pub hitches: bool,
     /// Whether videos are decoded by the GPU, where one can.
@@ -610,6 +620,7 @@ fn takes_value(name: &str) -> bool {
     let valued = [
         "geometry", "image-bg", "accent", "zoom", "sort", "start-at", "start", "filelist", "filter", "slideshow-delay", "on-last-slide",
         "output-dir", "subtitle-font", "subtitle-size", "subtitle-style", "frame-dir", "frame-format", "hdr", "convert", "quality", "audio",
+        "info-sort", "info-filter",
     ];
     valued.contains(&name) || name.starts_with("action")
 }
@@ -679,6 +690,8 @@ fn parse_with(
         debug: std::env::var_os("JOG_DEBUG").is_some(),
         verbose: false,
         info: false,
+        info_sort: None,
+        info_filters: Vec::new(),
         hitches: true,
         hwdec: true,
         gpu_video: true,
@@ -916,6 +929,14 @@ fn apply(
         "no-gpu-video" => options.gpu_video = false,
         "verbose" => options.verbose = true,
         "info" => options.info = true,
+        "info-sort" => {
+            options.info = true;
+            options.info_sort = Some(value()?);
+        }
+        "info-filter" => {
+            options.info = true;
+            options.info_filters.push(value()?);
+        }
         "watch" => options.watch = true,
         "edit" => options.edit = true,
         "positions" => options.resume = true,

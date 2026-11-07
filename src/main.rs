@@ -172,7 +172,8 @@ fn main() -> ExitCode {
     }
     // --info: a line on each file, and no window.
     if options.info {
-        return if info::print(&playlist.files) { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+        let asked = info::Asked { sort: options.info_sort.as_deref(), filters: &options.info_filters, reverse: options.listing.reverse };
+        return if info::print(&playlist.files, &asked) { ExitCode::SUCCESS } else { ExitCode::FAILURE };
     }
     match options.convert_to {
         Some(ConvertTo::Picture(format)) => {
