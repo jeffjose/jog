@@ -29,15 +29,17 @@ fn info_tells_what_each_file_is() {
     let said = info(&[&clip]);
     assert!(said.starts_with(&format!("{}: 320×240 · 0:02 · H.264 · 25 fps", clip.display())), "{said}");
     assert!(said.contains("AAC stereo"), "{said}");
-    // More: a table, a heading and a line apiece in order, the names last.
+    // More: a table, a heading and a line apiece in order, the names first.
     let said = info(&[&clip, &picture]);
     let lines: Vec<&str> = said.lines().collect();
     assert_eq!(lines.len(), 3, "{said}");
-    assert!(lines[0].trim_start().starts_with("W×H  Length  Format") && lines[0].ends_with("Name"), "{}", lines[0]);
-    assert!(lines[1].trim_start().starts_with("320×240    0:02  H.264") && lines[1].contains("AAC stereo") && lines[1].ends_with(&clip.display().to_string()), "{}", lines[1]);
-    assert!(lines[2].starts_with("1280×800          PNG") && lines[2].ends_with(&picture.display().to_string()), "{}", lines[2]);
-    // The columns line up: every line's name starts where the heading's does.
-    let at = lines[0].find("Name").unwrap();
-    assert!(lines[1..].iter().all(|line| line.char_indices().nth(lines[0][..at].chars().count()).is_some_and(|(_, c)| c == '/')), "{said}");
+    assert!(lines[0].starts_with("Name ") && lines[0].contains("W×H  Length  Format"), "{}", lines[0]);
+    assert!(lines[1].starts_with(&clip.display().to_string()) && lines[1].contains("320×240    0:02  H.264") && lines[1].contains("AAC stereo"), "{}", lines[1]);
+    assert!(lines[2].starts_with(&picture.display().to_string()) && lines[2].contains("1280×800          PNG"), "{}", lines[2]);
+    // The columns line up: every line's pixels end where the heading's W×H does.
+    let column = |line: &str, text: &str| line.find(text).map(|at| line[..at].chars().count() + text.chars().count());
+    let end = column(lines[0], "W×H").unwrap();
+    assert_eq!(column(lines[1], "320×240"), Some(end), "{said}");
+    assert_eq!(column(lines[2], "1280×800"), Some(end), "{said}");
     let _ = std::fs::remove_dir_all(&dir);
 }

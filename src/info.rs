@@ -1,6 +1,6 @@
 //! `--info`: what each file is, as the seek bar's details say it of a
 //! video; and no window. One file is told of in a line; more, in a table
-//! whose columns line up, with the names last, as `ls -l` has them.
+//! whose columns line up, the names first.
 
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -103,8 +103,10 @@ fn table(rows: &[(String, Row)], dim: bool) -> Vec<String> {
     let cells: Vec<Vec<String>> = rows.iter().map(|(_, row)| COLUMNS.iter().map(|column| (column.cell)(row)).collect()).collect();
     let used: Vec<usize> = (0..COLUMNS.len()).filter(|&at| cells.iter().any(|row| !row[at].is_empty())).collect();
     let widths: Vec<usize> = used.iter().map(|&at| cells.iter().map(|row| width(&row[at])).max().unwrap_or(0).max(width(COLUMNS[at].heading))).collect();
+    // The name first, as long as the longest, and the rest after it.
+    let name_width = rows.iter().map(|(name, _)| width(name)).max().unwrap_or(0).max(width("Name"));
     let line = |texts: &[&str], name: &str| {
-        let mut out = String::new();
+        let mut out = format!("{name}{}  ", " ".repeat(name_width - width(name)));
         for ((&at, &w), text) in used.iter().zip(&widths).zip(texts) {
             let pad = " ".repeat(w - width(text));
             match COLUMNS[at].right {
@@ -112,7 +114,6 @@ fn table(rows: &[(String, Row)], dim: bool) -> Vec<String> {
                 false => out.push_str(&format!("{text}{pad}  ")),
             }
         }
-        out.push_str(name);
         out.trim_end().to_string()
     };
     let headings: Vec<&str> = used.iter().map(|&at| COLUMNS[at].heading).collect();
@@ -236,9 +237,9 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "      W×H  Length  Format  fps    Bitrate  Audio                Size  Name",
-                "1080×1920    0:04  H.264    30  16.9 Mb/s  AAC mono 44.1 kHz  8.1 MB  clip.mp4",
-                "  640×640          PNG                                         337 B  small.png",
+                "Name             W×H  Length  Format  fps    Bitrate  Audio                Size",
+                "clip.mp4   1080×1920    0:04  H.264    30  16.9 Mb/s  AAC mono 44.1 kHz  8.1 MB",
+                "small.png    640×640          PNG                                         337 B",
             ]
         );
     }
