@@ -1044,8 +1044,8 @@ pub struct App {
     traveling: bool,
     /// The folder last typed to copy or move files into.
     last_folder: Option<String>,
-    /// The folders files were last moved or copied into, the latest first,
-    /// kept between runs: offered under Move to… and Copy to….
+    /// The folders files were moved or copied into in this run, the latest
+    /// first: offered under Move to… and Copy to….
     recent_folders: Vec<String>,
     /// The one of them picked with Up and Down in that box, and where each
     /// was drawn there, for a click.
@@ -1930,7 +1930,7 @@ impl App {
             jumps_forward: Vec::new(),
             traveling: false,
             last_folder: None,
-            recent_folders: edit::load_recent_folders(),
+            recent_folders: Vec::new(),
             recent_pick: None,
             recent_rows: Vec::new(),
             prompt: None,

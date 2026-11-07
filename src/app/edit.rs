@@ -5,21 +5,10 @@ use super::*;
 /// How many folders Move to… and Copy to… offer.
 const RECENT_FOLDERS: usize = 8;
 
-fn recent_folders_file() -> Option<PathBuf> {
-    crate::positions::state_dir().map(|dir| dir.join("recent-folders"))
-}
-
-/// The folders files were last moved or copied into, kept from runs
-/// before: a line apiece, the latest first.
-pub(super) fn load_recent_folders() -> Vec<String> {
-    let text = recent_folders_file().and_then(|file| std::fs::read_to_string(file).ok()).unwrap_or_default();
-    text.lines().filter(|line| !line.trim().is_empty()).take(RECENT_FOLDERS).map(str::to_string).collect()
-}
-
 impl App {
 
-    /// Puts a folder files went into first among the recent ones, and keeps
-    /// them for the next run, written on a thread of its own.
+    /// Puts a folder files went into first among the recent ones: for this
+    /// run only, not kept for the next.
     pub(super) fn note_recent_folder(&mut self, dir: &Path) {
         // The whole path, to be used again; only the home folder said as ~.
         let full = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
@@ -31,14 +20,6 @@ impl App {
         self.recent_folders.retain(|folder| *folder != shown);
         self.recent_folders.insert(0, shown);
         self.recent_folders.truncate(RECENT_FOLDERS);
-        let lines = self.recent_folders.join("\n") + "\n";
-        std::thread::spawn(move || {
-            let Some(file) = recent_folders_file() else { return };
-            if let Some(dir) = file.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            let _ = std::fs::write(file, lines);
-        });
     }
 
     /// Up and Down in Move to… and Copy to…: the next or the one before
