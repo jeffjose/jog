@@ -861,8 +861,9 @@ fn run(input: &Path, before: &[String], args: &[String], muxer: &str, output: &P
 /// What a section of a video is saved as.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Clip {
-    /// The video and sound as they are, in seconds and losing nothing,
-    /// from the keyframe at or before the start: a little early, often.
+    /// From the start marked to the end marked, the video kept as it is:
+    /// copied when a keyframe is at the start, else encoded again in its
+    /// own codec from that frame (`quick_or_exact`).
     Quick,
     /// Encoded again, from the very frame marked.
     Exact(Target),
@@ -874,7 +875,7 @@ pub enum Clip {
 impl Clip {
     pub fn describe(&self, settings: &VideoSettings) -> String {
         match self {
-            Clip::Quick => "a clip, from the keyframe before".to_string(),
+            Clip::Quick => "a clip".to_string(),
             Clip::Exact(target) => target.describe(settings),
             Clip::Gif => "GIF".to_string(),
             Clip::WebP => "animated WebP".to_string(),
@@ -898,6 +899,58 @@ fn own_container(path: &Path) -> (&'static str, &'static str) {
         Some("webm") => ("webm", "webm"),
         _ => ("mkv", "matroska"),
     }
+}
+
+/// A quick clip starts and ends where the section was marked, always:
+/// "quick" is only that the video is kept as it is. A copy can start only
+/// at a keyframe, so it is copied when one is at the start (nearer it
+/// than a frame), and otherwise encoded again from the frame marked, in
+/// the video's own codec and container. Screen recordings and the like
+/// have a keyframe every few seconds, and a copy began at the one before:
+/// often the very start, the whole video under the clip's name.
+const KEYFRAME_AT_START: f64 = 0.01;
+
+/// What a quick clip of a section starting at `a` is made as.
+fn quick_or_exact(path: &Path, a: f64) -> Clip {
+    let Some((keyframe, codec)) = keyframe_before(path, a) else { return Clip::Quick };
+    if a - keyframe <= KEYFRAME_AT_START {
+        return Clip::Quick;
+    }
+    let codec = match codec.as_str() {
+        "hevc" => Codec::Hevc,
+        "av1" => Codec::Av1,
+        _ => Codec::H264,
+    };
+    // In its own kind of file, where that holds the codec; else MP4, or
+    // MKV for AV1.
+    let container = match (own_container(path).0, codec) {
+        ("mkv", _) => Container::Mkv,
+        ("webm", Codec::Av1) => Container::WebM,
+        (_, Codec::Av1) => Container::Mkv,
+        _ => Container::Mp4,
+    };
+    Clip::Exact(Target::new(codec, container))
+}
+
+/// The last keyframe at or before `a` seconds into the video, counted as
+/// `-ss` counts, from the start of the file; and the video's codec. Only
+/// the stretch just before `a` is read.
+fn keyframe_before(path: &Path, a: f64) -> Option<(f64, String)> {
+    let interval = format!("{:.3}%{:.3}", (a - 60.0).max(0.0), a + 0.001);
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey", "-read_intervals", &interval])
+        .args(["-show_entries", "frame=pts_time,best_effort_timestamp_time:stream=codec_name,start_time", "-of", "json"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let found: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let stream = found["streams"].get(0)?;
+    let codec = stream["codec_name"].as_str()?.to_string();
+    let start = stream["start_time"].as_str().and_then(|time| time.parse::<f64>().ok()).unwrap_or(0.0);
+    let time = |frame: &serde_json::Value| ["pts_time", "best_effort_timestamp_time"].iter().find_map(|key| frame[*key].as_str().and_then(|time| time.parse::<f64>().ok()));
+    let keyframe = found["frames"].as_array()?.iter().filter_map(time).map(|time| time - start).filter(|time| *time <= a + 0.001).fold(None, |last: Option<f64>, time| Some(last.map_or(time, |last| last.max(time))))?;
+    Some((keyframe, codec))
 }
 
 /// Where a section from `a` to `b` of the video at `path` is saved:
@@ -941,6 +994,10 @@ fn tone_map(probe: &Probe) -> &'static str {
 /// Saves the section from `a` to `b` of the video at `path`, turned and
 /// mirrored as `transform` says, telling `progress` how far along it is.
 pub fn cut(path: &Path, a: f64, b: f64, clip: &Clip, settings: &VideoSettings, knobs: &Knobs, transform: Transform, progress: impl FnMut(f64)) -> Result<PathBuf, String> {
+    // A quick clip whose start has no keyframe near enough before it is
+    // encoded from the frame instead: it starts where it was marked.
+    let quick = (*clip == Clip::Quick).then(|| quick_or_exact(path, a));
+    let clip = quick.as_ref().unwrap_or(clip);
     let output = clip_output(path, a, b, clip);
     if output.exists() {
         return Err(format!("{} is there already", output.display()));
@@ -1058,6 +1115,39 @@ pub fn remux(input: &Path, args: &[String], muxer: &str, output: &Path, seconds:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How long a video is, as ffprobe reads it.
+    fn length(path: &Path) -> f64 {
+        let output = Command::new("ffprobe").args(["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"]).arg(path).output().unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().parse().unwrap()
+    }
+
+    #[test]
+    fn a_quick_clip_starts_and_ends_where_it_was_marked() {
+        // Keyframes every two seconds, as a screen recording has them far apart.
+        let dir = std::env::temp_dir().join(format!("jog-quick-clip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let video = dir.join("rec.mp4");
+        let made = Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=8", "-c:v", "libx264", "-g", "60", "-keyint_min", "60", "-sc_threshold", "0", "-pix_fmt", "yuv420p"])
+            .arg(&video)
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            return;
+        }
+        let cut = |a: f64, b: f64| super::cut(&video, a, b, &Clip::Quick, &VideoSettings::default(), &Knobs::default(), Transform::default(), |_| {}).unwrap();
+        // Between keyframes: encoded again, as H.264, and only the stretch marked.
+        let between = cut(3.0, 6.5);
+        assert_eq!(keyframe_before(&video, 3.0).map(|(at, _)| at), Some(2.0));
+        assert!((length(&between) - 3.5).abs() < 0.1, "{} long", length(&between));
+        assert_eq!(keyframe_before(&between, 0.0).map(|(_, codec)| codec).as_deref(), Some("h264"));
+        // At a keyframe: copied, and the same stretch.
+        assert_eq!(quick_or_exact(&video, 4.0), Clip::Quick);
+        let at = cut(4.0, 6.0);
+        assert!((length(&at) - 2.0).abs() < 0.1, "{} long", length(&at));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn targets_read_as_written() {
