@@ -400,6 +400,20 @@ impl App {
     }
 
     pub(super) fn mouse_button(&mut self, button: MouseButton, pressed: bool, event_loop: &ActiveEventLoop) {
+        // A click on a recent folder in Move to… or Copy to… sends the
+        // files there.
+        let sending = self.prompt.as_ref().is_some_and(|prompt| matches!(prompt.kind, PromptKind::SendTo { .. }));
+        if sending && button == MouseButton::Left && pressed {
+            let (x, y) = (self.mouse.0 as i32, self.mouse.1 as i32);
+            let hit = self.recent_rows.iter().position(|[left, top, width, height]| (*left..left + width).contains(&x) && (*top..top + height).contains(&y));
+            if let Some(folder) = hit.and_then(|at| self.recent_folders.get(at).cloned()) {
+                let text: Vec<char> = folder.chars().collect();
+                if let Some(prompt) = &mut self.prompt {
+                    prompt.field = TextField::new(text.clone(), text.len());
+                }
+                return self.prompt_key(Key::Named(NamedKey::Enter), event_loop);
+            }
+        }
         // Edit has the whole window; while its copy is being named, the
         // box has the keys and the mouse waits.
         if self.editor.is_some() {

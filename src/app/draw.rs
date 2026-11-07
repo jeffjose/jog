@@ -1043,7 +1043,9 @@ impl App {
             };
             // What Enter would do, as it is typed.
             let hint = self.prompt_hint(prompt).unwrap_or_else(|| hint.to_string());
-            draw_prompt(canvas, &mut text, icon, &title, &prompt.field, &hint, px);
+            let sending = matches!(prompt.kind, PromptKind::SendTo { .. });
+            let choices: &[String] = if sending { &self.recent_folders } else { &[] };
+            self.recent_rows = draw_prompt(canvas, &mut text, icon, &title, &prompt.field, &hint, px, choices, self.recent_pick);
         }
         if let Some(layout) = self.palette_layout() {
             for id in self.palette_shown() {
@@ -2759,7 +2761,11 @@ pub(super) fn draw_selection(canvas: &mut Canvas, text: &mut Text, field: &TextF
 /// Draws a box to type in, in the middle of the window: an icon and what
 /// is being asked for, the text in a field of its own, and under it a
 /// word on what Enter does.
-pub(super) fn draw_prompt(canvas: &mut Canvas, text: &mut Text, icon: &str, title: &str, field: &TextField, hint: &str, px: u32) {
+/// Draws a box asking for a line of text. `choices`, the recent folders of
+/// Move to… and Copy to…, are listed under it, `picked` lit, and where
+/// each was drawn is given back, for a click.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn draw_prompt(canvas: &mut Canvas, text: &mut Text, icon: &str, title: &str, field: &TextField, hint: &str, px: u32, choices: &[String], picked: Option<usize>) -> Vec<[i32; 4]> {
     let typed = field.string();
     let before_cursor: String = field.text[..field.cursor].iter().collect();
     let pad = px as i32;
@@ -2767,10 +2773,15 @@ pub(super) fn draw_prompt(canvas: &mut Canvas, text: &mut Text, icon: &str, titl
     let small = (px * 5 / 6).max(11);
     let heading = format!("{icon}  {title}");
     let hint = format!("{hint}  ·  Esc to cancel");
-    let widest = text.width(&typed, px).max(text.width(&heading, px)).max(text.width(&hint, small));
+    let folder = commands::icons::FOLDER_INPUT;
+    let choice_widest = choices.iter().map(|choice| text.width(&format!("{folder}  {choice}"), px)).max().unwrap_or(0);
+    let widest = text.width(&typed, px).max(text.width(&heading, px)).max(text.width(&hint, small)).max(choice_widest);
     let width = (widest + 5 * pad).max(px as i32 * 32).min(canvas.width);
     let field_height = line_height + pad;
-    let height = 2 * line_height + field_height + 7 * pad / 2;
+    // Under the hint: a label, then a row for each recent folder.
+    let row_height = line_height + pad / 2;
+    let list_height = if choices.is_empty() { 0 } else { pad + line_height + choices.len() as i32 * row_height };
+    let height = 2 * line_height + field_height + 7 * pad / 2 + list_height;
     let (left, top) = ((canvas.width - width) / 2, (canvas.height - height) / 2);
 
     panel(canvas, left, top, width, height, pad);
@@ -2789,7 +2800,25 @@ pub(super) fn draw_prompt(canvas: &mut Canvas, text: &mut Text, icon: &str, titl
     let cursor = text_left + text.width(&before_cursor, px);
     canvas.fill(cursor, text_top, (px as i32 / 10).max(2), line_height, TEXT_COLOR);
 
-    text.draw(canvas, left + 3 * pad / 2, field_top + field_height + pad / 2, small, DIM_TEXT_COLOR, &hint);
+    let hint_top = field_top + field_height + pad / 2;
+    text.draw(canvas, left + 3 * pad / 2, hint_top, small, DIM_TEXT_COLOR, &hint);
+    if choices.is_empty() {
+        return Vec::new();
+    }
+    let label_top = hint_top + line_height + pad;
+    text.draw(canvas, left + 3 * pad / 2, label_top, small, DIM_TEXT_COLOR, "Recent  ·  click, or ↑ ↓");
+    let mut rows = Vec::new();
+    for (at, choice) in choices.iter().enumerate() {
+        let place = [field_left, label_top + line_height + at as i32 * row_height, field_width, row_height];
+        if picked == Some(at) {
+            canvas.round_fill(place[0], place[1], place[2], place[3], pad / 3, accent(), 256);
+        }
+        let color = if picked == Some(at) { on_accent() } else { TEXT_COLOR };
+        let label = clipped(text, &format!("{folder}  {choice}"), field_width - pad, px);
+        text.draw(canvas, place[0] + pad / 2, place[1] + (row_height - line_height) / 2, px, color, &label);
+        rows.push(place);
+    }
+    rows
 }
 
 /// The keys of one line of the shortcuts, each with how wide it is drawn

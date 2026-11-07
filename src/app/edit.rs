@@ -2,7 +2,64 @@
 
 use super::*;
 
+/// How many folders Move to… and Copy to… offer.
+const RECENT_FOLDERS: usize = 8;
+
+fn recent_folders_file() -> Option<PathBuf> {
+    crate::positions::state_dir().map(|dir| dir.join("recent-folders"))
+}
+
+/// The folders files were last moved or copied into, kept from runs
+/// before: a line apiece, the latest first.
+pub(super) fn load_recent_folders() -> Vec<String> {
+    let text = recent_folders_file().and_then(|file| std::fs::read_to_string(file).ok()).unwrap_or_default();
+    text.lines().filter(|line| !line.trim().is_empty()).take(RECENT_FOLDERS).map(str::to_string).collect()
+}
+
 impl App {
+
+    /// Puts a folder files went into first among the recent ones, and keeps
+    /// them for the next run, written on a thread of its own.
+    pub(super) fn note_recent_folder(&mut self, dir: &Path) {
+        // The whole path, to be used again; only the home folder said as ~.
+        let full = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let shown = match home.as_deref().and_then(|home| full.strip_prefix(home).ok()) {
+            Some(rest) => format!("~/{}", rest.display()),
+            None => full.display().to_string(),
+        };
+        self.recent_folders.retain(|folder| *folder != shown);
+        self.recent_folders.insert(0, shown);
+        self.recent_folders.truncate(RECENT_FOLDERS);
+        let lines = self.recent_folders.join("\n") + "\n";
+        std::thread::spawn(move || {
+            let Some(file) = recent_folders_file() else { return };
+            if let Some(dir) = file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(file, lines);
+        });
+    }
+
+    /// Up and Down in Move to… and Copy to…: the next or the one before
+    /// of the recent folders, put in the field.
+    pub(super) fn pick_recent(&mut self, down: bool) {
+        let count = self.recent_folders.len();
+        if count == 0 {
+            return;
+        }
+        let at = match (self.recent_pick, down) {
+            (None, true) => 0,
+            (None, false) => count - 1,
+            (Some(at), true) => (at + 1) % count,
+            (Some(at), false) => (at + count - 1) % count,
+        };
+        self.recent_pick = Some(at);
+        let text: Vec<char> = self.recent_folders[at].chars().collect();
+        if let Some(prompt) = &mut self.prompt {
+            prompt.field = TextField::new(text.clone(), text.len());
+        }
+    }
 
     pub(super) fn toggle_mark(&mut self) {
         let id = self.list[self.focus()];
@@ -129,6 +186,7 @@ impl App {
             return self.toast(summary);
         }
         self.toast_with(summary, vec![("Undo".into(), ToastLink::Undo)]);
+        self.note_recent_folder(&dir);
         if moving {
             let removed: Vec<(usize, usize)> = sent.iter().map(|moved| (moved.id, moved.pos)).collect();
             self.drop_from_list(&removed, event_loop);
@@ -592,7 +650,8 @@ impl App {
     /// Opens a box to type the folder to copy or move the target files
     /// into, starting from the one last typed, or the `-o` folder.
     pub(super) fn ask_folder(&mut self, moving: bool) {
-        let known = self.last_folder.clone().or_else(|| self.options.output_dir.as_deref().map(short_dir));
+        let known = self.last_folder.clone().or_else(|| self.recent_folders.first().cloned()).or_else(|| self.options.output_dir.as_deref().map(short_dir));
+        self.recent_pick = None;
         let text: Vec<char> = known.unwrap_or_default().chars().collect();
         let id = self.list[self.focus()];
         self.prompt = Some(Prompt { id, kind: PromptKind::SendTo { moving }, field: TextField::new(text.clone(), text.len()) });
@@ -601,6 +660,12 @@ impl App {
     }
 
     pub(super) fn prompt_key(&mut self, key: Key<&str>, event_loop: &ActiveEventLoop) {
+        // Up and Down go through the folders files went into lately.
+        let sending = self.prompt.as_ref().is_some_and(|prompt| matches!(prompt.kind, PromptKind::SendTo { .. }));
+        if let (true, Key::Named(named @ (NamedKey::ArrowUp | NamedKey::ArrowDown))) = (sending, &key) {
+            self.pick_recent(*named == NamedKey::ArrowDown);
+            return self.redraw();
+        }
         let Some(prompt) = &mut self.prompt else { return };
         match key {
             Key::Named(NamedKey::Escape) => self.prompt = None,

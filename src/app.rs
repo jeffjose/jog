@@ -1044,6 +1044,13 @@ pub struct App {
     traveling: bool,
     /// The folder last typed to copy or move files into.
     last_folder: Option<String>,
+    /// The folders files were last moved or copied into, the latest first,
+    /// kept between runs: offered under Move to… and Copy to….
+    recent_folders: Vec<String>,
+    /// The one of them picked with Up and Down in that box, and where each
+    /// was drawn there, for a click.
+    recent_pick: Option<usize>,
+    recent_rows: Vec<[i32; 4]>,
     /// The workspaces: those of the config file, in its order, and after
     /// them the folder opened by its path, if it is none of them. And
     /// which one is on show.
@@ -1923,6 +1930,9 @@ impl App {
             jumps_forward: Vec::new(),
             traveling: false,
             last_folder: None,
+            recent_folders: edit::load_recent_folders(),
+            recent_pick: None,
+            recent_rows: Vec::new(),
             prompt: None,
             palette: None,
             run_next: None,
