@@ -19,13 +19,25 @@ fn info_tells_what_each_file_is() {
         return;
     }
     let picture: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests", "screens", "grid.png"].iter().collect();
-    let output = Command::new(env!("CARGO_BIN_EXE_jog")).arg("-i").arg(&clip).arg(&picture).env("JOG_CONFIG", "/dev/null").output().expect("jog runs");
-    let said = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{said}{}", String::from_utf8_lossy(&output.stderr));
+    let info = |paths: &[&PathBuf]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_jog")).arg("-i").args(paths).env("JOG_CONFIG", "/dev/null").output().expect("jog runs");
+        let said = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(output.status.success(), "{said}{}", String::from_utf8_lossy(&output.stderr));
+        said
+    };
+    // One file: a line.
+    let said = info(&[&clip]);
+    assert!(said.starts_with(&format!("{}: 320×240 · 0:02 · H.264 · 25 fps", clip.display())), "{said}");
+    assert!(said.contains("AAC stereo"), "{said}");
+    // More: a table, a heading and a line apiece in order, the names last.
+    let said = info(&[&clip, &picture]);
     let lines: Vec<&str> = said.lines().collect();
-    assert_eq!(lines.len(), 2, "a line apiece, in order:\n{said}");
-    assert!(lines[0].starts_with(&format!("{}: 320×240 · 0:02 · H.264 · 25 fps", clip.display())), "{}", lines[0]);
-    assert!(lines[0].contains("AAC stereo"), "{}", lines[0]);
-    assert!(lines[1].starts_with(&format!("{}: 1280×800 · PNG · ", picture.display())), "{}", lines[1]);
+    assert_eq!(lines.len(), 3, "{said}");
+    assert!(lines[0].trim_start().starts_with("W×H  Length  Format") && lines[0].ends_with("Name"), "{}", lines[0]);
+    assert!(lines[1].trim_start().starts_with("320×240    0:02  H.264") && lines[1].contains("AAC stereo") && lines[1].ends_with(&clip.display().to_string()), "{}", lines[1]);
+    assert!(lines[2].starts_with("1280×800          PNG") && lines[2].ends_with(&picture.display().to_string()), "{}", lines[2]);
+    // The columns line up: every line's name starts where the heading's does.
+    let at = lines[0].find("Name").unwrap();
+    assert!(lines[1..].iter().all(|line| line.char_indices().nth(lines[0][..at].chars().count()).is_some_and(|(_, c)| c == '/')), "{said}");
     let _ = std::fs::remove_dir_all(&dir);
 }

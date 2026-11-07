@@ -212,8 +212,8 @@ Workspaces are folders with names, set in the config file:
       --no-hitches           say nothing of late frames and stalls, which are
                              otherwise told of with their likely cause
                              (config: hitches = false)
-  -i, --info                 a line on each file: size, length, codecs, HDR;
-                             no window
+  -i, --info                 what each file is: size, length, codecs, HDR;
+                             a table for more than one; no window
   -h, --help [TOPIC]         show this help, or one topic of it
   -v, --version              show the version"),
     ("keys", "Keys", "
