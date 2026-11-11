@@ -1,9 +1,10 @@
 //! Matching file names, and failing those their folders, against what is
 //! typed in the search box.
 
-/// What was typed, split into terms that must all hold.
+/// What was typed: alternatives between `|`, any of which may hold, each
+/// split into terms that must all hold.
 pub struct Query {
-    terms: Vec<Term>,
+    alternatives: Vec<Vec<Term>>,
 }
 
 enum Term {
@@ -67,9 +68,17 @@ fn parse_size(text: &str) -> Option<u64> {
 }
 
 impl Query {
-    /// Terms are separated by spaces. Matching ignores case.
+    /// Terms are separated by spaces, and all must hold; `|` between some
+    /// gives another set of them that will do as well: `beach #video |
+    /// sunset`. Matching ignores case. A set with nothing in it, as after
+    /// a `|` just typed, is no set at all.
     pub fn parse(text: &str) -> Query {
-        let terms = text
+        let alternatives = text.split('|').map(Self::terms).filter(|terms| !terms.is_empty()).collect();
+        Query { alternatives }
+    }
+
+    fn terms(text: &str) -> Vec<Term> {
+        text
             .split_whitespace()
             .filter_map(|word| {
                 let lower = word.to_lowercase();
@@ -104,29 +113,42 @@ impl Query {
                     _ => Term::Fuzzy(rest.chars().collect(), rest.to_string()),
                 })
             })
-            .collect();
-        Query { terms }
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.terms.is_empty()
+        self.alternatives.is_empty()
+    }
+
+    fn any_term(&self, wanted: impl Fn(&Term) -> bool) -> bool {
+        self.alternatives.iter().flatten().any(wanted)
+    }
+
+    /// Whether any term asks whether a video was watched, which means
+    /// looking each file up.
+    pub fn wants_seen(&self) -> bool {
+        self.any_term(|term| matches!(term, Term::Is(Kind::Seen | Kind::Unseen)))
     }
 
     /// Whether any term compares sizes, which means looking each file up.
-    pub fn wants_seen(&self) -> bool {
-        self.terms.iter().any(|term| matches!(term, Term::Is(Kind::Seen | Kind::Unseen)))
-    }
-
     pub fn wants_size(&self) -> bool {
-        self.terms.iter().any(|term| matches!(term, Term::Size { .. }))
+        self.any_term(|term| matches!(term, Term::Size { .. }))
     }
 
     /// How well a file matches, higher being better, or `None` if it does
-    /// not match at all.
+    /// not match at all: as well as the best of the alternatives it meets.
     pub fn score(&self, file: &Facts, loose: bool) -> Option<i32> {
+        // Nothing asked yet: everything matches.
+        if self.alternatives.is_empty() {
+            return Some(0);
+        }
         let name = file.name.to_lowercase();
+        self.alternatives.iter().filter_map(|terms| Self::score_terms(terms, file, &name, loose)).max()
+    }
+
+    fn score_terms(terms: &[Term], file: &Facts, name: &str, loose: bool) -> Option<i32> {
         let mut total = 0;
-        for term in &self.terms {
+        for term in terms {
             total += match term {
                 // In the name; or failing that, as typed, in where it is,
                 // which counts for less than any match in a name.
@@ -283,6 +305,18 @@ mod tests {
         assert_eq!(matches("foo !bar", NAMES), ["food.webp", "My-Foo.png"]);
         assert_eq!(matches("foo .jpg", NAMES), ["foo-bar.jpg"]);
         assert_eq!(matches(".jpg", NAMES).len(), 3);
+    }
+
+    #[test]
+    fn a_bar_between_sets_of_terms_takes_either() {
+        assert_eq!(matches("^food | bark", NAMES), ["bark.jpg", "food.webp"]);
+        // Within each side, all its terms hold.
+        // Ranked by how well each matches: by name before by kind alone.
+        assert_eq!(matches("foo !bar | #video", NAMES), ["food.webp", "My-Foo.png", "berserker-bloodmoon.mp4"]);
+        assert_eq!(matches("is:image foo|#video", NAMES).len(), 4);
+        // A side not typed yet narrows nothing, and neither does a lone bar.
+        assert_eq!(matches("bark |", NAMES), ["bark.jpg"]);
+        assert!(Query::parse(" | ").is_empty());
     }
 
     #[test]

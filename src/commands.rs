@@ -1243,6 +1243,7 @@ pub const HELP: &[&[(&str, &[(&str, &str)])]] = &[
                 ("Ctrl+`", "Back to what jog was started on"),
                 ("word  ^start  !not", "Match names"),
                 ("#image  #video  #marked  >10mb", "Match kinds and sizes"),
+                ("a b  |  c", "a and b, or c"),
                 ("is:new  is:kept  is:rejected", "Unwatched, or as triaged"),
                 (">sort", "Find a command and run it"),
                 (":42  :1:30  :50%", "Go to a file number or a time"),

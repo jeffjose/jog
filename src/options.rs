@@ -53,7 +53,9 @@ pub const TOPICS: &[(&str, &str, &str)] = &[
                              workspace does: resume (the usual), fresh or
                              random, which also shuffles it now
       --filter TEXT          start with only the files the find box would show
-                             for TEXT: jog --filter 'beach #video >10mb'
+                             for TEXT: jog --filter 'beach #video >10mb';
+                             terms all hold, | between sets for either:
+                             jog --filter 'beach #video | sunset'
       --edit                 open the first picture in Edit (e), to draw on,
                              crop and save; for a video, nothing
       --watch                add files as they appear in the directories, and
