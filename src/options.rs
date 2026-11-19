@@ -168,8 +168,9 @@ where they were left unless --no-positions is given.
       --list-right           the file list (p) stands at the right of the window
       --list-pinned          and beside the picture, which is made smaller for
                              it, rather than over it (its pin does the same)
-  -G, --grid                 start in the grid, with nothing playing
-  -W, --wall                 start in the wall: packed, no names, every video playing
+  -G, --wall                 start in the wall, as G: packed, no names, every
+                             video playing
+      --grid                 start in the grid, as g, with nothing playing
       --no-grid-titles       leave the names out from under the grid's pictures
                              (config: grid-titles = false; i in the grid toggles)"),
     ("config", "Config file", "
@@ -590,8 +591,7 @@ pub enum Parsed {
 fn short_flag(flag: char) -> Option<&'static str> {
     Some(match flag {
         'F' => "fullscreen",
-        'G' => "grid",
-        'W' => "wall",
+        'G' => "wall",
         'w' => "windowed",
         'g' => "geometry",
         'x' => "borderless",
@@ -1247,6 +1247,13 @@ mod tests {
         assert!(parse_args(&[]).unwrap().autoplay);
         assert!(!parse_args(&["--no-autoplay"]).unwrap().autoplay);
         assert!(parse_args(&[]).unwrap().grid_titles);
+        // As the keys have them: G the wall, g the grid (-g is the window's size).
+        let wall = parse_args(&["-G"]).unwrap();
+        assert!(wall.wall && !wall.grid);
+        assert!(parse_args(&["--wall"]).unwrap().wall);
+        let grid = parse_args(&["--grid"]).unwrap();
+        assert!(grid.grid && !grid.wall);
+        assert!(parse_args(&["-W"]).is_err());
         assert!(!parse_config("grid-titles = false", &[]).unwrap().grid_titles);
     }
 
