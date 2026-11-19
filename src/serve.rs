@@ -1,25 +1,31 @@
-//! Thumbnails made on the machine the files are on.
+//! Pictures made on the machine the files are on.
 //!
-//! Over a mount, a thumbnail of a 13 MB photo costs the 13 MB crossing the
-//! network. So for a host jog has mounted, it also starts `ssh host jog
-//! --serve`, a jog over there that reads the file where it is and sends back
-//! only the thumbnail, a few kilobytes. Measured on skyfall over a 32 MB/s
-//! link, the first screen of a grid of 24-megapixel photos: 22.6 s through
-//! the mount, 1.5 s for the same files here.
+//! Over a mount, showing a 13 MB photo costs the 13 MB crossing the network,
+//! for a thumbnail as much as for the picture on screen. So for a host jog
+//! has mounted, it also starts `ssh host jog --serve`, a jog over there that
+//! reads the file where it is and sends back only what is shown: the picture
+//! at the size of the screen, or of a thumbnail, as a JPEG. Zoomed in to its
+//! own pixels, a picture is read through the mount, exactly as it is.
+//!
+//! Measured on skyfall over a 32 MB/s link, 24-megapixel photos: the first
+//! screen of a grid in 22.6 s through the mount, 5.2 s with this; the
+//! newest photo of a folder on screen in 8.3 s through the mount.
 //!
 //! It is only ever a shortcut. Started alongside the mount, it is waited on
 //! by nothing: until it says hello, and after anything goes wrong with it
 //! (no jog over there, an older one, a dropped connection, a reply too
-//! slow), thumbnails are read through the mount as they would be without it.
+//! slow), pictures are read through the mount as they would be without it.
 //!
 //! The protocol, little-endian, over ssh's stdin and stdout:
 //! - hello, from the server: `JOGSERVE` and the protocol's version, `u32`.
 //! - request: tag `u64`, width and height wanted `u32`s, quarter turns
-//!   `u8`, mirrored `u8`, background `u32`, path length `u32`, path.
-//! - reply: tag `u64`, ok `u8`. Ok: native width and height, width and
-//!   height, `u32`s, then the count of pictures `u32` and whether they are
-//!   an animation `u8`, and each picture as its delay in ms `u32`, length
-//!   `u32` and a JPEG. Not ok: length `u32` and the error.
+//!   `u8`, mirrored `u8`, flags `u8` (1 a thumbnail, 2 enlarged),
+//!   background `u32`, path length `u32`, path.
+//! - reply: tag `u64`, ok `u8`. Ok: the file's format (length `u32` and
+//!   name, empty when not known), Ultra HDR `u8`, native width and height,
+//!   width and height, `u32`s, then the count of pictures `u32` and whether
+//!   they are an animation `u8`, and each picture as its delay in ms `u32`,
+//!   length `u32` and a JPEG. Not ok: length `u32` and the error.
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
@@ -39,16 +45,29 @@ pub const SERVE_ARG: &str = "--serve";
 const MAGIC: &[u8; 8] = b"JOGSERVE";
 /// Raised whenever a request or reply changes shape: a jog over there that
 /// speaks another is not used.
-const PROTOCOL: u32 = 1;
+const PROTOCOL: u32 = 2;
 /// How long the server has to say hello before it is given up on. It is
 /// waited on by nothing meanwhile.
 const HELLO_WITHIN: Duration = Duration::from_secs(6);
-/// How long one thumbnail may take over there before it is read here
+/// How long one picture may take over there before it is read here
 /// instead: a video whose still is slow to find, a host that has stalled.
 const REPLY_WITHIN: Duration = Duration::from_secs(15);
-/// JPEG quality of the thumbnails sent: near enough to the decoded pixels
-/// not to tell at thumbnail size, a tenth of their bytes.
-const QUALITY: u8 = 90;
+/// JPEG quality of a thumbnail: near enough not to tell at its size, a
+/// tenth of the bytes.
+const THUMB_QUALITY: f32 = 88.0;
+/// JPEG quality of the picture on screen, with color at full resolution:
+/// not to be told from the decoded pixels at the size it is shown.
+const SCREEN_QUALITY: f32 = 95.0;
+
+const FLAG_THUMBNAIL: u8 = 1;
+const FLAG_ENLARGE: u8 = 2;
+/// The picture on screen, which is made before any other waiting.
+const FLAG_URGENT: u8 = 4;
+
+/// The formats a file is told to be, by [`crate::files::sniff_file`].
+const FORMATS: &[&str] = &[
+    "JPEG", "PNG", "GIF", "WebP", "JPEG XL", "AVIF", "HEIC", "HEIF", "TIFF", "BMP", "QOI", "EXR", "PSD", "HDR", "DDS", "ICO", "PNM", "SVG",
+];
 
 const PROBING: u8 = 0;
 const READY: u8 = 1;
@@ -62,7 +81,14 @@ pub fn set_debug(on: bool) {
     DEBUG.store(on, Ordering::Relaxed);
 }
 
-type Reply = Result<Frame, String>;
+/// A picture made over there, and what was learned of its file.
+pub struct Made {
+    pub frame: Frame,
+    pub format: Option<&'static str>,
+    pub ultra_hdr: bool,
+}
+
+type Reply = Result<Made, String>;
 
 /// A server on one host, as this side knows it.
 struct Helper {
@@ -79,7 +105,7 @@ impl Helper {
     /// and goes to the mount.
     fn die(&self, why: &str) {
         if self.state.swap(DEAD, Ordering::AcqRel) != DEAD && DEBUG.load(Ordering::Relaxed) {
-            eprintln!("jog: no thumbnails made on {}: {why}; read through the mount", self.host);
+            eprintln!("jog: no pictures made on {}: {why}; read through the mount", self.host);
         }
         self.input.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
         if let Some(mut child) = self.child.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
@@ -91,7 +117,8 @@ impl Helper {
 }
 
 /// Starts a server on the host, unless one is started already, and comes
-/// back at once: nothing waits on it.
+/// back at once: nothing waits on it. `ssh` is the command and options
+/// that reach the host, without it.
 pub fn start(host: &str, ssh: Vec<String>) {
     let mut helpers = HELPERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if helpers.iter().any(|(known, _)| known == host) || std::env::var_os("JOG_NO_SERVE").is_some() {
@@ -120,7 +147,7 @@ fn connect(helper: Arc<Helper>, mut ssh: Vec<String>) {
         .args(ssh)
         // Never a password prompt over the window: a host that would ask
         // has no helper.
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"])
+        .args(["-o", "BatchMode=yes"])
         .arg(&helper.host)
         .arg(format!("{program} {SERVE_ARG}"))
         .stdin(Stdio::piped())
@@ -146,15 +173,14 @@ fn connect(helper: Arc<Helper>, mut ssh: Vec<String>) {
     });
 
     let mut output = BufReader::new(output);
-    match hello(&mut output) {
-        Ok(()) => {}
-        Err(why) => return helper.die(&why),
+    if let Err(why) = hello(&mut output) {
+        return helper.die(&why);
     }
     if helper.state.compare_exchange(PROBING, READY, Ordering::AcqRel, Ordering::Acquire).is_err() {
         return;
     }
     if DEBUG.load(Ordering::Relaxed) {
-        eprintln!("jog: thumbnails made on {}, ready in {:.1?}", helper.host, started.elapsed());
+        eprintln!("jog: pictures made on {}, ready in {:.1?}", helper.host, started.elapsed());
     }
     loop {
         match read_reply(&mut output) {
@@ -201,9 +227,16 @@ fn greeting(seen: &[u8]) -> String {
     if text.is_empty() { String::new() } else { format!(" ({text})") }
 }
 
-/// Whether a thumbnail of this file would be made over there just now.
-pub fn ready_for(path: &Path) -> bool {
-    helper_for(path).is_some()
+/// Whether this picture of the file would be made over there just now.
+pub fn ready_for(path: &Path, spec: Spec) -> bool {
+    wanted(spec) && helper_for(path).is_some()
+}
+
+/// What is made over there: a picture at a size, as any viewer shows it.
+/// One at its own size is read here, for its exact pixels, and so is an
+/// HDR rendition, which wants the gain map.
+fn wanted(spec: Spec) -> bool {
+    spec.target.is_some() && spec.hdr == Hdr::Sdr
 }
 
 fn helper_for(path: &Path) -> Option<(Arc<Helper>, PathBuf)> {
@@ -213,9 +246,12 @@ fn helper_for(path: &Path) -> Option<(Arc<Helper>, PathBuf)> {
     (helper.state.load(Ordering::Acquire) == READY).then_some((helper, there))
 }
 
-/// The thumbnail of a file in a mount, made over there. `None` when it
-/// can't be, for now or for good: then it is read through the mount.
-pub fn thumbnail(path: &Path, spec: Spec) -> Option<Reply> {
+/// The picture of a file in a mount, made over there. `None` when it can't
+/// be, for now or for good: then it is read through the mount.
+pub fn make_there(path: &Path, spec: Spec, urgent: bool) -> Option<Made> {
+    if !wanted(spec) {
+        return None;
+    }
     let (helper, there) = helper_for(path)?;
     let (width, height) = spec.target?;
     let tag = helper.next.fetch_add(1, Ordering::Relaxed);
@@ -223,12 +259,14 @@ pub fn thumbnail(path: &Path, spec: Spec) -> Option<Reply> {
     helper.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(tag, sender);
 
     let path_bytes = there.as_os_str().as_encoded_bytes();
-    let mut request = Vec::with_capacity(34 + path_bytes.len());
+    let flags = if spec.thumbnail { FLAG_THUMBNAIL } else { 0 } | if spec.enlarge { FLAG_ENLARGE } else { 0 } | if urgent { FLAG_URGENT } else { 0 };
+    let mut request = Vec::with_capacity(35 + path_bytes.len());
     request.extend_from_slice(&tag.to_le_bytes());
     request.extend_from_slice(&width.to_le_bytes());
     request.extend_from_slice(&height.to_le_bytes());
     request.push(spec.transform.turns());
     request.push(u8::from(spec.transform.mirrored()));
+    request.push(flags);
     request.extend_from_slice(&spec.background.to_le_bytes());
     request.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
     request.extend_from_slice(path_bytes);
@@ -241,10 +279,10 @@ pub fn thumbnail(path: &Path, spec: Spec) -> Option<Reply> {
         return None;
     }
     match receiver.recv_timeout(REPLY_WITHIN) {
+        Ok(Ok(made)) => Some(made),
         // A file it could not read is read here: what this side has, the
         // other may lack (a decoder, a tool), and the error said here is
         // the one meant.
-        Ok(Ok(frame)) => Some(Ok(frame)),
         Ok(Err(_)) => None,
         Err(_) => {
             helper.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&tag);
@@ -260,6 +298,9 @@ fn read_reply(output: &mut impl Read) -> std::io::Result<(u64, Reply)> {
         let error = read_bytes(output)?;
         return Ok((tag, Err(String::from_utf8_lossy(&error).into_owned())));
     }
+    let format = read_bytes(output)?;
+    let format = FORMATS.iter().find(|name| name.as_bytes() == format.as_slice()).copied();
+    let ultra_hdr = read_u8(output)? == 1;
     let native = (read_u32(output)?, read_u32(output)?);
     let (width, height) = (read_u32(output)?, read_u32(output)?);
     let count = read_u32(output)?;
@@ -277,7 +318,8 @@ fn read_reply(output: &mut impl Read) -> std::io::Result<(u64, Reply)> {
     let mut pictures = pictures.into_iter().flatten();
     let first = pictures.next().unwrap_or_default();
     let animation = animated.then(|| Animation { frames: pictures.collect(), delays });
-    Ok((tag, Ok(Frame { width, height, native, pixels: first, animation })))
+    let frame = Frame { width, height, native, pixels: first, animation };
+    Ok((tag, Ok(Made { frame, format, ultra_hdr })))
 }
 
 fn unjpeg(bytes: &[u8], width: u32, height: u32) -> Option<Vec<u32>> {
@@ -288,13 +330,30 @@ fn unjpeg(bytes: &[u8], width: u32, height: u32) -> Option<Vec<u32>> {
     Some(image.pixels().map(|p| (u32::from(p[0]) << 16) | (u32::from(p[1]) << 8) | u32::from(p[2])).collect())
 }
 
-fn jpeg(pixels: &[u32], width: u32, height: u32) -> Result<Vec<u8>, String> {
+/// A picture as a JPEG: a thumbnail's color at half resolution, as most
+/// JPEGs have it; the picture on screen's at full.
+fn jpeg(pixels: &[u32], width: u32, height: u32, thumbnail: bool) -> Result<Vec<u8>, String> {
     let rgb: Vec<u8> = pixels.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
-    let mut out = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, QUALITY)
-        .encode(&rgb, width, height, image::ExtendedColorType::Rgb8)
-        .map_err(|error| error.to_string())?;
-    Ok(out)
+    let encode = || -> std::io::Result<Vec<u8>> {
+        let mut compress = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
+        // libjpeg-turbo's way, not mozjpeg's: its trellis search makes a
+        // file a tenth smaller in five times as long, and the link is
+        // quicker than that.
+        compress.set_fastest_defaults();
+        compress.set_size(width as usize, height as usize);
+        compress.set_quality(if thumbnail { THUMB_QUALITY } else { SCREEN_QUALITY });
+        let chroma = if thumbnail { (2, 2) } else { (1, 1) };
+        compress.set_chroma_sampling_pixel_sizes(chroma, chroma);
+        let mut started = compress.start_compress(Vec::new())?;
+        started.write_scanlines(&rgb)?;
+        started.finish()
+    };
+    // mozjpeg reports a broken encode by unwinding.
+    match std::panic::catch_unwind(encode) {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("the JPEG encoder failed".into()),
+    }
 }
 
 fn read_u8(input: &mut impl Read) -> std::io::Result<u8> {
@@ -325,8 +384,8 @@ fn read_bytes(input: &mut impl Read) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// `jog --serve`: makes the thumbnails asked for on stdin and writes them
-/// to stdout, several at once, until stdin closes.
+/// `jog --serve`: makes the pictures asked for on stdin and writes them to
+/// stdout, several at once, until stdin closes.
 pub fn serve_main() -> std::process::ExitCode {
     use std::os::fd::FromRawFd;
     // The replies get stdout to themselves: anything else that would write
@@ -350,58 +409,109 @@ pub fn serve_main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     }
-    let mut input = BufReader::new(std::io::stdin().lock());
-    while let Ok(tag) = read_u64(&mut input) {
-        let Ok(request) = read_request(&mut input) else { break };
-        let output = output.clone();
-        rayon::spawn(move || {
-            let (path, spec) = request;
-            let made = std::panic::catch_unwind(|| make(&path, spec)).unwrap_or_else(|_| Err("the decoder crashed on it".into()));
-            let reply = encode_reply(tag, made);
-            let mut out = output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if out.write_all(&reply).and_then(|()| out.flush()).is_err() {
-                std::process::exit(0);
+    // The other side asks for as many at once as it has threads, which may
+    // be more than this has cores: what is asked for waits its turn, the
+    // picture on screen ahead of the rest.
+    let queue = Arc::new(Queue::default());
+    let workers = std::thread::available_parallelism().map_or(4, usize::from);
+    for _ in 0..workers {
+        let (queue, output) = (queue.clone(), output.clone());
+        std::thread::spawn(move || {
+            while let Some((tag, path, spec)) = queue.take() {
+                let made = std::panic::catch_unwind(|| make(&path, spec)).unwrap_or_else(|_| Err("the decoder crashed on it".into()));
+                let reply = encode_reply(tag, made, spec.thumbnail);
+                let mut out = output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if out.write_all(&reply).and_then(|()| out.flush()).is_err() {
+                    std::process::exit(0);
+                }
             }
         });
+    }
+    let mut input = BufReader::new(std::io::stdin().lock());
+    while let Ok(tag) = read_u64(&mut input) {
+        let Ok((path, spec, urgent)) = read_request(&mut input) else { break };
+        queue.put((tag, path, spec), urgent);
     }
     // The other side went: what is still being made is for no one.
     std::process::ExitCode::SUCCESS
 }
 
-fn read_request(input: &mut impl Read) -> std::io::Result<(PathBuf, Spec)> {
+type Task = (u64, PathBuf, Spec);
+
+/// What is waiting to be made, the urgent first.
+#[derive(Default)]
+struct Queue {
+    waiting: Mutex<(std::collections::VecDeque<Task>, std::collections::VecDeque<Task>)>,
+    wake: std::sync::Condvar,
+}
+
+impl Queue {
+    fn put(&self, task: Task, urgent: bool) {
+        let mut waiting = self.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if urgent { waiting.0.push_back(task) } else { waiting.1.push_back(task) }
+        self.wake.notify_one();
+    }
+
+    fn take(&self) -> Option<Task> {
+        let mut waiting = self.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if let Some(task) = waiting.0.pop_front().or_else(|| waiting.1.pop_front()) {
+                return Some(task);
+            }
+            waiting = self.wake.wait(waiting).unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+}
+
+fn read_request(input: &mut impl Read) -> std::io::Result<(PathBuf, Spec, bool)> {
     let width = read_u32(input)?;
     let height = read_u32(input)?;
     let turns = read_u8(input)?;
     let mirrored = read_u8(input)? == 1;
+    let flags = read_u8(input)?;
     let background = read_u32(input)?;
     let path = read_bytes(input)?;
     // SAFETY: the bytes came from `as_encoded_bytes` on the same platform.
     let path = PathBuf::from(unsafe { std::ffi::OsString::from_encoded_bytes_unchecked(path) });
-    let spec = Spec { target: Some((width, height)), enlarge: false, transform: Transform::from_parts(turns, mirrored), background, thumbnail: true, hdr: Hdr::Sdr };
-    Ok((path, spec))
+    let spec = Spec {
+        target: Some((width, height)),
+        enlarge: flags & FLAG_ENLARGE != 0,
+        transform: Transform::from_parts(turns, mirrored),
+        background,
+        thumbnail: flags & FLAG_THUMBNAIL != 0,
+        hdr: Hdr::Sdr,
+    };
+    Ok((path, spec, flags & FLAG_URGENT != 0))
 }
 
-/// A thumbnail made the way the loader makes one here.
-fn make(path: &Path, spec: Spec) -> Result<Frame, String> {
+/// A picture made the way the loader makes one here.
+fn make(path: &Path, spec: Spec) -> Result<Made, String> {
     let source = decode::read(path, spec).map_err(|error| error.to_string())?;
-    decode::finish(&source, spec).map_err(|error| error.to_string())
+    let frame = decode::finish(&source, spec).map_err(|error| error.to_string())?;
+    Ok(Made { frame, format: source.format, ultra_hdr: source.ultra_hdr })
 }
 
-fn encode_reply(tag: u64, made: Result<Frame, String>) -> Vec<u8> {
+fn encode_reply(tag: u64, made: Result<Made, String>, thumbnail: bool) -> Vec<u8> {
     let mut out = tag.to_le_bytes().to_vec();
-    let encoded = made.and_then(|frame| {
+    let encoded = made.and_then(|made| {
+        let frame = &made.frame;
         let delays = frame.animation.as_ref().map(|animation| animation.delays.clone()).unwrap_or_default();
-        let mut pictures = vec![jpeg(&frame.pixels, frame.width, frame.height)?];
+        let mut pictures = vec![jpeg(&frame.pixels, frame.width, frame.height, thumbnail)?];
         if let Some(animation) = &frame.animation {
             for picture in &animation.frames {
-                pictures.push(jpeg(picture, frame.width, frame.height)?);
+                pictures.push(jpeg(picture, frame.width, frame.height, thumbnail)?);
             }
         }
-        Ok((frame, pictures, delays))
+        Ok((made, pictures, delays))
     });
     match encoded {
-        Ok((frame, pictures, delays)) => {
+        Ok((made, pictures, delays)) => {
+            let frame = made.frame;
             out.push(1);
+            let format = made.format.unwrap_or_default();
+            out.extend_from_slice(&(format.len() as u32).to_le_bytes());
+            out.extend_from_slice(format.as_bytes());
+            out.push(u8::from(made.ultra_hdr));
             for value in [frame.native.0, frame.native.1, frame.width, frame.height, pictures.len() as u32] {
                 out.extend_from_slice(&value.to_le_bytes());
             }
@@ -426,25 +536,58 @@ fn encode_reply(tag: u64, made: Result<Frame, String>) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    fn halves() -> Frame {
+        let pixels: Vec<u32> = (0..64 * 48).map(|at| if at % 64 < 32 { 0x00ff_0000 } else { 0x0000_00ff }).collect();
+        Frame::still(64, 48, (6000, 4500), pixels)
+    }
+
     #[test]
     fn a_reply_comes_back_as_the_frame_it_was() {
-        let pixels: Vec<u32> = (0..64 * 48).map(|at| if at % 64 < 32 { 0x00ff_0000 } else { 0x0000_00ff }).collect();
-        let frame = Frame::still(64, 48, (6000, 4500), pixels.clone());
-        let reply = encode_reply(7, Ok(frame));
-        let (tag, back) = read_reply(&mut reply.as_slice()).unwrap();
-        let back = back.unwrap();
-        assert_eq!((tag, back.width, back.height, back.native), (7, 64, 48, (6000, 4500)));
-        assert!(back.animation.is_none());
-        // JPEG: near, not the same.
-        let red = back.pixels[5 * 64 + 4];
-        assert!((red >> 16) > 0xf0 && (red & 0xff) < 0x10, "{red:06x}");
+        for thumbnail in [true, false] {
+            let made = Made { frame: halves(), format: Some("JPEG"), ultra_hdr: true };
+            let reply = encode_reply(7, Ok(made), thumbnail);
+            let (tag, back) = read_reply(&mut reply.as_slice()).unwrap();
+            let back = back.unwrap();
+            assert_eq!((tag, back.format, back.ultra_hdr), (7, Some("JPEG"), true));
+            let frame = back.frame;
+            assert_eq!((frame.width, frame.height, frame.native), (64, 48, (6000, 4500)));
+            assert!(frame.animation.is_none());
+            // JPEG: near, not the same.
+            let red = frame.pixels[5 * 64 + 4];
+            assert!((red >> 16) > 0xf0 && (red & 0xff) < 0x10, "{red:06x}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_format_comes_back_as_none() {
+        let made = Made { frame: halves(), format: None, ultra_hdr: false };
+        let reply = encode_reply(1, Ok(made), true);
+        assert_eq!(read_reply(&mut reply.as_slice()).unwrap().1.unwrap().format, None);
     }
 
     #[test]
     fn an_error_comes_back_as_one() {
-        let reply = encode_reply(3, Err("no such file".into()));
+        let reply = encode_reply(3, Err("no such file".into()), true);
         let (tag, back) = read_reply(&mut reply.as_slice()).unwrap();
         assert_eq!((tag, back.err().as_deref()), (3, Some("no such file")));
+    }
+
+    #[test]
+    fn a_request_is_read_as_it_was_written() {
+        let spec = Spec { target: Some((300, 200)), enlarge: true, transform: Transform::CW, background: 0x123456, thumbnail: false, hdr: Hdr::Sdr };
+        let path = b"/srv/a b.jpg";
+        let mut request = Vec::new();
+        for value in [300u32, 200] {
+            request.extend_from_slice(&value.to_le_bytes());
+        }
+        request.extend_from_slice(&[1, 0, FLAG_ENLARGE]);
+        request.extend_from_slice(&0x123456u32.to_le_bytes());
+        request.extend_from_slice(&(path.len() as u32).to_le_bytes());
+        request.extend_from_slice(path);
+        let (read, back, urgent) = read_request(&mut request.as_slice()).unwrap();
+        assert!(!urgent);
+        assert_eq!(read, PathBuf::from("/srv/a b.jpg"));
+        assert_eq!((back.target, back.enlarge, back.transform, back.background, back.thumbnail), (spec.target, spec.enlarge, spec.transform, spec.background, spec.thumbnail));
     }
 
     #[test]

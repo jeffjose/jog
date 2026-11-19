@@ -50,12 +50,15 @@ jog open on a host shares its mount, and the last one to quit unmounts
 it. Paths are shown and copied as `skyfall:/srv/a.jpg`, Move to… takes
 `skyfall:/srv/` for a host already open, and trash is the host's own.
 
-With jog installed on the host too, thumbnails are made there: jog starts
-`ssh host jog --serve` beside the mount, and only the thumbnail crosses
-the network, not the file. The first screen of a grid of 105 24-megapixel
-photos over a 32 MB/s link: 22.6 s through the mount alone, 5.9 s with
-it. Nothing waits on it; without jog there, an older one, or a dropped
-connection, thumbnails are read through the mount. `JOG_REMOTE` names
+With jog installed on the host too, pictures are made there: jog starts
+`ssh host jog --serve` beside the mount, and only what is shown crosses
+the network (the picture at the screen's size, or a thumbnail), not the
+file. Zoomed in to its own pixels, a picture is read through the mount.
+Over a 32 MB/s link, 24-megapixel photos: the first screen of a grid in
+5.2 s rather than 22.6 s, and with `--latest` the newest on screen in
+about 1.7 s rather than 8.3 s. Nothing waits on it; without jog there,
+an older one, or a dropped connection, everything is read through the
+mount. `JOG_REMOTE` names
 the jog over there when it is not on its `PATH`; `--debug` says how it
 fares.
 

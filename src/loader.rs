@@ -482,7 +482,7 @@ fn worker(shared: &Shared, on_loaded: &(dyn Fn(Job) + Send + Sync), thumbs_allow
 
         let started = Instant::now();
         let how = match &work {
-            Work::Decode(path) if spec.thumbnail && crate::serve::ready_for(path) => "made there",
+            Work::Decode(path) if crate::serve::ready_for(path, spec) => "made there",
             Work::Decode(_) => "",
             Work::FromSource(_) => "from decoded",
             Work::FromFrame(_) => "from frame",
@@ -534,12 +534,10 @@ fn perform(shared: &Shared, job: (Job, bool), work: Work, spec: Spec, keep: bool
     match work {
         Work::Decode(path) => {
             let started = Instant::now();
-            // A thumbnail of a file on another machine, made over there
-            // when jog is there to: only the thumbnail crosses the network.
-            if spec.thumbnail {
-                if let Some(Ok(frame)) = crate::serve::thumbnail(&path, spec) {
-                    return (Ok(frame), None, started.elapsed(), (None, false));
-                }
+            // A picture of a file on another machine, made over there when
+            // jog is there to: only the picture shown crosses the network.
+            if let Some(made) = crate::serve::make_there(&path, spec, job.1) {
+                return (Ok(made.frame), None, started.elapsed(), (made.format, made.ultra_hdr));
             }
             let source = match decode::read(&path, spec) {
                 Ok(source) => source,
