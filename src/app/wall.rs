@@ -545,13 +545,20 @@ impl App {
                 wall.heard = None;
             }
         }
+        // Those with nothing on this page are gone: their processes quit,
+        // sound and all, the moment the page turns. Nothing of the page
+        // before plays on unseen.
+        let heard_was = wall.heard.and_then(|at| wall.players.get(at)).and_then(|player| player.id);
         for at in free {
-            let player = &mut wall.players[at];
-            if player.id.take().is_some() {
-                player.trailers.stop();
-                player.frame = None;
-            }
+            wall.players[at].id = None;
         }
+        let before = wall.players.len();
+        wall.players.retain(|player| player.id.is_some());
+        if debug && wall.players.len() != before {
+            eprintln!("jog: wall    {} players quit, {} left", before - wall.players.len(), wall.players.len());
+        }
+        // Who is heard, found again among those left.
+        wall.heard = heard_was.and_then(|id| wall.players.iter().position(|player| player.id == Some(id)));
         let heard = heard_id.and_then(|id| wall.players.iter().position(|player| player.id == Some(id)));
         if heard != wall.heard {
             if let Some(was) = wall.heard {
