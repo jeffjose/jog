@@ -31,22 +31,14 @@ impl Inspection {
             let picture = crate::picmeta::read(path)?;
             return Ok(Inspection { probe: Value::Null, hdr: None, first_frame: Value::Null, tree: Err("not a video".into()), picture: Some(picture) });
         }
-        let output = std::process::Command::new("ffprobe")
-            .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters"])
-            .arg(path)
-            .stdin(std::process::Stdio::null())
-            .output()
+        let output = crate::serve::ffprobe(&["-v", "error", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters"], path)
             .map_err(|error| format!("ffprobe did not run: {error}"))?;
         if !output.status.success() {
             let said = String::from_utf8_lossy(&output.stderr);
             return Err(said.lines().last().unwrap_or("ffprobe failed").to_string());
         }
         let probe: Value = serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
-        let first_frame = std::process::Command::new("ffprobe")
-            .args(["-v", "error", "-select_streams", "v:0", "-show_frames", "-read_intervals", "%+#1", "-show_entries", "frame=side_data_list", "-print_format", "json"])
-            .arg(path)
-            .stdin(std::process::Stdio::null())
-            .output()
+        let first_frame = crate::serve::ffprobe(&["-v", "error", "-select_streams", "v:0", "-show_frames", "-read_intervals", "%+#1", "-show_entries", "frame=side_data_list", "-print_format", "json"], path)
             .ok()
             .and_then(|output| serde_json::from_slice(&output.stdout).ok())
             .unwrap_or(Value::Null);

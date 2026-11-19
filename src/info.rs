@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use rayon::prelude::*;
 use serde_json::{json, Value};
@@ -484,13 +483,27 @@ impl Cache {
 }
 
 fn facts(path: &Path, cache: &Cache) -> Result<Facts, String> {
-    if !files::is_video(path) {
-        return picture(path);
+    if let Some(facts) = cache.get(path).filter(|_| files::is_video(path)) {
+        return Ok(facts);
     }
-    match cache.get(path) {
-        Some(facts) => Ok(facts),
-        None => video(path),
+    // A file on another machine, worked out over there when jog is: only
+    // the facts cross the network.
+    if let Some(json) = crate::serve::facts(path) {
+        if let Ok(value) = serde_json::from_str::<Value>(&json) {
+            return Ok(Facts::from_json(&value));
+        }
     }
+    found(path)
+}
+
+fn found(path: &Path) -> Result<Facts, String> {
+    if files::is_video(path) { video(path) } else { picture(path) }
+}
+
+/// What `--info` says of a file, as JSON: for `jog --serve`, asked by a
+/// jog on another machine.
+pub fn facts_json(path: &Path) -> Result<Vec<u8>, String> {
+    Ok(found(path)?.to_json().to_string().into_bytes())
 }
 
 /// A picture: its size and format, and how large the file is.
@@ -506,11 +519,7 @@ fn picture(path: &Path) -> Result<Facts, String> {
 /// A video, as ffprobe tells of it: its size as shown, length, codec,
 /// depth and profile, rate, HDR, bitrate, sound, and how large the file is.
 fn video(path: &Path) -> Result<Facts, String> {
-    let output = Command::new("ffprobe")
-        .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .output()
+    let output = crate::serve::ffprobe(&["-v", "error", "-print_format", "json", "-show_format", "-show_streams"], path)
         .map_err(|error| format!("cannot run ffprobe: {error}"))?;
     if !output.status.success() {
         let said = String::from_utf8_lossy(&output.stderr);

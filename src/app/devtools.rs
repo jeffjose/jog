@@ -700,10 +700,7 @@ pub struct Packets {
 impl Packets {
     /// Reads them, on whatever thread calls.
     pub fn read(path: &Path) -> Result<Packets, String> {
-        let output = std::process::Command::new("ffprobe")
-            .args(["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,dts_time,size,flags", "-of", "csv=p=0"])
-            .arg(path)
-            .output()
+        let output = crate::serve::ffprobe(&["-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,dts_time,size,flags", "-of", "csv=p=0"], path)
             .map_err(|error| format!("ffprobe: {error}"))?;
         let mut packets = Packets::default();
         for line in String::from_utf8_lossy(&output.stdout).lines() {

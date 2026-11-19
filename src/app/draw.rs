@@ -1916,7 +1916,7 @@ impl App {
             std::thread::spawn(move || {
                 for (id, path) in receiver {
                     let arguments = ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"];
-                    let output = std::process::Command::new("ffprobe").args(arguments).arg(&path).output();
+                    let output = crate::serve::ffprobe(&arguments, &path);
                     let seconds = output.ok().and_then(|output| String::from_utf8_lossy(&output.stdout).trim().parse().ok());
                     if proxy.send_event(Event::Duration(id, seconds)).is_err() {
                         return;

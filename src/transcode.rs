@@ -311,11 +311,7 @@ struct Probe {
 }
 
 fn probe(path: &Path) -> Probe {
-    let output = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", "format=duration:stream=codec_type,pix_fmt,color_transfer,avg_frame_rate", "-of", "default=nw=1"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .output();
+    let output = crate::serve::ffprobe(&["-v", "error", "-show_entries", "format=duration:stream=codec_type,pix_fmt,color_transfer,avg_frame_rate", "-of", "default=nw=1"], path);
     let text = output.map(|output| String::from_utf8_lossy(&output.stdout).into_owned()).unwrap_or_default();
     let field = |key: &'static str| text.lines().filter_map(move |line| line.strip_prefix(key));
     // The first that is a rate: sound has none, as 0/0.
@@ -937,13 +933,8 @@ fn quick_or_exact(path: &Path, a: f64) -> Clip {
 /// the stretch just before `a` is read.
 fn keyframe_before(path: &Path, a: f64) -> Option<(f64, String)> {
     let interval = format!("{:.3}%{:.3}", (a - 60.0).max(0.0), a + 0.001);
-    let output = Command::new("ffprobe")
-        .args(["-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey", "-read_intervals", &interval])
-        .args(["-show_entries", "frame=pts_time,best_effort_timestamp_time:stream=codec_name,start_time", "-of", "json"])
-        .arg(path)
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+    let arguments = ["-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey", "-read_intervals", &interval, "-show_entries", "frame=pts_time,best_effort_timestamp_time:stream=codec_name,start_time", "-of", "json"];
+    let output = crate::serve::ffprobe(&arguments, path).ok()?;
     let found: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
     let stream = found["streams"].get(0)?;
     let codec = stream["codec_name"].as_str()?.to_string();

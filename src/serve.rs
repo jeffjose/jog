@@ -16,16 +16,25 @@
 //! (no jog over there, an older one, a dropped connection, a reply too
 //! slow), pictures are read through the mount as they would be without it.
 //!
-//! The protocol, little-endian, over ssh's stdin and stdout:
+//! Other work that reads much of a file to say little of it is done there
+//! too: every ffprobe jog runs, and what `--info` says of a file.
+//!
+//! The protocol, little-endian, over ssh's stdin and stdout. A byte string
+//! is its length `u32` and the bytes.
 //! - hello, from the server: `JOGSERVE` and the protocol's version, `u32`.
-//! - request: tag `u64`, width and height wanted `u32`s, quarter turns
-//!   `u8`, mirrored `u8`, flags `u8` (1 a thumbnail, 2 enlarged),
-//!   background `u32`, path length `u32`, path.
-//! - reply: tag `u64`, ok `u8`. Ok: the file's format (length `u32` and
-//!   name, empty when not known), Ultra HDR `u8`, native width and height,
-//!   width and height, `u32`s, then the count of pictures `u32` and whether
-//!   they are an animation `u8`, and each picture as its delay in ms `u32`,
-//!   length `u32` and a JPEG. Not ok: length `u32` and the error.
+//! - request: tag `u64`, kind `u8`, and what the kind asks:
+//!   - 0, a picture: width and height wanted `u32`s, quarter turns `u8`,
+//!     mirrored `u8`, flags `u8` (1 a thumbnail, 2 enlarged, 4 on screen),
+//!     background `u32`, path.
+//!   - 1, ffprobe: the count of its arguments `u32`, each, then the path.
+//!   - 2, what `--info` says: the path.
+//! - reply: tag `u64`, kind `u8`, ok `u8`; not ok, the error. Ok:
+//!   - a picture: the file's format (empty when not known), Ultra HDR `u8`,
+//!     native width and height, width and height, `u32`s, then the count of
+//!     pictures `u32` and whether they are an animation `u8`, and each
+//!     picture as its delay in ms `u32` and a JPEG.
+//!   - ffprobe: its exit code `i32`, stdout and stderr.
+//!   - `--info`: the facts, as JSON.
 
 use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
@@ -45,7 +54,11 @@ pub const SERVE_ARG: &str = "--serve";
 const MAGIC: &[u8; 8] = b"JOGSERVE";
 /// Raised whenever a request or reply changes shape: a jog over there that
 /// speaks another is not used.
-const PROTOCOL: u32 = 2;
+const PROTOCOL: u32 = 3;
+
+const KIND_PICTURE: u8 = 0;
+const KIND_PROBE: u8 = 1;
+const KIND_FACTS: u8 = 2;
 /// How long the server has to say hello before it is given up on. It is
 /// waited on by nothing meanwhile.
 const HELLO_WITHIN: Duration = Duration::from_secs(6);
@@ -88,7 +101,11 @@ pub struct Made {
     pub ultra_hdr: bool,
 }
 
-type Reply = Result<Made, String>;
+enum Reply {
+    Picture(Result<Made, String>),
+    /// What any other kind of request says, as it was sent.
+    Bytes(Result<Vec<u8>, String>),
+}
 
 /// A server on one host, as this side knows it.
 struct Helper {
@@ -271,26 +288,43 @@ pub fn make_there(path: &Path, spec: Spec, urgent: bool) -> Option<Made> {
     if !wanted(spec) {
         return None;
     }
+    let (width, height) = spec.target?;
+    let flags = if spec.thumbnail { FLAG_THUMBNAIL } else { 0 } | if spec.enlarge { FLAG_ENLARGE } else { 0 } | if urgent { FLAG_URGENT } else { 0 };
+    let mut body = Vec::new();
+    body.extend_from_slice(&width.to_le_bytes());
+    body.extend_from_slice(&height.to_le_bytes());
+    body.push(spec.transform.turns());
+    body.push(u8::from(spec.transform.mirrored()));
+    body.push(flags);
+    body.extend_from_slice(&spec.background.to_le_bytes());
+    let asked = Instant::now();
+    let (host, made) = match ask(path, KIND_PICTURE, body)? {
+        (host, Reply::Picture(Ok(made))) => (host, made),
+        // A file it could not read is read here: what this side has, the
+        // other may lack (a decoder, a tool), and the error said here is
+        // the one meant.
+        _ => return None,
+    };
+    if DEBUG.load(Ordering::Relaxed) {
+        eprintln!("jog: {:>7.1?} made on {host} at {}×{}{}", asked.elapsed(), made.frame.width, made.frame.height, if urgent { ", on screen" } else { "" });
+    }
+    Some(made)
+}
+
+/// Asks the helper of the host the file is on: `body` is the request after
+/// its kind, without the path, which is put after it. `None` when there is
+/// no helper to ask, or no answer in time.
+fn ask(path: &Path, kind: u8, mut body: Vec<u8>) -> Option<(String, Reply)> {
     settled(path);
     let (helper, there) = helper_for(path)?;
-    let (width, height) = spec.target?;
-    let asked = Instant::now();
     let tag = helper.next.fetch_add(1, Ordering::Relaxed);
     let (sender, receiver) = mpsc::channel();
     helper.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(tag, sender);
 
-    let path_bytes = there.as_os_str().as_encoded_bytes();
-    let flags = if spec.thumbnail { FLAG_THUMBNAIL } else { 0 } | if spec.enlarge { FLAG_ENLARGE } else { 0 } | if urgent { FLAG_URGENT } else { 0 };
-    let mut request = Vec::with_capacity(35 + path_bytes.len());
-    request.extend_from_slice(&tag.to_le_bytes());
-    request.extend_from_slice(&width.to_le_bytes());
-    request.extend_from_slice(&height.to_le_bytes());
-    request.push(spec.transform.turns());
-    request.push(u8::from(spec.transform.mirrored()));
-    request.push(flags);
-    request.extend_from_slice(&spec.background.to_le_bytes());
-    request.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
-    request.extend_from_slice(path_bytes);
+    let mut request = tag.to_le_bytes().to_vec();
+    request.push(kind);
+    request.append(&mut body);
+    put_bytes(&mut request, there.as_os_str().as_encoded_bytes());
     let sent = {
         let mut input = helper.input.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         input.as_mut().is_some_and(|input| input.write_all(&request).and_then(|()| input.flush()).is_ok())
@@ -300,16 +334,7 @@ pub fn make_there(path: &Path, spec: Spec, urgent: bool) -> Option<Made> {
         return None;
     }
     match receiver.recv_timeout(REPLY_WITHIN) {
-        Ok(Ok(made)) => {
-            if DEBUG.load(Ordering::Relaxed) {
-                eprintln!("jog: {:>7.1?} made on {} at {}×{}{}", asked.elapsed(), helper.host, made.frame.width, made.frame.height, if urgent { ", on screen" } else { "" });
-            }
-            Some(made)
-        }
-        // A file it could not read is read here: what this side has, the
-        // other may lack (a decoder, a tool), and the error said here is
-        // the one meant.
-        Ok(Err(_)) => None,
+        Ok(reply) => Some((helper.host.clone(), reply)),
         Err(_) => {
             helper.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&tag);
             None
@@ -317,12 +342,61 @@ pub fn make_there(path: &Path, spec: Spec, urgent: bool) -> Option<Made> {
     }
 }
 
+/// Runs ffprobe with `arguments` on the file, over there when the file is
+/// in a mount and jog is there: ffprobe seeks about a file for what it
+/// says, each seek a round trip through the mount.
+pub fn ffprobe(arguments: &[&str], path: &Path) -> std::io::Result<std::process::Output> {
+    let mut body = (arguments.len() as u32).to_le_bytes().to_vec();
+    for argument in arguments {
+        put_bytes(&mut body, argument.as_bytes());
+    }
+    if let Some((_, Reply::Bytes(Ok(said)))) = ask(path, KIND_PROBE, body) {
+        if let Some(output) = unpack_output(&said) {
+            return Ok(output);
+        }
+    }
+    Command::new("ffprobe").args(arguments).arg(path).stdin(Stdio::null()).output()
+}
+
+/// What `--info` says of a file, as JSON, worked out over there.
+pub fn facts(path: &Path) -> Option<String> {
+    match ask(path, KIND_FACTS, Vec::new())? {
+        (_, Reply::Bytes(Ok(json))) => String::from_utf8(json).ok(),
+        _ => None,
+    }
+}
+
+fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn pack_output(output: &std::process::Output) -> Vec<u8> {
+    let mut out = output.status.code().unwrap_or(-1).to_le_bytes().to_vec();
+    put_bytes(&mut out, &output.stdout);
+    put_bytes(&mut out, &output.stderr);
+    out
+}
+
+fn unpack_output(mut bytes: &[u8]) -> Option<std::process::Output> {
+    use std::os::unix::process::ExitStatusExt;
+    let code = read_u32(&mut bytes).ok()? as i32;
+    let stdout = read_bytes(&mut bytes).ok()?;
+    let stderr = read_bytes(&mut bytes).ok()?;
+    // A wait status: the exit code in the second byte.
+    Some(std::process::Output { status: std::process::ExitStatus::from_raw((code & 0xff) << 8), stdout, stderr })
+}
+
 fn read_reply(output: &mut impl Read) -> std::io::Result<(u64, Reply)> {
     let tag = read_u64(output)?;
+    let kind = read_u8(output)?;
     let ok = read_u8(output)? == 1;
     if !ok {
-        let error = read_bytes(output)?;
-        return Ok((tag, Err(String::from_utf8_lossy(&error).into_owned())));
+        let error = String::from_utf8_lossy(&read_bytes(output)?).into_owned();
+        return Ok((tag, if kind == KIND_PICTURE { Reply::Picture(Err(error)) } else { Reply::Bytes(Err(error)) }));
+    }
+    if kind != KIND_PICTURE {
+        return Ok((tag, Reply::Bytes(Ok(read_bytes(output)?))));
     }
     let format = read_bytes(output)?;
     let format = FORMATS.iter().find(|name| name.as_bytes() == format.as_slice()).copied();
@@ -339,13 +413,13 @@ fn read_reply(output: &mut impl Read) -> std::io::Result<(u64, Reply)> {
         pictures.push(unjpeg(&jpeg, width, height));
     }
     if pictures.is_empty() || pictures.iter().any(Option::is_none) {
-        return Ok((tag, Err("a picture that would not decode".into())));
+        return Ok((tag, Reply::Picture(Err("a picture that would not decode".into()))));
     }
     let mut pictures = pictures.into_iter().flatten();
     let first = pictures.next().unwrap_or_default();
     let animation = animated.then(|| Animation { frames: pictures.collect(), delays });
     let frame = Frame { width, height, native, pixels: first, animation };
-    Ok((tag, Ok(Made { frame, format, ultra_hdr })))
+    Ok((tag, Reply::Picture(Ok(Made { frame, format, ultra_hdr }))))
 }
 
 fn unjpeg(bytes: &[u8], width: u32, height: u32) -> Option<Vec<u32>> {
@@ -462,8 +536,45 @@ pub fn serve_main() -> std::process::ExitCode {
     }
     let mut input = BufReader::new(std::io::stdin().lock());
     while let Ok(tag) = read_u64(&mut input) {
-        let Ok((path, spec, urgent)) = read_request(&mut input) else { break };
-        queue.put((tag, path, spec), urgent);
+        let Ok(kind) = read_u8(&mut input) else { break };
+        if kind == KIND_PICTURE {
+            let Ok((path, spec, urgent)) = read_request(&mut input) else { break };
+            queue.put((tag, path, spec), urgent);
+            continue;
+        }
+        // The rest are quick, each little more than a process run, and
+        // wait behind no picture.
+        let asked = match kind {
+            KIND_PROBE => read_probe(&mut input).map(|(arguments, path)| Asked::Probe(arguments, path)),
+            KIND_FACTS => read_path(&mut input).map(Asked::Facts),
+            _ => break,
+        };
+        let Ok(asked) = asked else { break };
+        let output = output.clone();
+        std::thread::spawn(move || {
+            let answer = match asked {
+                Asked::Probe(arguments, path) => {
+                    Command::new("ffprobe").args(&arguments).arg(&path).stdin(Stdio::null()).output().map(|output| pack_output(&output)).map_err(|error| format!("cannot run ffprobe: {error}"))
+                }
+                Asked::Facts(path) => crate::info::facts_json(&path),
+            };
+            let mut reply = tag.to_le_bytes().to_vec();
+            reply.push(kind);
+            match answer {
+                Ok(bytes) => {
+                    reply.push(1);
+                    put_bytes(&mut reply, &bytes);
+                }
+                Err(error) => {
+                    reply.push(0);
+                    put_bytes(&mut reply, error.as_bytes());
+                }
+            }
+            let mut out = output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if out.write_all(&reply).and_then(|()| out.flush()).is_err() {
+                std::process::exit(0);
+            }
+        });
     }
     // The other side went: what is still being made is for no one.
     std::process::ExitCode::SUCCESS
@@ -529,6 +640,30 @@ impl Queue {
     }
 }
 
+/// A request other than for a picture.
+enum Asked {
+    Probe(Vec<String>, PathBuf),
+    Facts(PathBuf),
+}
+
+fn read_path(input: &mut impl Read) -> std::io::Result<PathBuf> {
+    let path = read_bytes(input)?;
+    // SAFETY: the bytes came from `as_encoded_bytes` on the same platform.
+    Ok(PathBuf::from(unsafe { std::ffi::OsString::from_encoded_bytes_unchecked(path) }))
+}
+
+fn read_probe(input: &mut impl Read) -> std::io::Result<(Vec<String>, PathBuf)> {
+    let count = read_u32(input)?;
+    if count > 256 {
+        return Err(std::io::Error::other("too many arguments"));
+    }
+    let mut arguments = Vec::new();
+    for _ in 0..count {
+        arguments.push(String::from_utf8_lossy(&read_bytes(input)?).into_owned());
+    }
+    Ok((arguments, read_path(input)?))
+}
+
 fn read_request(input: &mut impl Read) -> std::io::Result<(PathBuf, Spec, bool)> {
     let width = read_u32(input)?;
     let height = read_u32(input)?;
@@ -559,6 +694,7 @@ fn make(path: &Path, spec: Spec) -> Result<Made, String> {
 
 fn encode_reply(tag: u64, made: Result<Made, String>, thumbnail: bool) -> Vec<u8> {
     let mut out = tag.to_le_bytes().to_vec();
+    out.push(KIND_PICTURE);
     let encoded = made.and_then(|made| {
         let frame = &made.frame;
         let delays = frame.animation.as_ref().map(|animation| animation.delays.clone()).unwrap_or_default();
@@ -607,13 +743,20 @@ mod tests {
         Frame::still(64, 48, (6000, 4500), pixels)
     }
 
+    fn picture(reply: Reply) -> Result<Made, String> {
+        match reply {
+            Reply::Picture(made) => made,
+            Reply::Bytes(_) => panic!("not a picture"),
+        }
+    }
+
     #[test]
     fn a_reply_comes_back_as_the_frame_it_was() {
         for thumbnail in [true, false] {
             let made = Made { frame: halves(), format: Some("JPEG"), ultra_hdr: true };
             let reply = encode_reply(7, Ok(made), thumbnail);
             let (tag, back) = read_reply(&mut reply.as_slice()).unwrap();
-            let back = back.unwrap();
+            let back = picture(back).unwrap();
             assert_eq!((tag, back.format, back.ultra_hdr), (7, Some("JPEG"), true));
             let frame = back.frame;
             assert_eq!((frame.width, frame.height, frame.native), (64, 48, (6000, 4500)));
@@ -628,14 +771,22 @@ mod tests {
     fn an_unknown_format_comes_back_as_none() {
         let made = Made { frame: halves(), format: None, ultra_hdr: false };
         let reply = encode_reply(1, Ok(made), true);
-        assert_eq!(read_reply(&mut reply.as_slice()).unwrap().1.unwrap().format, None);
+        assert_eq!(picture(read_reply(&mut reply.as_slice()).unwrap().1).unwrap().format, None);
     }
 
     #[test]
     fn an_error_comes_back_as_one() {
         let reply = encode_reply(3, Err("no such file".into()), true);
         let (tag, back) = read_reply(&mut reply.as_slice()).unwrap();
-        assert_eq!((tag, back.err().as_deref()), (3, Some("no such file")));
+        assert_eq!((tag, picture(back).err().as_deref()), (3, Some("no such file")));
+    }
+
+    #[test]
+    fn a_probe_comes_back_as_the_output_it_was() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = std::process::Output { status: std::process::ExitStatus::from_raw(1 << 8), stdout: b"{}".to_vec(), stderr: b"bad".to_vec() };
+        let back = unpack_output(&pack_output(&output)).unwrap();
+        assert_eq!((back.status.code(), back.stdout, back.stderr), (Some(1), b"{}".to_vec(), b"bad".to_vec()));
     }
 
     #[test]

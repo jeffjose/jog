@@ -73,7 +73,7 @@ impl Stories {
 /// How long a video is, in seconds, as ffprobe reads it.
 pub fn length(path: &Path) -> Option<f64> {
     let arguments = ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0"];
-    let output = Command::new("ffprobe").args(arguments).arg(path).stdin(Stdio::null()).output().ok()?;
+    let output = crate::serve::ffprobe(&arguments, path).ok()?;
     String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 

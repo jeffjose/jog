@@ -79,11 +79,7 @@ fn text_of(value: &Value) -> Option<String> {
 
 /// The streams of a file as the editor's rows, its length and container.
 fn read_rows(path: &Path) -> Result<(Vec<EditRow>, f64, String), String> {
-    let output = std::process::Command::new("ffprobe")
-        .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
-        .arg(path)
-        .stdin(std::process::Stdio::null())
-        .output()
+    let output = crate::serve::ffprobe(&["-v", "error", "-print_format", "json", "-show_format", "-show_streams"], path)
         .map_err(|error| format!("ffprobe did not run: {error}"))?;
     let probe: Value = serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
     let rows = probe["streams"]
