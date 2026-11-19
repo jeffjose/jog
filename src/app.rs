@@ -69,6 +69,7 @@ use draw::*;
 mod edit;
 mod grid;
 mod wall;
+mod wall_bar;
 use wall::{TileKey, Wall};
 mod input;
 mod menu;
@@ -1570,6 +1571,12 @@ pub struct App {
     /// The wall's tiles as last painted, and what each was painted with.
     wall_copy: Vec<u32>,
     wall_kept: Vec<TileKey>,
+    /// The bar at the wall's foot: whether the pointer has it up, the
+    /// button under the pointer, where its buttons were drawn and where it was.
+    wall_bar_up: bool,
+    wall_bar_over: Option<wall_bar::WallAction>,
+    wall_bar: Vec<([i32; 4], wall_bar::WallAction)>,
+    wall_bar_place: [i32; 4],
     drag: Option<Drag>,
     slide_delay: Duration,
     slide_at: Option<Instant>,
@@ -2196,6 +2203,10 @@ impl App {
             wall_frozen: None,
             wall_copy: Vec::new(),
             wall_kept: Vec::new(),
+            wall_bar_up: false,
+            wall_bar_over: None,
+            wall_bar: Vec::new(),
+            wall_bar_place: [0; 4],
             drag: None,
             slide_delay,
             slide_at: options.slideshow_delay.map(|_| Instant::now() + slide_delay),
@@ -4614,6 +4625,9 @@ impl App {
                 }
                 self.pointer_found = input::Arrival::Coming;
                 self.set_strip_hover(false);
+                if std::mem::take(&mut self.wall_bar_up) {
+                    self.redraw();
+                }
                 if self.hover.take().is_some() {
                     self.redraw();
                 }

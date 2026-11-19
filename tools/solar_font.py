@@ -43,7 +43,7 @@ PICKS = {
     "INFO": "info-circle", "CAMERA": "camera", "ARROW_UP_DOWN": "sort-vertical",
     "SORT": "sort-from-top-to-bottom", "STAR": "star", "STAR_OFF": "star-off", "FLAG": "flag", "COPY": "copy",
     "BRACES": "braces", "FOLDER_INPUT": "move-to-folder", "FOLDER_PLUS": "add-folder", "FOLDERS": "folders",
-    "PENCIL": "pen", "REFRESH": "refresh", "UNDO": "undo-left", "CLIPBOARD": "clipboard", "MINUS": "minus",
+    "PENCIL": "pen", "REFRESH": "refresh", "UNDO": "undo-left", "CLIPBOARD": "clipboard", "MINUS": "minus", "PLUS": "add",
     "TRASH": "trash-bin-minimalistic", "CIRCLE_X": "close-circle", "BUG": "bug", "TERMINAL": "command",
     "KEYBOARD": "keyboard", "LOG_OUT": "logout-2", "EXTERNAL_LINK": "square-arrow-right-up", "POP_IN": "square-arrow-left-down", "CHECK": "check",
     "CHEVRON_RIGHT": "alt-arrow-right", "CHEVRON_LEFT": "alt-arrow-left", "TRIANGLE_ALERT": "danger-triangle",

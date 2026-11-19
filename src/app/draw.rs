@@ -1284,7 +1284,8 @@ impl App {
     pub(super) fn draw_grid_labels(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
         let Some(cursor) = self.grid.as_ref().filter(|_| self.overview.is_none()).map(|grid| grid.cursor) else { return };
         if self.wall().is_some() {
-            return self.draw_wall_labels(canvas, text, px);
+            self.draw_wall_labels(canvas, text, px);
+            return self.draw_wall_bar(canvas, text, px);
         }
         let layout = self.grid_layout((canvas.width as u32, canvas.height as u32));
         let line = Text::line_height(px);

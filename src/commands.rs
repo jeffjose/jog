@@ -516,6 +516,7 @@ pub mod icons {
     pub const UNDO: &str = "\u{e2a0}";
     pub const CLIPBOARD: &str = "\u{e089}";
     pub const MINUS: &str = "\u{e11f}";
+    pub const PLUS: &str = "\u{e714}";
     pub const TRASH: &str = "\u{e18d}";
     pub const CIRCLE_X: &str = "\u{e088}";
     pub const BUG: &str = "\u{e20b}";
@@ -1017,8 +1018,8 @@ pub const WALL_MENU: &[Option<MenuItem>] = &[
     submenu("Marks", MARKS, Applies::Always),
     None,
     item("Pages turn by themselves", "Space", Command::WallAutoplay),
-    item("Fewer across", "Ctrl++", Command::GridLarger),
-    item("More across", "Ctrl+-", Command::GridSmaller),
+    item("Fewer across", "+", Command::GridLarger),
+    item("More across", "-", Command::GridSmaller),
     item("Grid", "g", Command::ToggleGrid),
     item("Close the wall", "G", Command::ToggleWall),
 ];

@@ -250,7 +250,12 @@ impl App {
             if matches!(self.drag, Some(Drag::Pages)) {
                 return self.drag_pages(x);
             }
-            self.point_cursor();
+            // Near its foot, the wall's bar comes up; over it, no tile is
+            // picked out.
+            self.wall_bar_hover(x, y);
+            if !self.on_wall_bar(x, y) {
+                self.point_cursor();
+            }
             // The buttons light up under the pointer.
             let inside = |b: &Button| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32));
             let arrows = self.grid_arrows();
@@ -582,6 +587,13 @@ impl App {
                 (MouseButton::Left, true) => {
                     // The buttons under the grid, then those at its sides
                     // for the pages either way, then the pictures.
+                    // The wall's bar, before the tiles under it.
+                    if let Some(action) = self.wall_bar_at(x, y) {
+                        return self.wall_bar_press(action, event_loop);
+                    }
+                    if self.on_wall_bar(x, y) {
+                        return;
+                    }
                     let arrow = self.grid_arrows().into_iter().find(|(place, _)| hit(&place)).map(|(_, forward)| forward);
                     if self.grid_close().as_ref().is_some_and(|place| hit(&place)) {
                         return self.toggle_grid();

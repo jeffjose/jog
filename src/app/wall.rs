@@ -8,8 +8,10 @@ use super::*;
 /// Between tiles.
 const GAP: i32 = 3;
 const RADIUS: i32 = 3;
-/// How long a page stays before it turns by itself.
-pub(super) const WALL_HOLD: Duration = Duration::from_secs(8);
+/// How long a page stays before it turns by itself, in seconds: the
+/// choices, and the one to begin with.
+pub(super) const HOLDS: [u64; 8] = [3, 5, 8, 12, 20, 30, 60, 120];
+const HOLD: u64 = 8;
 /// The turn, lift and rise: a tile leaves over half of `SPAN`, rising a
 /// little as it fades, and the next arrives over 60% of it from a little
 /// below. Each waits `STAGGER` for every step it is from the top left
@@ -32,6 +34,8 @@ pub(super) struct Wall {
     /// Whether the pages turn by themselves, and when the next one does.
     pub(super) auto: bool,
     pub(super) next_at: Option<Instant>,
+    /// How long a page stays when they do.
+    pub(super) hold: Duration,
     turn: Option<Turn>,
     /// One player for each video on the page, up to what the cores allow.
     players: Vec<TilePlayer>,
@@ -84,37 +88,60 @@ struct TilePlayer {
 
 impl Wall {
     pub(super) fn at(start: usize) -> Wall {
-        Wall { start, back: Vec::new(), columns: kept_columns(), auto: false, next_at: None, turn: None, players: Vec::new(), heard: None, told: Instant::now(), stamps: 0 }
+        Wall { start, back: Vec::new(), columns: kept_columns(), auto: false, next_at: None, hold: Duration::from_secs(kept_hold()), turn: None, players: Vec::new(), heard: None, told: Instant::now(), stamps: 0 }
     }
 }
 
-/// How many columns the wall was last set to, kept between runs in the
-/// state folder; read from there once, the first time it is wanted.
-static COLUMNS: std::sync::Mutex<Option<Option<i32>>> = std::sync::Mutex::new(None);
-
-fn columns_file() -> Option<PathBuf> {
-    crate::positions::state_dir().map(|dir| dir.join("wall-columns"))
+/// A setting of the wall kept between runs, a number in a file of the
+/// state folder: read from there once, the first time it is wanted.
+struct Kept {
+    file: &'static str,
+    value: std::sync::Mutex<Option<Option<i64>>>,
 }
+
+impl Kept {
+    const fn new(file: &'static str) -> Kept {
+        Kept { file, value: std::sync::Mutex::new(None) }
+    }
+
+    fn path(&self) -> Option<PathBuf> {
+        crate::positions::state_dir().map(|dir| dir.join(self.file))
+    }
+
+    fn get(&self) -> Option<i64> {
+        let mut kept = self.value.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *kept.get_or_insert_with(|| std::fs::read_to_string(self.path()?).ok()?.trim().parse().ok())
+    }
+
+    /// Keeps it for the next wall and the next run; the file is written
+    /// on a thread of its own.
+    fn set(&'static self, value: i64) {
+        *self.value.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Some(value));
+        std::thread::spawn(move || {
+            let Some(file) = self.path() else { return };
+            if let Some(dir) = file.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(file, format!("{value}\n"));
+        });
+    }
+}
+
+/// How many columns the wall was last set to, and how long its pages
+/// stayed while they turned by themselves.
+static COLUMNS: Kept = Kept::new("wall-columns");
+static HOLD_KEPT: Kept = Kept::new("wall-hold");
 
 fn kept_columns() -> Option<i32> {
-    let mut kept = COLUMNS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    *kept.get_or_insert_with(|| {
-        let text = std::fs::read_to_string(columns_file()?).ok()?;
-        text.trim().parse().ok().filter(|columns| (2..=16).contains(columns))
-    })
+    COLUMNS.get().and_then(|columns| i32::try_from(columns).ok()).filter(|columns| (2..=16).contains(columns))
 }
 
-/// Keeps the columns for the next wall and the next run; the file is
-/// written on a thread of its own.
 fn keep_columns(columns: i32) {
-    *COLUMNS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Some(columns));
-    std::thread::spawn(move || {
-        let Some(file) = columns_file() else { return };
-        if let Some(dir) = file.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(file, format!("{columns}\n"));
-    });
+    COLUMNS.set(i64::from(columns));
+}
+
+fn kept_hold() -> u64 {
+    HOLD_KEPT.get().and_then(|secs| u64::try_from(secs).ok()).filter(|secs| HOLDS.contains(secs)).unwrap_or(HOLD)
 }
 
 /// Packs pictures of these shapes, each its width over its height, into
@@ -197,7 +224,7 @@ impl App {
         self.grid.as_mut()?.wall.as_mut()
     }
 
-    fn wall_columns(&self, wall: &Wall, window: (u32, u32)) -> i32 {
+    pub(super) fn wall_columns(&self, wall: &Wall, window: (u32, u32)) -> i32 {
         wall.columns.unwrap_or((window.0 as i32 / 260).clamp(3, 12))
     }
 
@@ -312,9 +339,32 @@ impl App {
     pub(super) fn wall_autoplay(&mut self) {
         let Some(wall) = self.wall_mut() else { return };
         wall.auto = !wall.auto;
-        wall.next_at = wall.auto.then(|| Instant::now() + WALL_HOLD);
+        wall.next_at = wall.auto.then(|| Instant::now() + wall.hold);
         let on = wall.auto;
-        self.toast(if on { format!("Pages turn · every {} s", WALL_HOLD.as_secs()) } else { "Pages stay".to_string() });
+        let hold = wall.hold.as_secs();
+        self.toast(if on { format!("Pages turn · every {hold} s") } else { "Pages stay".to_string() });
+        self.redraw();
+    }
+
+    /// The pages staying longer before they turn by themselves, or less
+    /// long: the next of the choices either way. The page on show now has
+    /// its time from when it came, as if it had been set so all along.
+    pub(super) fn wall_hold_by(&mut self, longer: bool) {
+        let Some(wall) = self.wall_mut() else { return };
+        let now = wall.hold.as_secs();
+        let next = match longer {
+            true => HOLDS.iter().copied().find(|&secs| secs > now),
+            false => HOLDS.iter().rev().copied().find(|&secs| secs < now),
+        };
+        let Some(secs) = next else { return };
+        let hold = Duration::from_secs(secs);
+        if let Some(at) = wall.next_at {
+            let came = at.checked_sub(wall.hold).unwrap_or(at);
+            wall.next_at = Some((came + hold).max(Instant::now()));
+        }
+        wall.hold = hold;
+        HOLD_KEPT.set(secs as i64);
+        self.toast(format!("Every {secs} s"));
         self.redraw();
     }
 
@@ -357,7 +407,7 @@ impl App {
             }
             wall.turn = Some(Turn { tiles: leaving, since: Instant::now(), forward });
             wall.start = start;
-            wall.next_at = wall.auto.then(|| Instant::now() + Duration::from_secs_f64(SPAN * 2.0) + WALL_HOLD);
+            wall.next_at = wall.auto.then(|| Instant::now() + Duration::from_secs_f64(SPAN * 2.0) + wall.hold);
         }
         if let Some(grid) = &mut self.grid {
             grid.cursor = start.min(len.saturating_sub(1));
@@ -405,8 +455,12 @@ impl App {
                 self.request();
                 self.redraw();
             }
-            Key::Character("+" | "=") if ctrl => self.zoom_wall(true),
-            Key::Character("-" | "_") if ctrl => self.zoom_wall(false),
+            // With Ctrl or without: the wall has no zoom of its own.
+            Key::Character("+" | "=") => self.zoom_wall(true),
+            Key::Character("-" | "_") => self.zoom_wall(false),
+            // As for a video's speed: faster turns, or slower.
+            Key::Character("]") => self.wall_hold_by(false),
+            Key::Character("[") => self.wall_hold_by(true),
             Key::Character("G") => self.toggle_wall(),
             Key::Character("g") if !ctrl => self.wall_to_grid(),
             // Titles are the grid's; the wall has none.
@@ -684,7 +738,7 @@ impl App {
     pub(super) fn draw_wall_progress(&self, canvas: &mut Canvas) {
         let Some(wall) = self.wall() else { return };
         if let Some(next) = wall.next_at.filter(|_| wall.auto && wall.turn.is_none()) {
-            let left = next.saturating_duration_since(Instant::now()).as_secs_f64() / WALL_HOLD.as_secs_f64();
+            let left = next.saturating_duration_since(Instant::now()).as_secs_f64() / wall.hold.as_secs_f64();
             let thick = (canvas.height / 400).max(2);
             canvas.fill(0, 0, (f64::from(canvas.width) * (1.0 - left.min(1.0))) as i32, thick, accent_soft());
             self.animating.set(true);
@@ -695,7 +749,8 @@ impl App {
     /// the foot of its tile, and a speaker on it while it is heard.
     pub(super) fn draw_wall_labels(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
         self.wall_name = None;
-        if self.wall().is_some_and(|wall| wall.turn.is_some()) || !self.pointer_inside() {
+        // With the bar up, no tile is picked out.
+        if self.wall_bar_up || self.wall().is_some_and(|wall| wall.turn.is_some()) || !self.pointer_inside() {
             return;
         }
         let Some(pos) = self.wall_tile_at(self.mouse.0, self.mouse.1) else { return };
