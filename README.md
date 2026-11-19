@@ -45,9 +45,10 @@ changes the ssh command.
 
 The host's `/` is mounted with sshfs (or rclone, without it) under
 `$XDG_RUNTIME_DIR/jog/mnt/HOST`, and from there it is a folder like any
-other: browsed, played, moved, renamed and converted in place. Each
-jog open on a host shares its mount, and the last one to quit unmounts
-it. Paths are shown and copied as `skyfall:/srv/a.jpg`, Move to… takes
+other: browsed, played, moved, renamed and converted in place. Every
+jog on a host shares its mount and one ssh connection; both stay up five
+minutes after the last one quits (`JOG_LINGER`, in seconds), so the next
+`jog skyfall:.` neither connects nor mounts again. Paths are shown and copied as `skyfall:/srv/a.jpg`, Move to… takes
 `skyfall:/srv/` for a host already open, and trash is the host's own.
 
 With jog installed on the host too, pictures are made there: jog starts

@@ -163,11 +163,10 @@ pub fn open_all(paths: &mut [PathBuf], cwd: &Path) -> Result<(), String> {
 /// there through the mount.
 pub fn trash(path: &Path) -> Option<Result<(), String>> {
     let (host, there) = split(path)?;
-    let mut ssh = ssh_command();
+    let mut ssh = ssh_line();
     let program = ssh.remove(0);
     let status = Command::new(&program)
         .args(ssh)
-        .args(KEEPALIVE.iter().map(|option| format!("-o{option}")))
         .arg(&host)
         .arg(format!("gio trash -- {}", quote(&there.to_string_lossy())))
         .stdin(Stdio::null())
@@ -181,30 +180,93 @@ pub fn trash(path: &Path) -> Option<Result<(), String>> {
     })
 }
 
-/// Lets go of the hosts this jog holds, and unmounts those no other jog
-/// holds. Once, on the way out.
+/// The word that starts the process keeping a mount up for a while.
+pub const LINGER_ARG: &str = "--unmount-later";
+
+/// How long a host stays mounted after the last jog in it quits, so the
+/// next one starts without mounting it again. `JOG_LINGER` in seconds.
+fn linger() -> std::time::Duration {
+    let seconds = std::env::var("JOG_LINGER").ok().and_then(|text| text.parse().ok()).unwrap_or(300);
+    std::time::Duration::from_secs(seconds)
+}
+
+/// Lets go of the hosts this jog holds. One no other jog holds is left
+/// mounted for a while, and unmounted after by a process of its own, unless
+/// a jog is in it again by then. Once, on the way out.
 pub fn release() {
     let held = std::mem::take(&mut *HELD.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
     for (host, lock) in held {
-        // No other jog mounting it meanwhile, to find it gone from under it.
-        let Ok(_setting_up) = lock_file(&host, "mounting", libc::LOCK_EX) else { continue };
-        // SAFETY: flock on a file this holds open.
-        let alone = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-        if alone {
-            // Lazily: the players, still in the files, go with the process.
-            unmount(&root().join(&host), true);
+        // When it was last in use, which the one unmounting goes by.
+        let _ = lock_file(&host, "used", libc::LOCK_SH).map(|file| file.set_modified(std::time::SystemTime::now()));
+        if linger().is_zero() {
+            unmount_if_idle(&host, &lock);
+            continue;
         }
+        drop(lock);
+        // A process of its own, out of this one's session, so that closing
+        // the terminal jog was started from does not take it too.
+        let Ok(exe) = std::env::current_exe() else { continue };
+        let mut command = Command::new(exe);
+        command.arg(LINGER_ARG).arg(&host).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        // SAFETY: setsid is async-signal-safe, all a child may call here.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        let _ = command.spawn();
     }
 }
 
-/// The host's lock file of that kind, open and locked as asked.
+/// Unmounts the host when no jog is in it, `in_use` being this one's own
+/// hold on it, or none.
+fn unmount_if_idle(host: &str, in_use: &File) -> bool {
+    // No other jog mounting it meanwhile, to find it gone from under it.
+    let Ok(_setting_up) = lock_file(host, "mounting", libc::LOCK_EX) else { return false };
+    // SAFETY: flock on a file this holds open.
+    let alone = unsafe { libc::flock(in_use.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+    // Lazily: a player still in a file goes with its process.
+    alone && unmount(&root().join(host), true)
+}
+
+/// `jog --unmount-later HOST`: waits until the host has gone unused for
+/// [`linger`], and unmounts it. One at a time for a host; a jog quitting
+/// while one waits only moves the time on.
+pub fn linger_main(host: &str) -> std::process::ExitCode {
+    let Ok(_alone) = lock_file(host, "linger", libc::LOCK_EX | libc::LOCK_NB) else { return std::process::ExitCode::SUCCESS };
+    loop {
+        let used = root().join(format!(".{host}.used"));
+        let since = std::fs::metadata(&used).and_then(|meta| meta.modified()).ok().and_then(|at| at.elapsed().ok()).unwrap_or_default();
+        if since < linger() {
+            std::thread::sleep(linger() - since + std::time::Duration::from_secs(1));
+            continue;
+        }
+        if !is_mounted(&root().join(host)) {
+            return std::process::ExitCode::SUCCESS;
+        }
+        let Ok(in_use) = lock_file(host, "in-use", libc::LOCK_SH) else { return std::process::ExitCode::FAILURE };
+        if unmount_if_idle(host, &in_use) {
+            return std::process::ExitCode::SUCCESS;
+        }
+        // A jog is in it: it says when it quits.
+        drop(in_use);
+        std::thread::sleep(linger());
+    }
+}
+
+/// The host's lock file of that kind, open and locked as asked: an error
+/// when `how` asks not to wait and another holds it.
 fn lock_file(host: &str, kind: &str, how: libc::c_int) -> Result<File, String> {
     let root = root();
     std::fs::create_dir_all(&root).map_err(|error| format!("cannot make {}: {error}", root.display()))?;
     let path = root.join(format!(".{host}.{kind}"));
     let file = File::options().create(true).truncate(false).write(true).open(&path).map_err(|error| format!("cannot open {}: {error}", path.display()))?;
     // SAFETY: flock on a file this holds open.
-    unsafe { libc::flock(file.as_raw_fd(), how) };
+    if unsafe { libc::flock(file.as_raw_fd(), how) } != 0 {
+        return Err(format!("{} is locked", path.display()));
+    }
     Ok(file)
 }
 
@@ -228,10 +290,9 @@ fn hold(host: &str) -> Result<PathBuf, String> {
     }
     // Two locks: `mounting`, one jog at a time, while it is mounted or
     // unmounted; `in-use`, shared by every jog in it for as long as it
-    // runs. One quitting unmounts only with `in-use` to itself.
-    // The thumbnail maker over there, connecting while this mounts; never
-    // waited on.
-    crate::serve::start(host, ssh_command());
+    // runs. It is unmounted only with `in-use` to one.
+    // The picture maker over there, connecting while this mounts.
+    crate::serve::start(host, ssh_line());
     let _setting_up = lock_file(host, "mounting", libc::LOCK_EX)?;
     let in_use = lock_file(host, "in-use", libc::LOCK_SH)?;
     mount_if_down(host, &point)?;
@@ -252,20 +313,21 @@ fn mount_if_down(host: &str, point: &Path) -> Result<(), String> {
 }
 
 fn mount(host: &str, point: &Path) -> Result<(), String> {
-    let ssh = ssh_command();
     let custom = std::env::var_os("JOG_SSH").is_some();
     let sshfs = is_program("sshfs");
+    // A listing is kept a second: a mount kept up between jogs would
+    // otherwise miss what was made over there meanwhile, the very file
+    // --latest is for.
     let status = if sshfs {
-        let mut options = format!("reconnect,follow_symlinks,{}", KEEPALIVE.join(","));
+        let mut options = format!("reconnect,follow_symlinks,cache_timeout=1,{}", ssh_options().join(","));
         if custom {
-            options.push_str(&format!(",ssh_command={}", ssh.join(" ")));
+            options.push_str(&format!(",ssh_command={}", ssh_command().join(" ")));
         }
         Command::new("sshfs").arg(format!("{host}:/")).arg(point).args(["-o", &options]).status()
     } else if is_program("rclone") {
         // rclone's own ssh reads neither ~/.ssh/config nor the agent's idea
         // of which key goes with which host, so it is told to run ssh.
-        let mut line = ssh;
-        line.extend(KEEPALIVE.iter().map(|option| format!("-o{option}")));
+        let mut line = ssh_line();
         line.push(host.to_string());
         Command::new("rclone")
             .env("RCLONE_CONFIG_JOGREMOTE_TYPE", "sftp")
@@ -273,7 +335,10 @@ fn mount(host: &str, point: &Path) -> Result<(), String> {
             .env("RCLONE_CONFIG_JOGREMOTE_SHELL_TYPE", "unix")
             .args(["mount", "jogremote:/"])
             .arg(point)
-            .args(["--daemon", "--dir-cache-time", "10s", "--log-level", "ERROR"])
+            // Read ahead little: a file opened to look at its head would
+            // otherwise pull 16 MB over the link the picture on screen
+            // shares. A player keeps its own cache.
+            .args(["--daemon", "--dir-cache-time", "1s", "--buffer-size", "512k", "--log-level", "ERROR"])
             .stderr(Stdio::null())
             .status()
     } else {
@@ -319,11 +384,10 @@ fn home(host: &str) -> Result<String, String> {
             return Ok(known.trim_end().to_string());
         }
     }
-    let mut ssh = ssh_command();
+    let mut ssh = ssh_line();
     let program = ssh.remove(0);
     let out = Command::new(&program)
         .args(ssh)
-        .arg(format!("-o{}", KEEPALIVE[2]))
         .arg(host)
         .arg("pwd")
         .stdin(Stdio::null())
@@ -380,6 +444,22 @@ fn quote(text: &str) -> String {
 fn ssh_command() -> Vec<String> {
     let words: Vec<String> = std::env::var("JOG_SSH").unwrap_or_default().split_whitespace().map(str::to_string).collect();
     if words.is_empty() { vec!["ssh".to_string()] } else { words }
+}
+
+/// The ssh options of every connection to a host. One connection is shared
+/// by the mount, the picture maker and the rest, and kept a while after
+/// the last of them, so that a jog started again connects at once.
+fn ssh_options() -> Vec<String> {
+    let path = root().join(".ssh-%C");
+    let control = [format!("ControlPath={}", path.display()), "ControlMaster=auto".into(), "ControlPersist=10m".into()];
+    KEEPALIVE.iter().map(|option| option.to_string()).chain(control).collect()
+}
+
+/// The ssh command and its options, for `Command`, without the host.
+fn ssh_line() -> Vec<String> {
+    let mut line = ssh_command();
+    line.extend(ssh_options().into_iter().map(|option| format!("-o{option}")));
+    line
 }
 
 fn is_program(name: &str) -> bool {

@@ -4407,6 +4407,10 @@ impl App {
                 }
                 self.refresh();
                 self.start_snapshot(event_loop);
+                // Held back while it came over the network.
+                if crate::remote::split(&self.files[id]).is_some() {
+                    self.preload_video();
+                }
             }
             Event::Loaded(Job::Full(id)) if id == self.id() => self.redraw(),
             // Thumbnails come in a burst, several in a frame's time: the

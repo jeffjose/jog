@@ -57,7 +57,7 @@ const REPLY_WITHIN: Duration = Duration::from_secs(15);
 const THUMB_QUALITY: f32 = 88.0;
 /// JPEG quality of the picture on screen, with color at full resolution:
 /// not to be told from the decoded pixels at the size it is shown.
-const SCREEN_QUALITY: f32 = 95.0;
+const SCREEN_QUALITY: f32 = 92.0;
 
 const FLAG_THUMBNAIL: u8 = 1;
 const FLAG_ENLARGE: u8 = 2;
@@ -246,14 +246,35 @@ fn helper_for(path: &Path) -> Option<(Arc<Helper>, PathBuf)> {
     (helper.state.load(Ordering::Acquire) == READY).then_some((helper, there))
 }
 
+/// How long a picture waits for a helper still connecting, rather than be
+/// read through the mount: a photo read whole over the link takes longer
+/// than the helper takes to answer, and a host without jog fails as fast.
+const CONNECTING_WAIT: Duration = Duration::from_millis(1500);
+
+/// Waits, a little, for the host's helper to have connected or failed.
+fn settled(path: &Path) {
+    let Some((host, _)) = crate::remote::split(path) else { return };
+    let helper = {
+        let helpers = HELPERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        helpers.iter().find(|(known, _)| *known == host).map(|(_, helper)| helper.clone())
+    };
+    let Some(helper) = helper else { return };
+    let until = Instant::now() + CONNECTING_WAIT;
+    while helper.state.load(Ordering::Acquire) == PROBING && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// The picture of a file in a mount, made over there. `None` when it can't
 /// be, for now or for good: then it is read through the mount.
 pub fn make_there(path: &Path, spec: Spec, urgent: bool) -> Option<Made> {
     if !wanted(spec) {
         return None;
     }
+    settled(path);
     let (helper, there) = helper_for(path)?;
     let (width, height) = spec.target?;
+    let asked = Instant::now();
     let tag = helper.next.fetch_add(1, Ordering::Relaxed);
     let (sender, receiver) = mpsc::channel();
     helper.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(tag, sender);
@@ -279,7 +300,12 @@ pub fn make_there(path: &Path, spec: Spec, urgent: bool) -> Option<Made> {
         return None;
     }
     match receiver.recv_timeout(REPLY_WITHIN) {
-        Ok(Ok(made)) => Some(made),
+        Ok(Ok(made)) => {
+            if DEBUG.load(Ordering::Relaxed) {
+                eprintln!("jog: {:>7.1?} made on {} at {}×{}{}", asked.elapsed(), helper.host, made.frame.width, made.frame.height, if urgent { ", on screen" } else { "" });
+            }
+            Some(made)
+        }
         // A file it could not read is read here: what this side has, the
         // other may lack (a decoder, a tool), and the error said here is
         // the one meant.
@@ -410,20 +436,27 @@ pub fn serve_main() -> std::process::ExitCode {
         }
     }
     // The other side asks for as many at once as it has threads, which may
-    // be more than this has cores: what is asked for waits its turn, the
-    // picture on screen ahead of the rest.
+    // be more than this has cores. The picture on screen has the machine
+    // and the link to itself: one worker is kept for it, and the rest
+    // neither start nor send while it is being made.
     let queue = Arc::new(Queue::default());
-    let workers = std::thread::available_parallelism().map_or(4, usize::from);
-    for _ in 0..workers {
+    let cores = std::thread::available_parallelism().map_or(4, usize::from);
+    queue.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).others_at_most = cores.saturating_sub(1).max(1);
+    for _ in 0..cores {
         let (queue, output) = (queue.clone(), output.clone());
         std::thread::spawn(move || {
-            while let Some((tag, path, spec)) = queue.take() {
+            while let Some((tag, path, spec, urgent)) = queue.take() {
                 let made = std::panic::catch_unwind(|| make(&path, spec)).unwrap_or_else(|_| Err("the decoder crashed on it".into()));
                 let reply = encode_reply(tag, made, spec.thumbnail);
+                if !urgent {
+                    queue.wait_for_urgent();
+                }
                 let mut out = output.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 if out.write_all(&reply).and_then(|()| out.flush()).is_err() {
                     std::process::exit(0);
                 }
+                drop(out);
+                queue.done(urgent);
             }
         });
     }
@@ -438,28 +471,61 @@ pub fn serve_main() -> std::process::ExitCode {
 
 type Task = (u64, PathBuf, Spec);
 
+#[derive(Default)]
+struct Waiting {
+    urgent: std::collections::VecDeque<Task>,
+    others: std::collections::VecDeque<Task>,
+    /// Urgent ones being made or sent.
+    urgent_busy: usize,
+    /// The others being made, and how many may be at once.
+    others_busy: usize,
+    others_at_most: usize,
+}
+
 /// What is waiting to be made, the urgent first.
 #[derive(Default)]
 struct Queue {
-    waiting: Mutex<(std::collections::VecDeque<Task>, std::collections::VecDeque<Task>)>,
+    waiting: Mutex<Waiting>,
     wake: std::sync::Condvar,
 }
 
 impl Queue {
     fn put(&self, task: Task, urgent: bool) {
         let mut waiting = self.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if urgent { waiting.0.push_back(task) } else { waiting.1.push_back(task) }
-        self.wake.notify_one();
+        if urgent { waiting.urgent.push_back(task) } else { waiting.others.push_back(task) }
+        self.wake.notify_all();
     }
 
-    fn take(&self) -> Option<Task> {
+    /// The next to make, and whether it is urgent.
+    fn take(&self) -> Option<(u64, PathBuf, Spec, bool)> {
         let mut waiting = self.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         loop {
-            if let Some(task) = waiting.0.pop_front().or_else(|| waiting.1.pop_front()) {
-                return Some(task);
+            if let Some((tag, path, spec)) = waiting.urgent.pop_front() {
+                waiting.urgent_busy += 1;
+                return Some((tag, path, spec, true));
+            }
+            if waiting.urgent_busy == 0 && waiting.others_busy < waiting.others_at_most {
+                if let Some((tag, path, spec)) = waiting.others.pop_front() {
+                    waiting.others_busy += 1;
+                    return Some((tag, path, spec, false));
+                }
             }
             waiting = self.wake.wait(waiting).unwrap_or_else(|poisoned| poisoned.into_inner());
         }
+    }
+
+    /// Holds a reply back while an urgent one is being made or sent.
+    fn wait_for_urgent(&self) {
+        let mut waiting = self.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while waiting.urgent_busy > 0 || !waiting.urgent.is_empty() {
+            waiting = self.wake.wait(waiting).unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn done(&self, urgent: bool) {
+        let mut waiting = self.waiting.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if urgent { waiting.urgent_busy -= 1 } else { waiting.others_busy -= 1 }
+        self.wake.notify_all();
     }
 }
 

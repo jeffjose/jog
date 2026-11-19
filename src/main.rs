@@ -72,6 +72,10 @@ fn main() -> ExitCode {
     if std::env::args_os().nth(1).is_some_and(|arg| arg == serve::SERVE_ARG) {
         return serve::serve_main();
     }
+    // Left by a jog that quit, to unmount a host once it has gone unused.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == remote::LINGER_ARG) {
+        return remote::linger_main(&std::env::args().nth(2).unwrap_or_default());
+    }
     let mut options = match options::parse(std::env::args_os().skip(1)) {
         Ok(Parsed::Run(options)) => *options,
         Ok(Parsed::Help(topic)) => match options::help(topic.as_deref()) {

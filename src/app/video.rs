@@ -505,6 +505,13 @@ impl App {
         if self.spare.is_none() || self.grid.is_some() || self.overview.is_some() {
             return;
         }
+        // A picture from another machine has the link to itself until it
+        // is shown: a video opened meanwhile would take most of it. Asked
+        // again once the picture is in.
+        let on_view = &self.files[self.id()];
+        if crate::remote::split(on_view).is_some() && !files::is_video(on_view) && self.loader.fitted(self.id()).is_none() {
+            return;
+        }
         // A section looping: what is wanted next is its start, again and
         // again, before any other file.
         let playing = self.video.as_ref().map(|video| video.id);
