@@ -47,7 +47,7 @@ struct Run {
 fn run(dir: &Path, env: (&str, &str)) -> Run {
     let out = dir.join("out.ppm");
     let output = Command::new(env!("CARGO_BIN_EXE_jog"))
-        .args(["--no-animations", "--no-positions", "-g", "640x400"])
+        .args(["--no-animations", "--no-positions", "-w", "640x400"])
         .arg(dir.join("videos"))
         .env("JOG_CONFIG", "/dev/null")
         .env("JOG_STATE", dir.join("state"))
@@ -97,7 +97,7 @@ fn drawing_never_waits_on_the_player() {
     std::fs::create_dir_all(dir.join("state")).unwrap();
     std::fs::write(dir.join("state/panels"), "inspector=pinned\ninspect-tab=Tracks\n").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_jog"))
-        .args(["--no-animations", "--no-positions", "-g", "640x400"])
+        .args(["--no-animations", "--no-positions", "-w", "640x400"])
         .arg(dir.join("videos"))
         .env("JOG_CONFIG", "/dev/null")
         .env("JOG_STATE", dir.join("state"))
@@ -153,7 +153,7 @@ fn a_video_zooms_with_plus_and_minus_and_ctrl_with_the_wheel() {
     let width = |name: &str, keys: &str| {
         let out = dir.join(format!("{name}.ppm"));
         let output = Command::new(env!("CARGO_BIN_EXE_jog"))
-            .args(["--no-animations", "--no-positions", "-g", "640x400"])
+            .args(["--no-animations", "--no-positions", "-w", "640x400"])
             .arg(dir.join("videos"))
             .env("JOG_CONFIG", "/dev/null")
             .env("JOG_STATE", dir.join(format!("state-{name}")))
@@ -199,7 +199,7 @@ fn two_videos(name: &str) -> Option<PathBuf> {
 /// What jog says with `--debug` as it plays the keys on the two videos.
 fn said_playing(dir: &Path, keys: &str, wait_ms: u32) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_jog"))
-        .args(["--debug", "--no-animations", "--no-positions", "-g", "640x400"])
+        .args(["--debug", "--no-animations", "--no-positions", "-w", "640x400"])
         .arg(dir.join("videos"))
         .env("JOG_CONFIG", "/dev/null")
         .env("JOG_STATE", dir.join(format!("state-{}", keys.len())))
@@ -256,7 +256,7 @@ fn bar_video(name: &str) -> Option<PathBuf> {
 fn bar_shot(dir: &Path, file: &Path, keys: &str) -> RgbImage {
     let out = dir.join(format!("shot-{}.ppm", keys.len()));
     let output = Command::new(env!("CARGO_BIN_EXE_jog"))
-        .args(["--no-animations", "--no-positions", "-g", "640x400"])
+        .args(["--no-animations", "--no-positions", "-w", "640x400"])
         .arg(file)
         .current_dir(dir)
         .env("JOG_CONFIG", "/dev/null")
@@ -365,7 +365,7 @@ fn a_track_picked_from_the_bar_is_played_and_kept_for_next_time() {
     }
     let run = |keys: &str| {
         let output = Command::new(env!("CARGO_BIN_EXE_jog"))
-            .args(["--no-animations", "-g", "1600x1000"])
+            .args(["--no-animations", "-w", "1600x1000"])
             .arg(dir.join("videos"))
             .env("JOG_CONFIG", "/dev/null")
             .env("JOG_STATE", dir.join("state"))

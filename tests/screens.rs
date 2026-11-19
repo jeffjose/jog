@@ -65,7 +65,7 @@ fn draw(name: &str, keys: &str, wait_ms: u32) -> RgbImage {
     let dir = folder(name);
     let out = dir.join("out.ppm");
     let status = Command::new(env!("CARGO_BIN_EXE_jog"))
-        .args(["--no-animations", "--no-positions", "-g", &format!("{}x{}", SIZE.0, SIZE.1)])
+        .args(["--no-animations", "--no-positions", "-w", &format!("{}x{}", SIZE.0, SIZE.1)])
         .arg(dir.join("pictures"))
         .env("JOG_CONFIG", "/dev/null")
         .env("JOG_STATE", dir.join("state"))

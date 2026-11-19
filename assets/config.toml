@@ -30,7 +30,7 @@
 #   false   start in a window
 
 # A window of this size, in pixels, instead of fullscreen.
-# geometry = "1600x900"
+# window = "1600x900"
 #   "WIDTHxHEIGHT"
 
 # borderless = false

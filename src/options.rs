@@ -20,8 +20,8 @@ jog --help TOPIC shows one of:
 pub const TOPICS: &[(&str, &str, &str)] = &[
     ("window", "Window", "
   -F, --fullscreen           start fullscreen (the default)
-  -w, --windowed             start in a window (also --no-fullscreen)
-  -g, --geometry WxH         start in a window of this size
+  -w, --window [WxH]         start in a window, of this size if given (-w
+                             1600x900; also --no-fullscreen)
   -x, --borderless           no window decorations
   -B, --image-bg COLOR       background: black, white or RRGGBB
       --accent COLOR         color of selections and highlights: RRGGBB, or one of
@@ -170,7 +170,7 @@ where they were left unless --no-positions is given.
                              it, rather than over it (its pin does the same)
   -G, --wall                 start in the wall, as G: packed, no names, every
                              video playing
-      --grid                 start in the grid, as g, with nothing playing
+  -g, --grid                 start in the grid, as g, with nothing playing
       --no-grid-titles       leave the names out from under the grid's pictures
                              (config: grid-titles = false; i in the grid toggles)"),
     ("config", "Config file", "
@@ -592,8 +592,8 @@ fn short_flag(flag: char) -> Option<&'static str> {
     Some(match flag {
         'F' => "fullscreen",
         'G' => "wall",
-        'w' => "windowed",
-        'g' => "geometry",
+        'w' => "window",
+        'g' => "grid",
         'x' => "borderless",
         'B' => "image-bg",
         'Y' => "hide-pointer",
@@ -620,7 +620,7 @@ fn short_flag(flag: char) -> Option<&'static str> {
 
 fn takes_value(name: &str) -> bool {
     let valued = [
-        "geometry", "image-bg", "accent", "zoom", "sort", "start-at", "start", "filelist", "filter", "slideshow-delay", "on-last-slide",
+        "window-size", "image-bg", "accent", "zoom", "sort", "start-at", "start", "filelist", "filter", "slideshow-delay", "on-last-slide",
         "output-dir", "subtitle-font", "subtitle-size", "subtitle-style", "frame-dir", "frame-format", "hdr", "convert", "quality", "audio",
         "info-sort", "info-filter",
     ];
@@ -629,7 +629,7 @@ fn takes_value(name: &str) -> bool {
 
 fn is_switch(name: &str) -> bool {
     let switches = [
-        "fullscreen", "windowed", "no-fullscreen", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
+        "fullscreen", "window", "no-fullscreen", "borderless", "hide-pointer", "scale-down", "version-sort", "quiet",
         "auto-zoom", "no-auto-zoom", "keep-zoom-vp", "force-aliasing", "recursive", "reverse", "random",
         "newest", "oldest", "videos", "video", "images", "image", "pictures", "picture",
         "cycle-once", "autoplay", "no-autoplay", "grid", "wall", "grid-titles", "no-grid-titles", "draw-filename", "draw-info", "draw-exif", "draw-actions", "filmstrip", "print-marked", "benchmark",
@@ -746,7 +746,8 @@ fn parse_with(
             for (at, flag) in cluster.char_indices() {
                 let name = short_flag(flag).ok_or_else(|| format!("unknown option -{flag}"))?;
                 let rest = &cluster[at + flag.len_utf8()..];
-                if takes_value(name) && !rest.is_empty() {
+                // -w800x600: a window of that size.
+                if (takes_value(name) || (name == "window" && parse_geometry(rest).is_ok())) && !rest.is_empty() {
                     flags.push((name.into(), Some(rest.into())));
                     break;
                 }
@@ -755,6 +756,16 @@ fn parse_with(
         }
 
         for (name, attached) in flags {
+            // A size after it, if one is attached or comes next: jog -w
+            // 800x600 photos/; with none, a window as large as suits.
+            if name == "window" {
+                let size = attached.clone().or_else(|| args.next_if(|next| next.to_str().is_some_and(|text| parse_geometry(text).is_ok())).and_then(|next| next.into_string().ok()));
+                match size {
+                    Some(size) => apply(&mut options, &mut fullscreen, "window-size", &mut || Ok(size.clone()))?,
+                    None => apply(&mut options, &mut fullscreen, "window", &mut || Ok(String::new()))?,
+                }
+                continue;
+            }
             let mut value = || -> Result<String, String> {
                 let next = attached.clone().or_else(|| args.next().and_then(|a| a.into_string().ok()));
                 next.ok_or_else(|| format!("option --{name} needs a value"))
@@ -810,8 +821,8 @@ fn apply(
 ) -> Result<(), String> {
     match name {
         "fullscreen" => *fullscreen = Some(true),
-        "windowed" | "no-fullscreen" => *fullscreen = Some(false),
-        "geometry" => options.geometry = Some(parse_geometry(&value()?)?),
+        "window" | "no-fullscreen" => *fullscreen = Some(false),
+        "window-size" => options.geometry = Some(parse_geometry(&value()?)?),
         "borderless" => options.borderless = true,
         "image-bg" => options.background = parse_color(&value()?)?,
         "accent" => options.accent = parse_accent(&value()?)?,
@@ -1027,11 +1038,14 @@ fn apply_config(text: &str, options: &mut Options, fullscreen: &mut Option<bool>
                 "seen" => ("no-seen", None),
                 "subtitles" => ("no-subtitles", None),
                 "grid-titles" => ("no-grid-titles", None),
-                "fullscreen" => ("windowed", None),
+                "fullscreen" => ("window", None),
+                "window" => ("fullscreen", None),
                 "positions" => ("no-positions", None),
                 other if is_switch(other) => continue,
                 _ => (key.as_str(), None),
             },
+            // A window of a size: window = "1600x900".
+            toml::Value::String(text) if key == "window" => ("window-size", Some(text.clone())),
             toml::Value::String(text) => (key.as_str(), Some(text.clone())),
             toml::Value::Integer(number) => (key.as_str(), Some(number.to_string())),
             toml::Value::Float(number) => (key.as_str(), Some(number.to_string())),
@@ -1061,7 +1075,7 @@ pub fn expand_home(text: &str) -> PathBuf {
 fn parse_geometry(text: &str) -> Result<(u32, u32), String> {
     let size = text.split('+').next().unwrap_or(text);
     let parsed = size.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
-    parsed.filter(|&(w, h)| w > 0 && h > 0).ok_or_else(|| format!("invalid geometry '{text}', expected WxH"))
+    parsed.filter(|&(w, h)| w > 0 && h > 0).ok_or_else(|| format!("invalid window size '{text}', expected WxH"))
 }
 
 fn parse_color(text: &str) -> Result<u32, String> {
@@ -1247,7 +1261,18 @@ mod tests {
         assert!(parse_args(&[]).unwrap().autoplay);
         assert!(!parse_args(&["--no-autoplay"]).unwrap().autoplay);
         assert!(parse_args(&[]).unwrap().grid_titles);
-        // As the keys have them: G the wall, g the grid (-g is the window's size).
+        // -g the grid; -w a window, of a size when one comes with it.
+        let grid = parse_args(&["-g"]).unwrap();
+        assert!(grid.grid && grid.fullscreen);
+        let window = parse_args(&["-w", "photos"]).unwrap();
+        assert!(!window.fullscreen && window.geometry.is_none() && window.paths == [PathBuf::from("photos")]);
+        for args in [&["-w", "800x600"][..], &["-w800x600"], &["--window=800x600"], &["--window", "800x600"]] {
+            let sized = parse_args(args).unwrap();
+            assert!(!sized.fullscreen && sized.geometry == Some((800, 600)) && sized.paths.is_empty(), "{args:?}");
+        }
+        assert!(parse_args(&["--geometry", "800x600"]).is_err() && parse_args(&["--windowed"]).is_err());
+        assert_eq!(parse_config("window = \"1600x900\"", &[]).unwrap().geometry, Some((1600, 900)));
+        assert!(!parse_config("window = true", &[]).unwrap().fullscreen && parse_config("window = false", &[]).unwrap().fullscreen);
         let wall = parse_args(&["-G"]).unwrap();
         assert!(wall.wall && !wall.grid);
         assert!(parse_args(&["--wall"]).unwrap().wall);
@@ -1259,7 +1284,7 @@ mod tests {
 
     #[test]
     fn values_can_be_attached_or_separate() {
-        let options = parse_args(&["--zoom=fill", "--geometry", "800x600+10+10", "--action2", "echo %f", "-A", "rm %f"]).unwrap();
+        let options = parse_args(&["--zoom=fill", "-w", "800x600+10+10", "--action2", "echo %f", "-A", "rm %f"]).unwrap();
         assert_eq!(options.zoom, Zoom::Fill);
         assert_eq!(options.geometry, Some((800, 600)));
         assert!(!options.fullscreen, "a geometry implies a window");
