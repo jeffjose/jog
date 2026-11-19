@@ -26,6 +26,7 @@ mod scopes;
 mod screen;
 mod search;
 mod remote;
+mod serve;
 mod sessions;
 mod shellpaths;
 mod seen;
@@ -65,6 +66,11 @@ fn main() -> ExitCode {
     if std::env::args_os().nth(1).is_some_and(|arg| arg == mpv::PLAYER_ARG) {
         let args: Vec<String> = std::env::args().skip(2).collect();
         return mpv::player_main(&args);
+    }
+    // Started over ssh by a jog on another machine, to make thumbnails of
+    // the files here: that, and nothing else.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == serve::SERVE_ARG) {
+        return serve::serve_main();
     }
     let mut options = match options::parse(std::env::args_os().skip(1)) {
         Ok(Parsed::Run(options)) => *options,
@@ -153,6 +159,7 @@ fn main() -> ExitCode {
     // path the local one that is it. Unmounted on the way out, unless
     // another jog is in it too.
     let _release = remote::Release;
+    serve::set_debug(options.debug);
     let mut output = options.output_dir.take().into_iter().collect::<Vec<_>>();
     if let Err(error) = remote::open_all(&mut options.paths, &cwd).and_then(|()| remote::open_all(&mut output, &cwd)) {
         eprintln!("jog: {error}");

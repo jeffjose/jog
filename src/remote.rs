@@ -229,6 +229,9 @@ fn hold(host: &str) -> Result<PathBuf, String> {
     // Two locks: `mounting`, one jog at a time, while it is mounted or
     // unmounted; `in-use`, shared by every jog in it for as long as it
     // runs. One quitting unmounts only with `in-use` to itself.
+    // The thumbnail maker over there, connecting while this mounts; never
+    // waited on.
+    crate::serve::start(host, ssh_command());
     let _setting_up = lock_file(host, "mounting", libc::LOCK_EX)?;
     let in_use = lock_file(host, "in-use", libc::LOCK_SH)?;
     mount_if_down(host, &point)?;

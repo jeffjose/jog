@@ -87,6 +87,12 @@ impl Transform {
         self == Transform::default()
     }
 
+    /// One made of its quarter turns and whether it is mirrored, as
+    /// [`Transform::turns`] and [`Transform::mirrored`] give them.
+    pub fn from_parts(turns: u8, mirrored: bool) -> Transform {
+        Transform { turns: turns % 4, mirrored }
+    }
+
     pub fn swaps_axes(self) -> bool {
         self.turns % 2 == 1
     }
