@@ -332,9 +332,9 @@ pub fn print(paths: &[PathBuf], asked: &Asked) -> bool {
         match facts {
             Ok(facts) => {
                 cache.keep(path, &facts);
-                read.push((path.display().to_string(), facts));
+                read.push((crate::remote::shown(path), facts));
             }
-            Err(error) => eprintln!("{}: {error}", path.display()),
+            Err(error) => eprintln!("{}: {error}", crate::remote::shown(path)),
         }
     }
     cache.save();

@@ -31,8 +31,11 @@ pub fn rename_target(from: &Path, typed: &str) -> Option<PathBuf> {
     }
     // Joined on, a path from `/` replaces the folder rather than going on
     // from it.
+    // `skyfall:/srv` is that folder over there, for a host mounted already.
+    let cwd = std::env::current_dir().unwrap_or_default();
     let path = match typed {
         "" => PathBuf::from("/"),
+        _ if let Some(there) = crate::remote::mounted_path(typed, &cwd) => there,
         _ if typed == "~" || typed.starts_with("~/") => crate::options::expand_home(typed),
         _ => from.parent().unwrap_or(Path::new("")).join(typed),
     };

@@ -25,6 +25,7 @@ mod scenes;
 mod scopes;
 mod screen;
 mod search;
+mod remote;
 mod sessions;
 mod shellpaths;
 mod seen;
@@ -147,6 +148,17 @@ fn main() -> ExitCode {
             }
         }
     }
+
+    // `skyfall:.` is this folder on skyfall: the host mounted, and the
+    // path the local one that is it. Unmounted on the way out, unless
+    // another jog is in it too.
+    let _release = remote::Release;
+    let mut output = options.output_dir.take().into_iter().collect::<Vec<_>>();
+    if let Err(error) = remote::open_all(&mut options.paths, &cwd).and_then(|()| remote::open_all(&mut output, &cwd)) {
+        eprintln!("jog: {error}");
+        return ExitCode::FAILURE;
+    }
+    options.output_dir = output.pop();
 
     let started = std::time::Instant::now();
     // Shown as soon as the first files are found, the rest listed on other
@@ -303,6 +315,7 @@ fn main() -> ExitCode {
 /// handlers take down the libraries loaded: the GPU decoder's, with mpv's
 /// threads still in it, crashed one quit in four or so.
 pub fn quit_now() -> ! {
+    remote::release();
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let _ = std::io::Write::flush(&mut std::io::stderr());
     // SAFETY: ends the process; nothing after it runs.

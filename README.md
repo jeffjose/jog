@@ -27,7 +27,30 @@ jog PHOTOS/            # a folder, fullscreen
 jog -r PHOTOS/         # and its subfolders
 jog clip.mp4           # videos play through libmpv
 jog https://…          # a picture, a video, or a page with one (yt-dlp)
+jog skyfall:.          # this folder, on skyfall, over ssh
 ```
+
+## Over ssh
+
+`host:path` is a folder or file on another machine. The path is read as
+it would be here, then looked up there: standing in `/home/you/photos`,
+`skyfall:.` is `/home/you/photos` on skyfall, `skyfall:../videos` is
+`/home/you/videos`, `skyfall:~/x` is `x` in your home there and
+`skyfall:/srv` is `/srv`. That is not scp's reading, where `skyfall:x`
+starts at the remote home.
+
+`host` is whatever `ssh host` takes, so `~/.ssh/config` aliases, keys and
+jump hosts apply; `user@host:` names the login. `JOG_SSH='ssh -p 2222'`
+changes the ssh command.
+
+The host's `/` is mounted with sshfs (or rclone, without it) under
+`$XDG_RUNTIME_DIR/jog/mnt/HOST`, and from there it is a folder like any
+other: browsed, played, moved, renamed and converted in place. Each
+jog open on a host shares its mount, and the last one to quit unmounts
+it. Paths are shown and copied as `skyfall:/srv/a.jpg`, Move to… takes
+`skyfall:/srv/` for a host already open, and trash is the host's own.
+Every picture is read across the network to be shown, so a large folder
+in the grid or wall is as fast as the link.
 
 ## Speed
 

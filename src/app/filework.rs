@@ -54,6 +54,10 @@ fn run(work: Work, item: &Moved) -> Result<(), String> {
         Work::Copy | Work::Save => ops::copy_file(&item.from, &item.to),
         Work::MoveBack => ops::move_file(&item.to, &item.from),
         Work::Trash => {
+            // One in a mount goes to the trash over there.
+            if let Some(trashed) = crate::remote::trash(&item.from) {
+                return trashed;
+            }
             let status = std::process::Command::new("gio").arg("trash").arg("--").arg(&item.from).stderr(std::process::Stdio::null()).status();
             return match status {
                 Ok(status) if status.success() => Ok(()),
@@ -96,11 +100,11 @@ impl App {
         let FilesDone { work, done, failed } = job;
         for item in &done {
             match work {
-                Work::Move => println!("[move] {} -> {}", item.from.display(), item.to.display()),
-                Work::Copy | Work::Save => println!("[copy to] {} -> {}", item.from.display(), item.to.display()),
-                Work::Trash => println!("[trash] {}", item.from.display()),
-                Work::MoveBack => println!("[undo] {} -> {}", item.to.display(), item.from.display()),
-                Work::MoveAgain => println!("[redo] {} -> {}", item.from.display(), item.to.display()),
+                Work::Move => println!("[move] {} -> {}", crate::remote::shown(&item.from), crate::remote::shown(&item.to)),
+                Work::Copy | Work::Save => println!("[copy to] {} -> {}", crate::remote::shown(&item.from), crate::remote::shown(&item.to)),
+                Work::Trash => println!("[trash] {}", crate::remote::shown(&item.from)),
+                Work::MoveBack => println!("[undo] {} -> {}", crate::remote::shown(&item.to), crate::remote::shown(&item.from)),
+                Work::MoveAgain => println!("[redo] {} -> {}", crate::remote::shown(&item.from), crate::remote::shown(&item.to)),
             }
         }
         for (item, error) in &failed {

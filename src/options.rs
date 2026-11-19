@@ -12,6 +12,9 @@ Shows the files named, and the images and videos in any directories named.
 With no arguments, opens the current directory. To open a directory at a
 particular file: jog DIR --start-at FILE
 
+HOST:PATH opens PATH on another machine over ssh, read as it would be here:
+jog skyfall:. is this directory on skyfall; HOST:~/x starts at the home there.
+
 jog --help TOPIC shows one of:
   ";
 

@@ -222,7 +222,7 @@ impl App {
             _ => {
                 let path = &self.files[self.id()];
                 let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-                path.parent().map(|folder| folder.display().to_string()).unwrap_or_default()
+                path.parent().map(crate::remote::shown).unwrap_or_default()
             }
         };
         if words.is_empty() {

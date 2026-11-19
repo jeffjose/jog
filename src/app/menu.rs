@@ -126,7 +126,7 @@ impl App {
     /// Moves the target files to the trash, by gio. Like a delete, it is
     /// not undone here.
     pub(super) fn trash(&mut self, event_loop: &ActiveEventLoop) {
-        if self.dry(|app| app.targets().iter().map(|id| format!("move to trash: {}", app.files[*id].display())).collect(), "would move to trash") {
+        if self.dry(|app| app.targets().iter().map(|id| format!("move to trash: {}", crate::remote::shown(&app.files[*id]))).collect(), "would move to trash") {
             return;
         }
         // Out of the list at once; gio, a process a file, on another thread,

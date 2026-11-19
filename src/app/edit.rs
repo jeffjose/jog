@@ -13,9 +13,11 @@ impl App {
         // The whole path, to be used again; only the home folder said as ~.
         let full = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         let home = std::env::var_os("HOME").map(PathBuf::from);
+        // One in a mount by its host, `skyfall:/srv/x`, which the field
+        // takes back as long as the host is mounted.
         let shown = match home.as_deref().and_then(|home| full.strip_prefix(home).ok()) {
             Some(rest) => format!("~/{}", rest.display()),
-            None => full.display().to_string(),
+            None => crate::remote::shown(&full),
         };
         self.recent_folders.retain(|folder| *folder != shown);
         self.recent_folders.insert(0, shown);
@@ -102,7 +104,7 @@ impl App {
             .targets()
             .into_iter()
             .map(|id| match std::path::absolute(&self.files[id]) {
-                Ok(path) if full_path => path.to_string_lossy().into_owned(),
+                Ok(path) if full_path => crate::remote::shown(&path),
                 _ => self.name_of(id),
             })
             .collect();
@@ -136,7 +138,7 @@ impl App {
     pub(super) fn send_to(&mut self, dir: PathBuf, moving: bool, event_loop: &ActiveEventLoop) {
         let how = if moving { "move" } else { "copy" };
         let said = |app: &Self| app.targets().iter().map(|id| format!("{how}: {} -> {}", app.files[*id].display(), dir.display())).collect();
-        if self.dry(said, &format!("would {how} {} to {}", self.targets().len(), dir.display())) {
+        if self.dry(said, &format!("would {how} {} to {}", self.targets().len(), crate::remote::shown(&dir))) {
             return;
         }
         if let Err(error) = std::fs::create_dir_all(&dir) {
@@ -263,7 +265,7 @@ impl App {
 
     /// Deletes files from disk. This cannot be undone.
     pub(super) fn delete(&mut self, ids: &[usize], event_loop: &ActiveEventLoop) {
-        if self.dry(|app| ids.iter().map(|id| format!("delete: {}", app.files[*id].display())).collect(), &format!("would delete {}", ids.len())) {
+        if self.dry(|app| ids.iter().map(|id| format!("delete: {}", crate::remote::shown(&app.files[*id]))).collect(), &format!("would delete {}", ids.len())) {
             return;
         }
         let (mut removed, mut failed) = (Vec::new(), 0);
@@ -686,13 +688,19 @@ impl App {
                     if !typed.is_empty() {
                         self.last_folder = Some(typed.clone());
                         // `@name` is the folder of that workspace.
+                        // `skyfall:/srv` is that folder over there, on a
+                        // host open already: mounting one would hold the
+                        // window up.
+                        let cwd = std::env::current_dir().unwrap_or_default();
                         let folder = match typed.strip_prefix('@') {
                             Some(name) => self.spaces.iter().find(|space| space.name == name).and_then(|space| space.paths.first().cloned()),
+                            None if crate::remote::is_remote(&typed) => crate::remote::mounted_path(&typed, &cwd),
                             None => Some(crate::options::expand_home(&typed)),
                         };
                         match folder {
                             Some(folder) => self.send_to(folder, moving, event_loop),
-                            None => self.toast(format!("No workspace @{}", &typed[1..])),
+                            None if typed.starts_with('@') => self.toast(format!("No workspace @{}", &typed[1..])),
+                            None => self.toast(format!("{} not open", typed.split(':').next().unwrap_or_default())),
                         }
                     }
                 }

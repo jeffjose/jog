@@ -2266,7 +2266,7 @@ impl App {
     pub fn print_marked(&self) {
         if self.options.print_marked {
             for id in self.list.iter().filter(|id| self.marks.contains(id)) {
-                println!("{}", self.files[*id].display());
+                println!("{}", crate::remote::shown(&self.files[*id]));
             }
         }
     }
@@ -4086,7 +4086,7 @@ fn short_dir(path: &Path) -> String {
     let shown = match home.as_ref().and_then(|home| path.strip_prefix(home).ok()) {
         Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
         Some(rest) => format!("~/{}", rest.display()),
-        None => path.display().to_string(),
+        None => crate::remote::shown(path),
     };
     let parts: Vec<&str> = shown.split('/').collect();
     if shown.chars().count() <= 36 || parts.len() <= 4 {
