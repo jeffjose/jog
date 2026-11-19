@@ -256,6 +256,12 @@ impl App {
             if !self.on_wall_bar(x, y) {
                 self.point_cursor();
             }
+            // A speaker on a wall's tile lights up under it.
+            let speaker = self.wall_speaker_at(x, y);
+            if speaker != self.wall_speaker_over {
+                self.wall_speaker_over = speaker;
+                self.redraw();
+            }
             // The buttons light up under the pointer.
             let inside = |b: &Button| (b.x..b.x + b.width).contains(&(x as i32)) && (b.y..b.y + b.height).contains(&(y as i32));
             let arrows = self.grid_arrows();
@@ -593,6 +599,11 @@ impl App {
                     }
                     if self.on_wall_bar(x, y) {
                         return;
+                    }
+                    // A speaker on a tile holds its sound, and opens nothing.
+                    if let Some(id) = self.wall_speaker_at(x, y) {
+                        self.last_click = None;
+                        return self.wall_pin(id);
                     }
                     let arrow = self.grid_arrows().into_iter().find(|(place, _)| hit(&place)).map(|(_, forward)| forward);
                     if self.grid_close().as_ref().is_some_and(|place| hit(&place)) {

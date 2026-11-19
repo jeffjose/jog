@@ -79,11 +79,17 @@ impl App {
         self.redraw();
     }
 
-    /// Draws the bar, when it is up, and keeps where its buttons are.
+    /// Draws the bar, when it is up, and keeps where its buttons are. As
+    /// the seek bar does, it rises from the bottom edge and sinks back into
+    /// it, the pictures behind it darkening towards the edge as it comes.
     pub(super) fn draw_wall_bar(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
         self.wall_bar.clear();
         self.wall_bar_place = [0; 4];
-        let Some(wall) = self.wall().filter(|_| self.wall_bar_up) else { return };
+        let level = self.glide(&self.wall_bar_rise, if self.wall_bar_up && self.wall().is_some() { 1.0 } else { 0.0 }, EASE);
+        if level < 0.01 {
+            return;
+        }
+        let Some(wall) = self.wall() else { return };
         let unit = px as i32;
         let pad = unit / 2;
         let line = Text::line_height(px);
@@ -138,7 +144,12 @@ impl App {
         let inner: i32 = parts.iter().map(|part| width_of(text, part)).sum();
         let width = (inner + unit * 2).min(canvas.width - unit * 2);
         let x0 = (canvas.width - width) / 2;
-        let y0 = canvas.height - height - unit;
+        let rest = canvas.height - height - unit;
+        // From just under the edge up to where it rests.
+        let y0 = rest + ((1.0 - level) * f64::from(height + unit * 2)) as i32;
+        // The shade comes in with it, never so dark as to hide the tiles.
+        let shade_top = y0 - unit * 5;
+        canvas.fade_down(0, shade_top, canvas.width, canvas.height - shade_top, 256 - (186.0 * level) as u32);
         let radius = height / 2;
         canvas.soft_shadow(x0, y0, width, height, radius, unit);
         canvas.round_fill(x0, y0, width, height, radius, MENU_COLOR, 236);

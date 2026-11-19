@@ -1089,6 +1089,8 @@ pub struct App {
     /// filmstrip.
     toast_slide: Cell<Glide>,
     bar_rise: Cell<Glide>,
+    /// The wall's bar rising likewise.
+    wall_bar_rise: Cell<Glide>,
     scenes_rise: Cell<Glide>,
     strip_slide: Cell<Glide>,
     /// The grid cursor's ring on its way to another cell, and whether it
@@ -1565,6 +1567,10 @@ pub struct App {
     /// Where the wall last drew the name of the tile under the pointer:
     /// a click there copies it.
     wall_name: Option<[i32; 4]>,
+    /// Where the wall last drew the speakers of its videos, and which one
+    /// the pointer is over: a click holds that one's sound.
+    wall_speakers: Vec<([i32; 4], usize)>,
+    wall_speaker_over: Option<usize>,
     /// While the window is being resized: the size the wall is laid out
     /// for, scaled to the window meanwhile, and when the last resize came.
     wall_frozen: Option<((u32, u32), Instant)>,
@@ -1953,6 +1959,7 @@ impl App {
             grid_due: None,
             toast_slide: Cell::new(Glide::at(1.0)),
             bar_rise: Cell::new(Glide::at(0.0)),
+            wall_bar_rise: Cell::new(Glide::at(0.0)),
             scenes_rise: Cell::new(Glide::at(0.0)),
             strip_slide: Cell::new(Glide::at(start as f64)),
             ring: std::array::from_fn(|_| Cell::new(Glide::at(0.0))),
@@ -2200,6 +2207,8 @@ impl App {
             mouse: (0.0, 0.0),
             last_click: None,
             wall_name: None,
+            wall_speakers: Vec::new(),
+            wall_speaker_over: None,
             wall_frozen: None,
             wall_copy: Vec::new(),
             wall_kept: Vec::new(),

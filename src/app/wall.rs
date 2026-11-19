@@ -36,6 +36,9 @@ pub(super) struct Wall {
     pub(super) next_at: Option<Instant>,
     /// How long a page stays when they do.
     pub(super) hold: Duration,
+    /// The video whose sound is held on, whatever is under the pointer:
+    /// one at most, let go when it leaves the page.
+    pub(super) pinned: Option<usize>,
     turn: Option<Turn>,
     /// One player for each video on the page, up to what the cores allow.
     players: Vec<TilePlayer>,
@@ -88,7 +91,7 @@ struct TilePlayer {
 
 impl Wall {
     pub(super) fn at(start: usize) -> Wall {
-        Wall { start, back: Vec::new(), columns: kept_columns(), auto: false, next_at: None, hold: Duration::from_secs(kept_hold()), turn: None, players: Vec::new(), heard: None, told: Instant::now(), stamps: 0 }
+        Wall { start, back: Vec::new(), columns: kept_columns(), auto: false, next_at: None, hold: Duration::from_secs(kept_hold()), turn: None, players: Vec::new(), heard: None, pinned: None, told: Instant::now(), stamps: 0 }
     }
 }
 
@@ -492,18 +495,32 @@ impl App {
         let cursor = self.grid.as_ref().map(|grid| grid.cursor);
         let videos: Vec<&Tile> = tiles.iter().filter(|tile| files::is_video(&self.files[self.list[tile.pos]]) && !self.not_playable(self.list[tile.pos])).collect();
         let mut wanted: Vec<(usize, (u32, u32))> = videos.iter().take(most).map(|tile| (self.list[tile.pos], self.wall_bounds(tile))).collect();
-        // The one under the pointer plays, whatever else has to give way.
-        if let Some(tile) = videos.iter().skip(most).find(|tile| Some(tile.pos) == cursor) {
-            wanted.pop();
+        // The one whose sound is held, and the one under the pointer, play,
+        // whatever else has to give way.
+        let held = self.wall().and_then(|wall| wall.pinned);
+        let pinned = held.filter(|id| videos.iter().any(|tile| self.list[tile.pos] == *id));
+        let must = |id: usize| Some(id) == pinned || cursor.is_some_and(|cursor| self.list.get(cursor) == Some(&id));
+        for tile in videos.iter().skip(most).filter(|tile| must(self.list[tile.pos])) {
+            // The last that is neither gives way.
+            if let Some(at) = wanted.iter().rposition(|(id, _)| !must(*id)) {
+                wanted.remove(at);
+            }
             wanted.push((self.list[tile.pos], self.wall_bounds(tile)));
         }
-        let hovered = self.wall_tile_at(self.mouse.0, self.mouse.1).filter(|_| self.pointer_inside()).map(|pos| self.list[pos]);
-        // Off-screen runs and benchmarks are silent, as the main player is.
-        let heard_id = hovered.filter(|_| !self.muted && !*SILENT && self.bench.is_none());
+        let hovered = self.wall_tile_at(self.mouse.0, self.mouse.1).filter(|_| self.pointer_inside() && !self.wall_bar_up).map(|pos| self.list[pos]);
+        // A tile with its sound held is heard, wherever the pointer is;
+        // otherwise the one under the pointer. Off-screen runs and
+        // benchmarks are silent, as the main player is.
+        let heard_id = pinned.or(hovered).filter(|_| !self.muted && !*SILENT && self.bench.is_none());
+        // Gone from the page, it lets go.
+        let unpin = held.is_some() && pinned.is_none();
         let proxy = self.proxy.clone();
         let debug = self.options.debug;
         let paths: Vec<PathBuf> = wanted.iter().map(|(id, _)| self.files[*id].clone()).collect();
         let Some(wall) = self.wall_mut() else { return };
+        if unpin {
+            wall.pinned = None;
+        }
         while wall.players.len() < wanted.len() {
             let proxy = proxy.clone();
             wall.players.push(TilePlayer { trailers: Trailers::new(true, move |note| proxy.send_event(Event::Trailer(note)).is_ok()), id: None, frame: None, frames: 0, bounds: (0, 0), stamp: 0 });
@@ -745,12 +762,67 @@ impl App {
         }
     }
 
+    /// Holds the sound on a video of the wall, so that it is heard
+    /// wherever the pointer goes; on the one held already, lets it go.
+    pub(super) fn wall_pin(&mut self, id: usize) {
+        let Some(wall) = self.wall_mut() else { return };
+        wall.pinned = if wall.pinned == Some(id) { None } else { Some(id) };
+        // Asking to hear one is asking for sound.
+        if wall.pinned.is_some() && self.muted {
+            self.muted = false;
+            if let Some(player) = &self.player {
+                player.set("mute", "no");
+            }
+        }
+        self.redraw();
+    }
+
+    /// The video whose speaker is at a window position.
+    pub(super) fn wall_speaker_at(&self, x: f64, y: f64) -> Option<usize> {
+        let inside = |[bx, by, bw, bh]: [i32; 4]| (bx..bx + bw).contains(&(x as i32)) && (by..by + bh).contains(&(y as i32));
+        self.wall_speakers.iter().find(|(place, _)| inside(*place)).map(|(_, id)| *id)
+    }
+
+    /// The speaker at the top right of a video's tile: lit on the one whose
+    /// sound is held, plain on one heard for being under the pointer, and
+    /// crossed on one under it while another is held. A click holds it.
+    fn draw_wall_speaker(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32, [x, y, w, _]: [i32; 4], id: usize) {
+        let line = Text::line_height(px);
+        let pad = px as i32 / 2;
+        let side = line + pad;
+        let (left, top) = (x + w - side - pad, y + pad);
+        let place = [left, top, side, side];
+        let held = self.wall().is_some_and(|wall| wall.pinned == Some(id));
+        let (mx, my) = (self.mouse.0 as i32, self.mouse.1 as i32);
+        let over = !self.wall_bar_up && (left..left + side).contains(&mx) && (top..top + side).contains(&my);
+        let heard = self.wall_heard(id) || (held && !self.muted);
+        let icon = if heard || held { commands::icons::VOLUME_2 } else { commands::icons::VOLUME_X };
+        let (fill, amount, color) = match () {
+            _ if held || over => (accent(), 256, on_accent()),
+            _ => (0x000000, 170, if heard { TEXT_COLOR } else { DIM_TEXT_COLOR }),
+        };
+        canvas.round_fill(left, top, side, side, side / 2, fill, amount);
+        let icon_w = text.width(icon, px);
+        text.draw(canvas, left + (side - icon_w) / 2, top + (side - line) / 2, px, color, icon);
+        self.wall_speakers.push((place, id));
+    }
+
     /// The words on the wall: the name of the file under the pointer, at
-    /// the foot of its tile, and a speaker on it while it is heard.
+    /// the foot of its tile, and on a video a speaker to hold its sound.
     pub(super) fn draw_wall_labels(&mut self, canvas: &mut Canvas, text: &mut Text, px: u32) {
         self.wall_name = None;
+        self.wall_speakers.clear();
+        if self.wall().is_some_and(|wall| wall.turn.is_some()) {
+            return;
+        }
+        // The speaker of the one held stays up, wherever the pointer is.
+        let held = self.wall().and_then(|wall| wall.pinned);
+        let held_place = held.and_then(|id| self.wall_tiles(self.window_size()).into_iter().find(|tile| self.list[tile.pos] == id).map(|tile| (tile.place, id)));
+        if let Some((place, id)) = held_place {
+            self.draw_wall_speaker(canvas, text, px, place, id);
+        }
         // With the bar up, no tile is picked out.
-        if self.wall_bar_up || self.wall().is_some_and(|wall| wall.turn.is_some()) || !self.pointer_inside() {
+        if self.wall_bar_up || !self.pointer_inside() {
             return;
         }
         let Some(pos) = self.wall_tile_at(self.mouse.0, self.mouse.1) else { return };
@@ -773,13 +845,9 @@ impl App {
         }
         text.draw(canvas, left, top, px, TEXT_COLOR, &name);
         self.wall_name = Some(place);
-        if self.wall_heard(id) {
-            let icon = commands::icons::VOLUME_2;
-            let side = line + pad;
-            let (left, top) = (x + w - side - pad, y + pad);
-            canvas.round_fill(left, top, side, side, side / 2, 0x000000, 170);
-            let icon_w = text.width(icon, px);
-            text.draw(canvas, left + (side - icon_w) / 2, top + (side - line) / 2, px, TEXT_COLOR, icon);
+        let video = files::is_video(&self.files[id]) && !self.not_playable(id);
+        if video && held != Some(id) {
+            self.draw_wall_speaker(canvas, text, px, [x, y, w, h], id);
         }
     }
 }

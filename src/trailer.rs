@@ -35,6 +35,9 @@ enum Message {
     /// New bounds for the frames of the video playing: its tile changed size.
     Bounds((u32, u32)),
     Player(Signal),
+    /// Its owner is gone: the player goes too. The thread holds a sender
+    /// of its own for the player's signals, so the channel never closes.
+    Quit,
 }
 
 /// The video being played and where its trailer has got to.
@@ -110,6 +113,14 @@ pub struct Trailers {
     latest: Arc<Mutex<Option<(usize, Frame)>>>,
 }
 
+/// Dropped, its player quits: a wall left for the grid or for a video
+/// played on otherwise, sound and all, behind the one now on view.
+impl Drop for Trailers {
+    fn drop(&mut self) {
+        let _ = self.messages.send(Message::Quit);
+    }
+}
+
 impl Trailers {
     /// `notify` is called from the trailer thread; it returns whether
     /// anyone is still listening. `fine` decodes at full quality, as the
@@ -143,7 +154,7 @@ impl Trailers {
                     None => inbox.recv().map_err(|_| RecvTimeoutError::Disconnected),
                 };
                 match message {
-                    Err(RecvTimeoutError::Disconnected) => return,
+                    Err(RecvTimeoutError::Disconnected) | Ok(Message::Quit) => return,
                     Err(RecvTimeoutError::Timeout) => {}
                     Ok(Message::Play(..) | Message::Stop) => {
                         // Only the last of a run of requests matters: the
